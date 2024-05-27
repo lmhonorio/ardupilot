@@ -204,7 +204,6 @@ local function update()
     else
 
       vh_yaw = funcs:map_to_360(funcs:To_degrees(ahrs:get_yaw()))
-      vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
       steering_error = funcs:map_error(desired_yaw - vh_yaw)
       mysteering = steering_pid:compute(0, steering_error)
       new_control_allocation(throttle, mysteering)
