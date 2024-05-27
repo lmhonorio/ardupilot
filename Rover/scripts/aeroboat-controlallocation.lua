@@ -20,7 +20,7 @@ SYSTEM_STARTED = Parameter()
 local desired_yaw = -1.0
 
 
-local steering_pid = PID:new(0.25, 0.001, 0.01, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
+local steering_pid = PID:new(0.25, 0.001, 0.1, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
 
 
 -- Severity for logging in GCS
@@ -177,7 +177,7 @@ local function update()
     local k1 = param:get('SCR_USER4')
 
     desired_yaw = funcs:map_to_360(desired_yaw + k1*addsteering)
-    local vh_yaw = funcs:map_to_360(To_degrees(ahrs:get_yaw()))
+    local vh_yaw = funcs:map_to_360(funcs:To_degrees(ahrs:get_yaw()))
     local steering_error = funcs:map_error(desired_yaw - vh_yaw)
 
     steering_pid.P = param:get('SCR_USER3')
@@ -212,7 +212,7 @@ local function update()
 
     else
 
-      vh_yaw = funcs:map_to_360(To_degrees(ahrs:get_yaw()))
+      vh_yaw = funcs:map_to_360(funcs:To_degrees(ahrs:get_yaw()))
       steering_error = funcs:map_error(desired_yaw - vh_yaw)
       mysteering = steering_pid:compute(0,steering_error)
       new_control_allocation(throttle, mysteering)
