@@ -81,7 +81,7 @@ local current_wpx, current_wpy = 0,0
 
 function not_armed()
       --vehicle:set_mode(15)
-      gcs:send_text(4, string.format("ROVER - desarmado "))
+      -- gcs:send_text(4, string.format("ROVER - desarmado "))
 
       local PWM0_TRIM_VALUE = param:get('SERVO1_TRIM')
       local PWM1_TRIM_VALUE = param:get('SERVO2_TRIM')
@@ -174,7 +174,7 @@ function Update_mission_setpoints()
 
   if mission_index ~= last_mission_index then
 
-    gcs:send_text(4, "LUA: New Mission Item") -- we spotted a change
+    -- gcs:send_text(4, "LUA: New Mission Item") -- we spotted a change
 
     last_wpx = current_wpx
     last_wpy = current_wpy
@@ -191,10 +191,10 @@ function Update_mission_setpoints()
   local myx = mylocation:lat()/1e7
   local myy = mylocation:lng()/1e7
 
-  local vh_yaw = fun:map_to_360(fun:To_degrees(ahrs:get_yaw()))
+  local vh_yaw = fun:map_to_360(fun:to_degrees(ahrs:get_yaw()))
 
 
-  local dist, ang = fun:Point_to_line_distance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
+  local dist, ang = fun:point_to_line_distance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
 
   return dist, ang
   
@@ -224,7 +224,7 @@ function update() -- this is the loop which periodically runs
   local tipoveiculo = param:get('SCR_USER5')
 
   if not (tipoveiculo==2) then
-    gcs:send_text(4, string.format("nao e ROVER saindo do lua"))
+    -- gcs:send_text(4, string.format("nao e ROVER saindo do lua"))
     return
   end
 

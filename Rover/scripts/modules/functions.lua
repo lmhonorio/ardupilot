@@ -6,7 +6,7 @@ end
 local funcs = {}
 funcs.__index = funcs
 
-function funcs:MapToUnid(value)
+function funcs:map_to_unit(value)
     if value < -1 then
         return  -1
     elseif value > 1 then
@@ -62,73 +62,73 @@ end
 
 
   
-  function funcs:Vector_magnitude(x, y)
+  function funcs:vector_magnitude(x, y)
     return math.sqrt(x^2 + y^2)
   end
   
-  function funcs:Dot_product(u_x, u_y, v_x, v_y)
+  function funcs:dot_product(u_x, u_y, v_x, v_y)
     return u_x * v_x + u_y * v_y
   end
   
-  function funcs:Calculate_angle(u_x, u_y, v_x, v_y)
-    local dot = funcs:Dot_product(u_x, u_y, v_x, v_y)
-    local mag_u = funcs:Vector_magnitude(u_x, u_y)
-    local mag_v = funcs:Vector_magnitude(v_x, v_y)
+  function funcs:calculate_angle(u_x, u_y, v_x, v_y)
+    local dot = funcs:dot_product(u_x, u_y, v_x, v_y)
+    local mag_u = funcs:vector_magnitude(u_x, u_y)
+    local mag_v = funcs:vector_magnitude(v_x, v_y)
     local cos_theta = dot / (mag_u * mag_v)
     local angle = math.acos(cos_theta)  -- Resultado em radianos
     return angle
   end
   
-  function  funcs:Calculate_correction_angle(p0x, p0y, p1x, p1y, rx, ry)
+  function  funcs:calculate_correction_angle(p0x, p0y, p1x, p1y, rx, ry)
     local dxwp = p1x - p0x
     local dywp = p1y - p0y
     local dx_r_wp = p1x - rx
     local dy_r_wp = p1y - ry
   
-    local angle = funcs:Calculate_angle(dxwp, dywp, dx_r_wp, dy_r_wp)
+    local angle = funcs:calculate_angle(dxwp, dywp, dx_r_wp, dy_r_wp)
   
     return angle
   end
   
   
-  function funcs:To_cartesian(r, theta)
+  function funcs:to_cartesian(r, theta)
     local x = r * math.cos(theta)
     local y = r * math.sin(theta)
     return x, y
   end
   
-  function funcs:To_polar(x, y)
+  function funcs:to_polar(x, y)
     local r = math.sqrt(x^2 + y^2)
     local theta = math.atan(y, x)
     return r, theta
   end
   
-  function funcs:Add_polars(r1, theta1, r2, theta2)
-    local x1, y1 = funcs:To_cartesian(r1, theta1)
-    local x2, y2 = funcs:To_cartesian(r2, theta2)
+  function funcs:add_polars(r1, theta1, r2, theta2)
+    local x1, y1 = funcs:to_cartesian(r1, theta1)
+    local x2, y2 = funcs:to_cartesian(r2, theta2)
   
     local x_total = x1 + x2
     local y_total = y1 + y2
   
-    return funcs:To_polar(x_total, y_total)
+    return funcs:to_polar(x_total, y_total)
   end
   
   -- Calcula a orientação de um vetor dado
-  function Calculate_bearing(lat1, lon1, lat2, lon2)
-    local radLat1, radLon1 = funcs:To_radians(lat1), funcs:To_radians(lon1)
-    local radLat2, radLon2 = funcs:To_radians(lat2), funcs:To_radians(lon2)
+  function funcs:calculate_bearing(lat1, lon1, lat2, lon2)
+    local radLat1, radLon1 = funcs:to_radians(lat1), funcs:to_radians(lon1)
+    local radLat2, radLon2 = funcs:to_radians(lat2), funcs:to_radians(lon2)
     local dLon = radLon2 - radLon1
     local y = math.sin(dLon) * math.cos(radLat2)
     local x = math.cos(radLat1) * math.sin(radLat2) - math.sin(radLat1) * math.cos(radLat2) * math.cos(dLon)
     local bearing = math.atan(y, x)
-    return (funcs:To_degrees(bearing) + 360) % 360  -- Normaliza o resultado para (0, 360)
+    return (funcs:to_degrees(bearing) + 360) % 360  -- Normaliza o resultado para (0, 360)
   end
   
   -- Função Haversine para calcular distância entre dois pontos geográficos
-  function funcs:Haversine_distance(lat1, lon1, lat2, lon2)
+  function funcs:haversine_distance(lat1, lon1, lat2, lon2)
     local R = 6371000 -- Raio da Terra em metros
-    local radLat1, radLon1 = funcs:To_radians(lat1), funcs:To_radians(lon1)
-    local radLat2, radLon2 = funcs:To_radians(lat2), funcs:To_radians(lon2)
+    local radLat1, radLon1 = funcs:to_radians(lat1), funcs:to_radians(lon1)
+    local radLat2, radLon2 = funcs:to_radians(lat2), funcs:to_radians(lon2)
     local deltaLat = radLat2 - radLat1
     local deltaLon = radLon2 - radLon1
   
@@ -142,7 +142,7 @@ end
   end
   
   
-  function funcs:Point_to_line_distance(px, py, psi, x0, y0, x1, y1)
+  function funcs:point_to_line_distance(px, py, psi, x0, y0, x1, y1)
     local dx, dy = x1 - x0, y1 - y0
     local length_squared = dx^2 + dy^2
     local t = ((px - x0) * dx + (py - y0) * dy) / length_squared
@@ -158,19 +158,19 @@ end
           nearest_y = y0 + t * dy
       end
   
-    local distancia = funcs:Haversine_distance(px, py, nearest_x, nearest_y)
-    local bearing_to_wp = funcs:Calculate_bearing(px, py, x1, y1)
+    local distancia = funcs:haversine_distance(px, py, nearest_x, nearest_y)
+    local bearing_to_wp = funcs:calculate_bearing(px, py, x1, y1)
     --local angle_difference = (bearing_to_wp - psi + 360) % 360
     local angle_difference = (bearing_to_wp - psi/2 + 360) % 360
   
-    local orientacao = funcs:Point_relative_to_vector(x0,y0,x1,y1,px,py)
+    local orientacao = funcs:point_relative_to_vector(x0,y0,x1,y1,px,py)
   
     return distancia, orientacao*angle_difference
   
   
   end
 
-  function funcs:Point_relative_to_vector(p0x, p0y, p1x, p1y, rx, ry)
+  function funcs:point_relative_to_vector(p0x, p0y, p1x, p1y, rx, ry)
     -- Calcula as componentes do vetor AB
     local vx = p1x - p0x
     local vy = p1y - p0y
@@ -187,10 +187,5 @@ end
         return 0  -- O ponto está na linha do vetor
     end
   end
-  
-
-
-
-
 
 return funcs

@@ -170,7 +170,7 @@ local function update()
     local k1 = param:get('SCR_USER4')
 
     desired_yaw = funcs:map_to_360(desired_yaw + k1*addsteering)
-    local vh_yaw = funcs:map_to_360(funcs:To_degrees(ahrs:get_yaw()))
+    local vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
     desired_yaw = funcs:map_to_360(desired_yaw + k1 * addsteering)
     local vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
     local steering_error = funcs:map_error(desired_yaw - vh_yaw)
@@ -203,7 +203,7 @@ local function update()
       new_control_allocation(throttle, steering)
     else
 
-      vh_yaw = funcs:map_to_360(funcs:To_degrees(ahrs:get_yaw()))
+      vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
       steering_error = funcs:map_error(desired_yaw - vh_yaw)
       mysteering = steering_pid:compute(0, steering_error)
       new_control_allocation(throttle, mysteering)
