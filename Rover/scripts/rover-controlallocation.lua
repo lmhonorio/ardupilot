@@ -128,7 +128,7 @@ function Update_simple_setpoints()
   --steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
   throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE))
 
-  local mysteering = steering_pid:compute(0,-steering_error)
+  local mysteering = steering_pid:compute(0,-steering_error, 0.2)
 
   return mysteering, throttle
 
@@ -204,11 +204,11 @@ end
 
 function update_follow_line()
 
-  local distance,newsteering_error = Update_mission_setpoints()
+  local distance, newsteering_error = Update_mission_setpoints()
   --steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
   throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE))
 
-  local mysteering = newsteering_pid:compute(0,newsteering_error)
+  local mysteering = newsteering_pid:compute(0, newsteering_error, 0.2)
 
   return mysteering, throttle
 
