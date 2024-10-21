@@ -191,8 +191,6 @@ local function update()
       desired_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
     end
 
-    local auto_steering, vh_yaw, steering_error = 0, 0, 0
-
     TRIM3 = param:get('RC3_TRIM')
     rc3_pwm = tonumber(rc:get_pwm(3)) or TRIM3 or MID_TRIM
     throttle = (TRIM3 - rc3_pwm) / RADIO_CHANNEL_BANDWIDTH
@@ -201,14 +199,14 @@ local function update()
     rc1_pwm = tonumber(rc:get_pwm(1)) or TRIM1 or MID_TRIM
     steering = (rc1_pwm - TRIM1) / RADIO_CHANNEL_BANDWIDTH
 
-    if math.abs(steering) > 0.05 then
+    if math.abs(steering) > 0.10 or math.abs(throttle) > 0.10 then
       desired_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
       new_control_allocation(throttle, steering)
     else
-      vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
-      steering_error = funcs:map_error(desired_yaw - vh_yaw)
-      auto_steering = steering_pid:compute(0, steering_error, 0.2)
-      new_control_allocation(throttle, auto_steering)
+      -- Get the control outputs from the vehicle and pass them directly to control allocation
+      steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+      throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE)) or 0
+      new_control_allocation(throttle, steering)
     end
 
     return update, 200
