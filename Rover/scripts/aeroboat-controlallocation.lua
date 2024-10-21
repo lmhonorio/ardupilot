@@ -22,8 +22,8 @@ RADIO_CHANNEL_BANDWIDTH = 450
 SYSTEM_STARTED = Parameter()
 local desired_yaw = -1.0
 
--- local steering_pid = PID:new(0.25, 0.001, 0.1, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
-local steering_pid = PID:new(0.25, 0.001, 0.01, 0.8, -0.8, 0.8, -0.8) -- Configure os ganhos como necessários
+local steering_pid = PID:new(0.25, 0.001, 0.1, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
+-- local steering_pid = PID:new(0.25, 0.001, 0.01, 0.8, -0.8, 0.8, -0.8) -- Configure os ganhos como necessários
 
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
