@@ -158,33 +158,6 @@ local function update()
     new_control_allocation(throttle, steering)
 
     return update, 200
-  elseif vehicle:get_mode() == DRIVING_MODES.STEERING then
-    if desired_yaw == -1 then
-      desired_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
-    end
-
-    TRIM3 = param:get('RC3_TRIM')
-    rc3_pwm = tonumber(rc:get_pwm(3)) or TRIM3 or MID_TRIM
-    throttle = (TRIM3 - rc3_pwm) / RADIO_CHANNEL_BANDWIDTH
-
-    TRIM1 = param:get('RC1_TRIM')
-    rc1_pwm = tonumber(rc:get_pwm(1)) or TRIM1 or MID_TRIM
-    local addsteering = (rc1_pwm - TRIM1) / RADIO_CHANNEL_BANDWIDTH
-
-    local k1 = param:get('SCR_USER4')
-
-    desired_yaw = funcs:map_to_360(desired_yaw + k1 * addsteering)
-    local vh_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
-    local steering_error = funcs:map_error(desired_yaw - vh_yaw)
-
-    steering_pid.P = param:get('SCR_USER3')
-    steering_pid.I = param:get('SCR_USER2')
-    steering_pid.D = param:get('SCR_USER1')
-    local auto_steering = steering_pid:compute(0, steering_error, 0.2)
-
-    new_control_allocation(throttle, auto_steering)
-
-    return update, 200
 
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO or vehicle:get_mode() == DRIVING_MODES.GUIDED then
     if desired_yaw == -1 then
