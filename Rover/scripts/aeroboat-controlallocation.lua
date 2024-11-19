@@ -9,7 +9,6 @@
 --| '8' # Walking_Height
 --@return number|nil
 package.path = package.path .. ';./scripts/modules/?.lua'
-local PID = require("pid")
 local funcs = require("functions")
 
 CONTROL_OUTPUT_THROTTLE = 3
@@ -22,13 +21,13 @@ RADIO_CHANNEL_BANDWIDTH = 450
 SYSTEM_STARTED = Parameter()
 local desired_yaw = -1.0
 
-local steering_pid = PID:new(0.25, 0.001, 0.1, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
--- local steering_pid = PID:new(0.25, 0.001, 0.01, 0.8, -0.8, 0.8, -0.8) -- Configure os ganhos como necessários
-
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
 DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
+
+-- Variável para armazenar o modo anterior
+local previous_driving_mode = vehicle:get_mode()
 
 --[[
 Control Allocation Function
@@ -112,6 +111,16 @@ local function update()
     return update, 1000
   end
 
+  -- Check the current mode of the vehicle and update the previous mode
+  local current_driving_mode = vehicle:get_mode()
+  if current_driving_mode == DRIVING_MODES.STEERING then
+    vehicle:set_mode(previous_driving_mode)
+    current_driving_mode = previous_driving_mode
+    gcs:send_text(MAV_SEVERITY.WARNING, "STEERING mode is not allowed, returning to previous mode.")
+  elseif current_driving_mode ~= previous_driving_mode then
+    previous_driving_mode = current_driving_mode
+  end
+
   -- Check if armed to begin control allocation safely
   if not arming:is_armed() then
     gcs:send_text(MAV_SEVERITY.INFO, string.format("BOAT - disarmed, waiting for arming."))
@@ -139,13 +148,13 @@ local function update()
     return update, 2000
   end
 
-  -- Create the input control variables
+  -- Input control variables
   local steering = 0
   local throttle = 0
   local rc3_pwm = 0
   local rc1_pwm = 0
 
-  if vehicle:get_mode() == DRIVING_MODES.MANUAL then
+  if current_driving_mode == DRIVING_MODES.MANUAL then
     -- Get the trim values for the RC channels
     TRIM3 = tonumber(param:get('RC3_TRIM'))
     TRIM1 = tonumber(param:get('RC1_TRIM'))
@@ -159,7 +168,7 @@ local function update()
 
     return update, 200
 
-  elseif vehicle:get_mode() == DRIVING_MODES.AUTO or vehicle:get_mode() == DRIVING_MODES.GUIDED then
+  elseif current_driving_mode == DRIVING_MODES.AUTO or current_driving_mode == DRIVING_MODES.GUIDED then
     if desired_yaw == -1 then
       desired_yaw = funcs:map_to_360(funcs:to_degrees(ahrs:get_yaw()))
     end
