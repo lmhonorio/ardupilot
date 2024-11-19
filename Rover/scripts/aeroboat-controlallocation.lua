@@ -67,27 +67,27 @@ local function new_control_allocation(t, s)
 
   -- Setting the PWM outputs based on the control allocation directions
   if naloc_right >= 0 then
-    SRV_Channels:set_output_pwm_chan_timeout(1, 2 * naloc_right + pwm1_trim_value, 300)
-    SRV_Channels:set_output_pwm_chan_timeout(2, 2 * naloc_right + pwm2_trim_value, 300)
+    SRV_Channels:set_output_pwm_chan_timeout(1, math.min(2 * naloc_right + pwm1_trim_value, 1700), 300)
+    SRV_Channels:set_output_pwm_chan_timeout(2, math.min(2 * naloc_right + pwm2_trim_value, 1700), 300)
     SRV_Channels:set_output_pwm_chan_timeout(4, pwm4_trim_value, 300)
   end
 
   if naloc_right < 0 then
     SRV_Channels:set_output_pwm_chan_timeout(1, pwm1_trim_value, 300)
     SRV_Channels:set_output_pwm_chan_timeout(2, pwm2_trim_value, 300)
-    SRV_Channels:set_output_pwm_chan_timeout(4, pwm4_trim_value - 2 * naloc_right, 300)
+    SRV_Channels:set_output_pwm_chan_timeout(4, math.min(pwm4_trim_value - 2 * naloc_right, 1700), 300)
   end
 
   if naloc_left >= 0 then
-    SRV_Channels:set_output_pwm_chan_timeout(0, 2 * naloc_left + pwm0_trim_value, 300)
-    SRV_Channels:set_output_pwm_chan_timeout(3, 2 * naloc_left + pwm3_trim_value, 300)
+    SRV_Channels:set_output_pwm_chan_timeout(0, math.min(2 * naloc_left + pwm0_trim_value, 1700), 300)
+    SRV_Channels:set_output_pwm_chan_timeout(3, math.min(2 * naloc_left + pwm3_trim_value, 1700), 300)
     SRV_Channels:set_output_pwm_chan_timeout(5, pwm5_trim_value, 300)
   end
 
   if naloc_left < 0 then
     SRV_Channels:set_output_pwm_chan_timeout(0, pwm0_trim_value, 300)
     SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value, 300)
-    SRV_Channels:set_output_pwm_chan_timeout(5, pwm5_trim_value - 2 * naloc_left, 300)
+    SRV_Channels:set_output_pwm_chan_timeout(5, math.min(pwm5_trim_value - 2 * naloc_left, 1700), 300)
   end
 end -- new_control_allocation function
 
