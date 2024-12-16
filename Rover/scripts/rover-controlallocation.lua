@@ -13,41 +13,31 @@
 package.path = package.path .. ';./scripts/modules/?.lua'
 local PID = require("pid")
 local fun = require("functions")
-
-
 local CONTROL_OUTPUT_THROTTLE = 3
-local CONTROL_OUTPUT_YAW = 1
-
-local THROTTLE_LEFT_id = 73
-local THROTTLE_RIGHT_id = 74
-local THROTTLE_LEFT_COMMAND = SRV_Channels:find_channel(73)
-local THROTTLE_RIGHT_COMMAND = SRV_Channels:find_channel(74)
-
 local last_mission_index = -1
-
-
-local throttle_output = 0
-local steering_output = 0
-
 local steering = 0
 local throttle = 0
-
-local trim3
-local trim1
-
--- armazenar o último valor de throttle manual para suavização
+-- Throttle smoothing logic
 local last_manual_throttle = 0
--- (ajustar conforme necessidade)
 local max_down_rate = 0.5
-
+local last_wpx, last_wpy = 0, 0
+local current_wpx, current_wpy = 0, 0
+-- PIDs
+local steering_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)
+local new_steering_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9)
 
 local function isempty(s)
   return s == nil or s == ''
 end
 
-
-local function CtrlAlocacaonovo(t, s)
-
+-- ----------------- Control Allocation -----------------
+-- This function is responsible for the control allocation of the vehicle.
+-- It receives the throttle and steering values and calculates the PWM values for the motors.
+-- The function also takes into account the trim values for the PWM outputs.
+--@param t number - Throttle value
+--@param s number - Steering value
+--@return nil
+local function newControlAllocation(t, s)
   local aloc = 450
 
   local hip = math.sqrt(t*t + s*s) + 0.0001
@@ -76,91 +66,68 @@ local function CtrlAlocacaonovo(t, s)
   SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value - nalocEsq, 300)
 end
 
-local last_wpx, last_wpy = 0,0
-local current_wpx, current_wpy = 0,0
+-- ---------------------------------------
+-- ---------------------------------------
+-- ---------- General functions ----------
+-- ---------------------------------------
+-- ---------------------------------------
+local function notArmed()
+  gcs:send_text(4, string.format("ROVER - desarmado "))
 
+  local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
+  local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
+  local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
+  local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 
-function not_armed()
-      --vehicle:set_mode(15)
-      gcs:send_text(4, string.format("ROVER - desarmado "))
-
-      local PWM0_TRIM_VALUE = param:get('SERVO1_TRIM')
-      local PWM1_TRIM_VALUE = param:get('SERVO2_TRIM')
-      local PWM2_TRIM_VALUE = param:get('SERVO3_TRIM')
-      local PWM3_TRIM_VALUE = param:get('SERVO4_TRIM')
-
-      -- SRV_Channels:set_output_pwm_chan_timeout(THROTTLE_LEFT_COMMAND, 1500,300) 
-      -- SRV_Channels:set_output_pwm_chan_timeout(THROTTLE_RIGHT_COMMAND,1500,300)
-
-      SRV_Channels:set_output_pwm_chan_timeout(0,PWM0_TRIM_VALUE,3000)
-      SRV_Channels:set_output_pwm_chan_timeout(1,PWM1_TRIM_VALUE,3000)
-      SRV_Channels:set_output_pwm_chan_timeout(2,PWM2_TRIM_VALUE,3000)
-      SRV_Channels:set_output_pwm_chan_timeout(3,PWM3_TRIM_VALUE,3000)
+  SRV_Channels:set_output_pwm_chan_timeout(0,PWM0_TRIM_VALUE,3000)
+  SRV_Channels:set_output_pwm_chan_timeout(1,PWM1_TRIM_VALUE,3000)
+  SRV_Channels:set_output_pwm_chan_timeout(2,PWM2_TRIM_VALUE,3000)
+  SRV_Channels:set_output_pwm_chan_timeout(3,PWM3_TRIM_VALUE,3000)
 end
 
-function Manual_mode()
+local function manualMode()
+  local trim3 = param:get('RC3_TRIM')
+  local trim1 = param:get('RC1_TRIM')
 
-  local rc3_pwm = 0
-  local rc1_pwm = 0
-
-  trim3 = param:get('RC3_TRIM')
-  trim1 = param:get('RC1_TRIM')
-
-  rc3_pwm = rc:get_pwm(3)
-  rc1_pwm = rc:get_pwm(1)
+  local rc3_pwm = rc:get_pwm(3)
+  local rc1_pwm = rc:get_pwm(1)
 
   local raw_throttle = (trim3 - rc3_pwm) / 450
-  --throttle = (trim3 - rc3_pwm) / 450
   steering = (rc1_pwm - trim1) / 450
 
   if raw_throttle < last_manual_throttle then
     local diff = last_manual_throttle - raw_throttle
     if diff > max_down_rate then
-      -- limita a redução
+      -- limits reduction
       throttle = last_manual_throttle - max_down_rate
     else
       throttle = raw_throttle
     end
   else
-    -- subindo ou igual, não limita
+    -- Going up, so no limit
     throttle = raw_throttle
   end
-
-  -- ultimo valor de throttle manual
+  -- Update last throttle variable
   last_manual_throttle = throttle
 
-  CtrlAlocacaonovo(throttle,steering)
+  newControlAllocation(throttle,steering)
 end
 
-local steering_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)  -- Configure os ganhos como necessários
-
-
-function Update_simple_setpoints()
-
+local function updateSimpleSetpoints()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:map_to_360(ahrs:get_yaw()*180.0/3.1415)
   local steering_error = fun:map_error(vh_yaw - wp_bearing)
 
-  --steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
-  throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE))
-
-  local mysteering = steering_pid:compute(0,-steering_error, 0.2)
+  throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE)) or TRIM3
+  local mysteering = steering_pid:compute(0, -steering_error, 0.2)
 
   return mysteering, throttle
-
 end
 
-
-local newsteering_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9)  
-
-
-
-function Update_mission_setpoints()
-
+local function updateMissionSetpoints()
   local mission_state = mission:state()
-  --[[
-    Verifica se terminou a missao
-  --]]
+  
+  -- Check if mission is over
   if mission_state == 2 then
     steering = 0
     throttle = 0
@@ -171,27 +138,20 @@ function Update_mission_setpoints()
   end
 
   if last_mission_index == -1 then
-
     last_mission_index = mission:get_current_nav_index()
 
     local mylocation = ahrs:get_position()
-
     last_wpx = mylocation:lat()/1e7
     last_wpy = mylocation:lng()/1e7
-
 
     local missionitem = mission:get_item(last_mission_index)
     current_wpx = missionitem:x()/1e7
     current_wpy = missionitem:y()/1e7
-
   end
 
   local mission_index = mission:get_current_nav_index()
 
   if mission_index ~= last_mission_index then
-
-    -- gcs:send_text(4, "LUA: New Mission Item") -- we spotted a change
-
     last_wpx = current_wpx
     last_wpy = current_wpy
 
@@ -200,43 +160,32 @@ function Update_mission_setpoints()
     local missionitem = mission:get_item(mission_index)
     current_wpx = missionitem:x()/1e7
     current_wpy= missionitem:y()/1e7
-
   end
 
   local mylocation = ahrs:get_position()
   local myx = mylocation:lat()/1e7
   local myy = mylocation:lng()/1e7
-
   local vh_yaw = fun:map_to_360(fun:to_degrees(ahrs:get_yaw()))
-
 
   local dist, ang = fun:point_to_line_distance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
 
   return dist, ang
-
 end
 
-
-
-function update_follow_line()
-
-  local distance, newsteering_error = Update_mission_setpoints()
-  --steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
+local function updateFollowLine()
+  local distance, newsteering_error = updateMissionSetpoints()
   throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE))
 
-  local mysteering = newsteering_pid:compute(0, newsteering_error, 0.2)
+  local mysteering = new_steering_pid:compute(0, newsteering_error, 0.2)
 
   return mysteering, throttle
-
 end
 
 
-
-
-
-
-function update() -- this is the loop which periodically runs
-
+-- ---------------------------------------
+-- ----------- Main function -------------
+-- ---------------------------------------
+local function update()
   local tipoveiculo = param:get('SCR_USER5')
 
   if not (tipoveiculo==2) then
@@ -245,58 +194,36 @@ function update() -- this is the loop which periodically runs
   end
 
   if not arming:is_armed() then
-
-    not_armed()
-
+    notArmed()
     return update, 2000
   end
 
-    -- steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW) 
-    -- throttle = vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE)
-
   if vehicle:get_mode()== 0 then
-
-    Manual_mode()
+    manualMode()
     return update, 200
-
   else
-
     if vehicle:get_mode()< 10 then
       vehicle:set_mode(10)
     end
-
 
     local mission_state = mission:state()
     local newsteering, newthrottle
 
     if mission_state == 0 then
-      steering, throttle = Update_simple_setpoints()
-      local testtarget = vehicle:get_wp_distance_m()
-      local testbearing = vehicle:get_wp_bearing_deg()
-      newsteering, newthrottle =steering, throttle
-
+      steering, throttle = updateSimpleSetpoints()
+      newsteering, newthrottle = steering, throttle
     else
-      steering, throttle = Update_simple_setpoints()
-      newsteering, newthrottle = update_follow_line()
-
-
-      --gcs:send_text(4, string.format("distancia ao SR %f - ang %f",ajdthrotte,ajdsteering) )
-
+      steering, throttle = updateSimpleSetpoints()
+      newsteering, newthrottle = updateFollowLine()
     end
 
+    newControlAllocation(newthrottle, (0.4*steering + 0.6*newsteering))
 
-    --steering, throttle = update_mission_setpoints()
-
-    CtrlAlocacaonovo(newthrottle, (0.4*steering+ 0.6*newsteering))
-
-
-    --CtrlAlocacaonovo(throttle,steering)
-
-
-      return update, 200
-
+    return update, 200
   end
-
 end
 
 return update, 3000 -- run immediately before starting to reschedule
+-- ---------------------------------------
+-- ---------------------------------------
+-- ---------------------------------------
