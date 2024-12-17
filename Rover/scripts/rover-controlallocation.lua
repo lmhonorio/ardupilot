@@ -19,7 +19,8 @@ local steering = 0
 local throttle = 0
 -- Throttle smoothing logic
 local last_manual_throttle = 0
-local max_down_rate = 0.5
+local throttle_accel_rate_thresh = 0.5
+local throttle_accel_rate = 0.5
 local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
 -- PIDs
@@ -95,22 +96,15 @@ local function manualMode()
   local raw_throttle = (trim3 - rc3_pwm) / 450
   steering = (rc1_pwm - trim1) / 450
 
-  if raw_throttle < last_manual_throttle then
-    local diff = last_manual_throttle - raw_throttle
-    if diff > max_down_rate then
-      -- limits reduction
-      throttle = last_manual_throttle - max_down_rate
-    else
-      throttle = raw_throttle
-    end
-  else
-    -- Going up, so no limit
-    throttle = raw_throttle
+  throttle = raw_throttle
+  -- Compares the diff from the last manual throttle to the maximum rate we are accepting
+  -- Make the actual command be a rate to the required command if necessary
+  if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
+    throttle = last_manual_throttle + (raw_throttle - last_manual_throttle) * throttle_accel_rate
   end
-  -- Update last throttle variable
   last_manual_throttle = throttle
 
-  newControlAllocation(throttle,steering)
+  newControlAllocation(throttle, steering)
 end
 
 local function updateSimpleSetpoints()
