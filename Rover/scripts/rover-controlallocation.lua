@@ -27,8 +27,8 @@ local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local steering_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)
-local new_steering_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9)
+local ss_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8) -- for simple setpoint control
+local lc_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9) -- for line setpoint control
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -131,7 +131,7 @@ local function simpleSetpointControl()
   local steering_error = fun:mapError(vh_yaw - wp_bearing)
 
   throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or TRIM3
-  local mysteering = steering_pid:compute(0, -steering_error, 0.2)
+  local mysteering = ss_pid:compute(0, -steering_error, 0.2)
 
   return mysteering, throttle
 end
@@ -192,7 +192,7 @@ local function followLineControl()
   local distance, newsteering_error = getMissionSetpointsData()
   throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
 
-  local mysteering = new_steering_pid:compute(0, newsteering_error, 0.2)
+  local mysteering = lc_pid:compute(0, newsteering_error, 0.2)
 
   return mysteering, throttle
 end
