@@ -19,8 +19,8 @@ for i = 1, #rc1_pwm_list do
     local addsteering = (rc1_pwm - TRIM1) / 450
 
     desired_yaw = desired_yaw + 0.1*addsteering
-    local vh_yaw = Funcs:map_to_360(Funcs:to_degrees(Funcs:to_radians(yaw_angle_current)))
-    local steering_error = Funcs:map_error(vh_yaw - desired_yaw)
+    local vh_yaw = Funcs:mapTo360(Funcs:toDegrees(Funcs:to_radians(yaw_angle_current)))
+    local steering_error = Funcs:mapError(vh_yaw - desired_yaw)
     gcs:send_text(6, "Steering error" .. steering_error)
 
     

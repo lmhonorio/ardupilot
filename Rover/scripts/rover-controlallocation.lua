@@ -118,8 +118,8 @@ Control the outputs using only the bearing to the next waypoint
 --]]
 local function updateSimpleSetpoints()
   local wp_bearing = vehicle:get_wp_bearing_deg()
-  local vh_yaw = fun:map_to_360(ahrs:get_yaw()*180.0/3.1415)
-  local steering_error = fun:map_error(vh_yaw - wp_bearing)
+  local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
+  local steering_error = fun:mapError(vh_yaw - wp_bearing)
 
   throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE)) or TRIM3
   local mysteering = steering_pid:compute(0, -steering_error, 0.2)
@@ -172,9 +172,9 @@ local function updateMissionSetpoints()
   local mylocation = ahrs:get_position()
   local myx = mylocation:lat()/1e7
   local myy = mylocation:lng()/1e7
-  local vh_yaw = fun:map_to_360(fun:to_degrees(ahrs:get_yaw()))
+  local vh_yaw = fun:mapTo360(fun:toDegrees(ahrs:get_yaw()))
 
-  local dist, ang = fun:point_to_line_distance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
+  local dist, ang = fun:pointToLineDistance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
 
   return dist, ang
 end
