@@ -1,5 +1,3 @@
-
-
 --@param control_output integer - CONTROLE MODE 4
 --| '1' # Roll
 --| '2' # Pitch
@@ -14,6 +12,9 @@
 package.path = package.path .. ';./scripts/modules/?.lua'
 local PID = require("pid")
 local fun = require("functions")
+-------------------------------------------------------------------------------
+------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
+-------------------------------------------------------------------------------
 -- Control variables
 local CONTROL_OUTPUT_THROTTLE = 3
 local last_mission_index = -1
@@ -27,20 +28,30 @@ local throttle_accel_rate = 0.5
 local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
 -- PIDs
+-- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local steering_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)
 local new_steering_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9)
+-- Severity for logging in GCS
+MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
+-- Rover driving modes
+DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
+-- Mission states dictionary
+MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 
 local function isempty(s)
   return s == nil or s == ''
 end
+-------------------------------------------------------------------------------
 
--- ----------------- Control Allocation -----------------
--- This function is responsible for the control allocation of the vehicle.
--- It receives the throttle and steering values and calculates the PWM values for the motors.
--- The function also takes into account the trim values for the PWM outputs.
---@param t number - Throttle value
---@param s number - Steering value
---@return nil
+-------------------------------------------------------------------------------
+------------------------- LOW LEVEL ACTION FUNCTIONS --------------------------
+-------------------------------------------------------------------------------
+--[[
+Control allocation
+This function is responsible for the control allocation of the vehicle.
+It receives the throttle and steering values and calculates the PWM values for the motors.
+The function also takes into account the trim values for the PWM outputs.
+--]]
 local function newControlAllocation(t, s)
   local aloc = 450
 
@@ -74,7 +85,7 @@ end
 Control the actions while not armed 
 --]]
 local function notArmed()
-  gcs:send_text(4, string.format("ROVER - desarmado "))
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("ROVER - disarmed."))
 
   local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
   local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
@@ -135,7 +146,7 @@ local function updateMissionSetpoints()
   local mission_state = mission:state()
   
   -- Check if mission is over
-  if mission_state == 2 then
+  if mission_state == MISSION_STATE.FINISHED then
     steering = 0
     throttle = 0
     vehicle:set_mode(0)
@@ -195,8 +206,8 @@ end
 local function update()
   local vehicle_type = param:get('SCR_USER5')
 
-  if not (vehicle_type==2) then
-    gcs:send_text(4, string.format("Not ROVER, exiting LUA script."))
+  if not (vehicle_type == 2) then
+    gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
     return
   end
 
@@ -205,18 +216,18 @@ local function update()
     return update, 2000
   end
 
-  if vehicle:get_mode() == 0 then
+  if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     manualMode()
     return update, 200
   else
-    if vehicle:get_mode() < 10 then
-      vehicle:set_mode(10)
+    if vehicle:get_mode() < DRIVING_MODES.AUTO then
+      vehicle:set_mode(DRIVING_MODES.AUTO)
     end
 
     local mission_state = mission:state()
     local newsteering, newthrottle
 
-    if mission_state == 0 then
+    if mission_state == MISSION_STATE.IDLE then
       steering, throttle = updateSimpleSetpoints()
       newsteering, newthrottle = steering, throttle
     else
