@@ -50,7 +50,7 @@ This function is responsible for the control allocation of the vehicle.
 It receives the throttle and steering values and calculates the PWM values for the motors.
 The function also takes into account the trim values for the PWM outputs.
 --]]
-local function newControlAllocation(t, s)
+local function applyControlAllocation(t, s)
   local aloc = 450
 
   local hip = math.sqrt(t*t + s*s) + 0.0001
@@ -116,7 +116,7 @@ local function manualMode()
   end
   last_manual_throttle = throttle
 
-  newControlAllocation(throttle, steering)
+  applyControlAllocation(throttle, steering)
 end
 
 -------------------------------------------------------------------------------
@@ -229,10 +229,10 @@ local function update()
     local ss_steering, ss_throttle = 0, 0 -- for the simple setpoint method
     ss_steering, ss_throttle = simpleSetpointControl()
     if mission_state == MISSION_STATE.IDLE then
-      newControlAllocation(ss_throttle, ss_steering)
+      applyControlAllocation(ss_throttle, ss_steering)
     else
       lc_steering, lc_throttle = followLineControl()
-      newControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
+      applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
     end
 
     return update, 200
