@@ -10,9 +10,11 @@
 --| '7' # WingSail
 --| '8' # Walking_Height
 --@return number|nil
+-- External modules
 package.path = package.path .. ';./scripts/modules/?.lua'
 local PID = require("pid")
 local fun = require("functions")
+-- Control variables
 local CONTROL_OUTPUT_THROTTLE = 3
 local last_mission_index = -1
 local steering = 0
@@ -21,6 +23,7 @@ local throttle = 0
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
+-- Mission control logic
 local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
 -- PIDs
@@ -67,11 +70,9 @@ local function newControlAllocation(t, s)
   SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value - nalocEsq, 300)
 end
 
--- ---------------------------------------
--- ---------------------------------------
--- ---------- General functions ----------
--- ---------------------------------------
--- ---------------------------------------
+--[[
+Control the actions while not armed 
+--]]
 local function notArmed()
   gcs:send_text(4, string.format("ROVER - desarmado "))
 
@@ -80,12 +81,15 @@ local function notArmed()
   local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
   local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 
-  SRV_Channels:set_output_pwm_chan_timeout(0,PWM0_TRIM_VALUE,3000)
-  SRV_Channels:set_output_pwm_chan_timeout(1,PWM1_TRIM_VALUE,3000)
-  SRV_Channels:set_output_pwm_chan_timeout(2,PWM2_TRIM_VALUE,3000)
-  SRV_Channels:set_output_pwm_chan_timeout(3,PWM3_TRIM_VALUE,3000)
+  SRV_Channels:set_output_pwm_chan_timeout(0, PWM0_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(1, PWM1_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(2, PWM2_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(3, PWM3_TRIM_VALUE, 3000)
 end
 
+--[[
+Perform vehicle control in Manual mode
+--]]
 local function manualMode()
   local trim3 = param:get('RC3_TRIM')
   local trim1 = param:get('RC1_TRIM')
@@ -93,12 +97,11 @@ local function manualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
 
-  local raw_throttle = (trim3 - rc3_pwm) / 450
   steering = (rc1_pwm - trim1) / 450
-
+  local raw_throttle = (trim3 - rc3_pwm) / 450
   throttle = raw_throttle
   -- Compares the diff from the last manual throttle to the maximum rate we are accepting
-  -- Make the actual command be a rate to the required command if necessary
+  -- Make the actual command be a rate from the last to the required command if necessary
   if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
     throttle = last_manual_throttle + (raw_throttle - last_manual_throttle) * throttle_accel_rate
   end
@@ -107,6 +110,12 @@ local function manualMode()
   newControlAllocation(throttle, steering)
 end
 
+-------------------------------------------------------------------------------
+--------------------------- MISSION CONTROL SECTION ---------------------------
+-------------------------------------------------------------------------------
+--[[
+Control the outputs using only the bearing to the next waypoint 
+--]]
 local function updateSimpleSetpoints()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:map_to_360(ahrs:get_yaw()*180.0/3.1415)
@@ -118,6 +127,10 @@ local function updateSimpleSetpoints()
   return mysteering, throttle
 end
 
+--[[
+Controls the actions by considering the mission previous and current waypoint, 
+and the line between them
+--]]
 local function updateMissionSetpoints()
   local mission_state = mission:state()
   
@@ -153,7 +166,7 @@ local function updateMissionSetpoints()
 
     local missionitem = mission:get_item(mission_index)
     current_wpx = missionitem:x()/1e7
-    current_wpy= missionitem:y()/1e7
+    current_wpy = missionitem:y()/1e7
   end
 
   local mylocation = ahrs:get_position()
@@ -174,16 +187,16 @@ local function updateFollowLine()
 
   return mysteering, throttle
 end
+-------------------------------------------------------------------------------
 
-
--- ---------------------------------------
--- ----------- Main function -------------
--- ---------------------------------------
+-------------------------------------------------------------------------------
+-------------------------------- MAIN LOOP ------------------------------------
+-------------------------------------------------------------------------------
 local function update()
-  local tipoveiculo = param:get('SCR_USER5')
+  local vehicle_type = param:get('SCR_USER5')
 
-  if not (tipoveiculo==2) then
-    gcs:send_text(4, string.format("nao e ROVER saindo do lua"))
+  if not (vehicle_type==2) then
+    gcs:send_text(4, string.format("Not ROVER, exiting LUA script."))
     return
   end
 
@@ -192,11 +205,11 @@ local function update()
     return update, 2000
   end
 
-  if vehicle:get_mode()== 0 then
+  if vehicle:get_mode() == 0 then
     manualMode()
     return update, 200
   else
-    if vehicle:get_mode()< 10 then
+    if vehicle:get_mode() < 10 then
       vehicle:set_mode(10)
     end
 
@@ -218,6 +231,4 @@ local function update()
 end
 
 return update, 3000 -- run immediately before starting to reschedule
--- ---------------------------------------
--- ---------------------------------------
--- ---------------------------------------
+-------------------------------------------------------------------------------
