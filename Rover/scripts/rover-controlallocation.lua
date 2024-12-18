@@ -16,15 +16,13 @@ local fun = require("functions")
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
 -- Control variables
-local CONTROL_OUTPUT_THROTTLE = 3
+local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local last_mission_index = -1
-local steering = 0
-local throttle = 0
 -- Throttle smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
--- Mission control logic
+-- Mission control logic - waypoints XY coordinates to calculate bearing error
 local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
 -- PIDs
@@ -108,9 +106,9 @@ local function manualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
 
-  steering = (rc1_pwm - trim1) / 450
+  local steering = (rc1_pwm - trim1) / 450
   local raw_throttle = (trim3 - rc3_pwm) / 450
-  throttle = raw_throttle
+  local throttle = raw_throttle
   -- Compares the diff from the last manual throttle to the maximum rate we are accepting
   -- Make the actual command be a rate from the last to the required command if necessary
   if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
@@ -127,12 +125,12 @@ end
 --[[
 Control the outputs using only the bearing to the next waypoint 
 --]]
-local function updateSimpleSetpoints()
+local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
   local steering_error = fun:mapError(vh_yaw - wp_bearing)
 
-  throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE)) or TRIM3
+  throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or TRIM3
   local mysteering = steering_pid:compute(0, -steering_error, 0.2)
 
   return mysteering, throttle
@@ -142,13 +140,13 @@ end
 Controls the actions by considering the mission previous and current waypoint, 
 and the line between them
 --]]
-local function updateMissionSetpoints()
+local function getMissionSetpointsData()
   local mission_state = mission:state()
   
   -- Check if mission is over
   if mission_state == MISSION_STATE.FINISHED then
-    steering = 0
-    throttle = 0
+    local steering = 0
+    local throttle = 0
     vehicle:set_mode(0)
     last_mission_index = -1
 
@@ -190,9 +188,9 @@ local function updateMissionSetpoints()
   return dist, ang
 end
 
-local function updateFollowLine()
-  local distance, newsteering_error = updateMissionSetpoints()
-  throttle = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_THROTTLE))
+local function followLineControl()
+  local distance, newsteering_error = getMissionSetpointsData()
+  throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
 
   local mysteering = new_steering_pid:compute(0, newsteering_error, 0.2)
 
@@ -216,26 +214,26 @@ local function update()
     return update, 2000
   end
 
+  -- Controlling in MANUAL MODE
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     manualMode()
     return update, 200
+  -- Controlling in AUTO MODE
   else
     if vehicle:get_mode() < DRIVING_MODES.AUTO then
       vehicle:set_mode(DRIVING_MODES.AUTO)
     end
 
     local mission_state = mission:state()
-    local newsteering, newthrottle
-
+    local lc_steering, lc_throttle = 0, 0 -- for line control method
+    local ss_steering, ss_throttle = 0, 0 -- for the simple setpoint method
+    ss_steering, ss_throttle = simpleSetpointControl()
     if mission_state == MISSION_STATE.IDLE then
-      steering, throttle = updateSimpleSetpoints()
-      newsteering, newthrottle = steering, throttle
+      newControlAllocation(ss_throttle, ss_steering)
     else
-      steering, throttle = updateSimpleSetpoints()
-      newsteering, newthrottle = updateFollowLine()
+      lc_steering, lc_throttle = followLineControl()
+      newControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
     end
-
-    newControlAllocation(newthrottle, (0.4*steering + 0.6*newsteering))
 
     return update, 200
   end
