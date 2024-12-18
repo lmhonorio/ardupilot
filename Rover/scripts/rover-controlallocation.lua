@@ -64,8 +64,8 @@ local function applyControlAllocation(t, s)
   local nft = t * T * aloc
   local nfs = s * S * aloc
 
-  local nalocDir = math.floor(nft + nfs)
-  local nalocEsq = math.floor(nft - nfs)
+  local n_aloc_right = math.floor(nft + nfs)
+  local n_aloc_left = math.floor(nft - nfs)
 
  -- Getting the trim values for PWM outputs
   local pwm0_trim_value = tonumber(param:get('SERVO1_TRIM')) or 0
@@ -73,10 +73,10 @@ local function applyControlAllocation(t, s)
   local pwm2_trim_value = tonumber(param:get('SERVO3_TRIM')) or 0
   local pwm3_trim_value = tonumber(param:get('SERVO4_TRIM')) or 0
 
-  SRV_Channels:set_output_pwm_chan_timeout(2, pwm2_trim_value + nalocDir, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(1, pwm1_trim_value + nalocDir, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(0, pwm0_trim_value - nalocEsq, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value - nalocEsq, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm2_trim_value + n_aloc_right, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm1_trim_value + n_aloc_right, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm0_trim_value - n_aloc_left, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value - n_aloc_left, 300)
 end
 
 --[[
