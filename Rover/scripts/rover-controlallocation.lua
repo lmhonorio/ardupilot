@@ -228,12 +228,13 @@ local function update()
     local lc_steering, lc_throttle = 0, 0 -- for line control method
     local ss_steering, ss_throttle = 0, 0 -- for the simple setpoint method
     ss_steering, ss_throttle = simpleSetpointControl()
-    if mission_state == MISSION_STATE.IDLE then
-      applyControlAllocation(ss_throttle, ss_steering)
-    else
-      lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
-    end
+    applyControlAllocation(ss_throttle, ss_steering)
+    -- if mission_state == MISSION_STATE.IDLE then
+    --   applyControlAllocation(ss_throttle, ss_steering)
+    -- else
+    --   lc_steering, lc_throttle = followLineControl()
+    --   applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
+    -- end
 
     return update, 200
   end
