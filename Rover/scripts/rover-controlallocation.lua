@@ -130,7 +130,7 @@ local function simpleSetpointControl()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
   local steering_error = fun:mapError(vh_yaw - wp_bearing)
 
-  throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or TRIM3
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or TRIM3
   local mysteering = ss_pid:compute(0, -steering_error, 0.2)
 
   return mysteering, throttle
@@ -190,7 +190,7 @@ end
 
 local function followLineControl()
   local distance, newsteering_error = getMissionSetpointsData()
-  throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
 
   local mysteering = lc_pid:compute(0, newsteering_error, 0.2)
 
