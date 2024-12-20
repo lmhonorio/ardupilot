@@ -212,6 +212,8 @@ end
 -------------------------------------------------------------------------------
 local function update()
   local vehicle_type = param:get('SCR_USER5')
+  local ss_rate = param:get('SCR_USER1') -- default 0.4
+  local lc_rate = param:get('SCR_USER6') -- default 0.6
 
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
@@ -241,7 +243,7 @@ local function update()
       applyControlAllocation(ss_throttle, ss_steering)
     else
       lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
+      applyControlAllocation(lc_throttle, (ss_rate*ss_steering + lc_rate*lc_steering))
     end
 
     return update, 200
