@@ -1,63 +1,73 @@
 -- Check if the script is being run directly by APM, if so exit
 if ... == nil then
-    return
+  return
 end
 
 local funcs = {}
 funcs.__index = funcs
 
-function funcs:mapToUnit(value)
-    if value < -1 then
-        return  -1
-    elseif value > 1 then
-      return 1
-    else
-        return value
-    end
+function funcs:mapMaxMin(value, min, max)
+  if value > min and value < max then
+    return value
+  elseif value < min then
+    return min
+  else
+    return max
   end
+end
+
+function funcs:mapToUnit(value)
+  if value < -1 then
+    return  -1
+  elseif value > 1 then
+    return 1
+  else
+    return value
+  end
+end
 
 -- Calculate the resulting value
 function funcs:mapError(resulting)
-    if resulting == nil then
-        return 0
-    end
+  if resulting == nil then
+    return 0
+  end
 
-    if resulting == 0 then
-        return 0
-    elseif math.abs(resulting) < 180 then
-        return -resulting
-    else
-        return (math.abs(resulting)/(resulting + 0.001))*(360 - math.abs(resulting))
-    end
+  if resulting == 0 then
+    return 0
+  elseif math.abs(resulting) < 180 then
+    return -resulting
+  else
+    return (math.abs(resulting)/(resulting + 0.001))*(360 - math.abs(resulting))
+  end
 end
 
 -- Function to map an angle to the range [0, 360]
 function funcs:mapTo360(angle)
-    if angle == nil then
-        return 0
-    end
+  if angle == nil then
+    return 0
+  end
 
-    local mapped_angle = angle
-    if mapped_angle < 0 then
-        mapped_angle = mapped_angle + 360
-    end
-    
-    return mapped_angle
+  local mapped_angle = angle
+  if mapped_angle < 0 then
+    mapped_angle = mapped_angle + 360
+  end
+  
+  return mapped_angle
 end
 
 -- Conversion between degrees and radians
 function funcs:toRadians(mdegrees)
-    if mdegrees == nil then
-        return 0
-    end
-    return mdegrees*math.pi/180.0
+  if mdegrees == nil then
+    return 0
+  end
+  return mdegrees*math.pi/180.0
 end
 
 function funcs:toDegrees(mradians)
-    if mradians == nil then
-        return 0
-    end
-    return mradians*180.0/math.pi
+  if mradians == nil then
+    return 0
+  end
+  return mradians*180.0/math.pi
 end
   
 function funcs:vectorMagnitude(x, y)
@@ -145,15 +155,15 @@ function funcs:pointToLineDistance(px, py, psi, x0, y0, x1, y1)
   local t = ((px - x0) * dx + (py - y0) * dy) / length_squared
 
   -- Se a projeção cai fora do segmento de reta, o mais próximo é o ponto final mais próximo
-    local nearest_x, nearest_y
-    if t < 0 then
-        nearest_x, nearest_y = x0, y0
-    elseif t > 1 then
-        nearest_x, nearest_y = x1, y1
-    else
-        nearest_x = x0 + t * dx
-        nearest_y = y0 + t * dy
-    end
+  local nearest_x, nearest_y
+  if t < 0 then
+    nearest_x, nearest_y = x0, y0
+  elseif t > 1 then
+    nearest_x, nearest_y = x1, y1
+  else
+    nearest_x = x0 + t * dx
+    nearest_y = y0 + t * dy
+  end
 
   local distancia = funcs:haversineDistance(px, py, nearest_x, nearest_y)
   local bearing_to_wp = funcs:calculateBearing(px, py, x1, y1)
@@ -163,8 +173,6 @@ function funcs:pointToLineDistance(px, py, psi, x0, y0, x1, y1)
   local orientacao = funcs:pointRelativeToVector(x0,y0,x1,y1,px,py)
 
   return distancia, orientacao*angle_difference
-
-
 end
 
 function funcs:pointRelativeToVector(p0x, p0y, p1x, p1y, rx, ry)
@@ -177,11 +185,11 @@ function funcs:pointRelativeToVector(p0x, p0y, p1x, p1y, rx, ry)
 
   -- Interpreta o resultado do produto vetorial
   if cross_product > 0 then
-      return 1  -- O ponto está à esquerda do vetor
+    return 1  -- O ponto está à esquerda do vetor
   elseif cross_product < 0 then
-      return -1 -- O ponto está à direita do vetor
+    return -1 -- O ponto está à direita do vetor
   else
-      return 0  -- O ponto está na linha do vetor
+    return 0  -- O ponto está na linha do vetor
   end
 end
 

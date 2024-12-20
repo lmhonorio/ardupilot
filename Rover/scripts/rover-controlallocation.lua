@@ -17,6 +17,8 @@ local fun = require("functions")
 -------------------------------------------------------------------------------
 -- Control variables
 local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
+local MAX_CHANNEL_OUTPUT = 1900
+local MIN_CHANNEL_OUTPUT = 1050
 local last_mission_index = -1
 -- Throttle smoothing logic
 local last_manual_throttle = 0
@@ -67,16 +69,23 @@ local function applyControlAllocation(t, s)
   local n_aloc_right = math.floor(nft + nfs)
   local n_aloc_left = math.floor(nft - nfs)
 
- -- Getting the trim values for PWM outputs
-  local pwm0_trim_value = tonumber(param:get('SERVO1_TRIM')) or 0
-  local pwm1_trim_value = tonumber(param:get('SERVO2_TRIM')) or 0
-  local pwm2_trim_value = tonumber(param:get('SERVO3_TRIM')) or 0
-  local pwm3_trim_value = tonumber(param:get('SERVO4_TRIM')) or 0
+  -- Getting the trim values for PWM outputs
+  local pwm0_trim = tonumber(param:get('SERVO1_TRIM')) or 0
+  local pwm1_trim = tonumber(param:get('SERVO2_TRIM')) or 0
+  local pwm2_trim = tonumber(param:get('SERVO3_TRIM')) or 0
+  local pwm3_trim = tonumber(param:get('SERVO4_TRIM')) or 0
 
-  SRV_Channels:set_output_pwm_chan_timeout(2, pwm2_trim_value + n_aloc_right, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(1, pwm1_trim_value + n_aloc_right, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(0, pwm0_trim_value - n_aloc_left, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value - n_aloc_left, 300)
+  -- Limiting the output values to the PWM ranges
+  local pwm_0 = fun:mapMaxMin(pwm0_trim - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_1 = fun:mapMaxMin(pwm1_trim + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_2 = fun:mapMaxMin(pwm2_trim + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_3 = fun:mapMaxMin(pwm3_trim - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+
+  -- Setting the PWM outputs based on the control allocation directions
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_2, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_3, 300)
 end
 
 --[[
@@ -228,13 +237,12 @@ local function update()
     local lc_steering, lc_throttle = 0, 0 -- for line control method
     local ss_steering, ss_throttle = 0, 0 -- for the simple setpoint method
     ss_steering, ss_throttle = simpleSetpointControl()
-    applyControlAllocation(ss_throttle, ss_steering)
-    -- if mission_state == MISSION_STATE.IDLE then
-    --   applyControlAllocation(ss_throttle, ss_steering)
-    -- else
-    --   lc_steering, lc_throttle = followLineControl()
-    --   applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
-    -- end
+    if mission_state == MISSION_STATE.IDLE then
+      applyControlAllocation(ss_throttle, ss_steering)
+    else
+      lc_steering, lc_throttle = followLineControl()
+      applyControlAllocation(lc_throttle, (0.4*ss_steering + 0.6*lc_steering))
+    end
 
     return update, 200
   end
