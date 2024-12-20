@@ -17,7 +17,7 @@ local fun = require("functions")
 -------------------------------------------------------------------------------
 -- Control variables
 local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
-local MAX_CHANNEL_OUTPUT = 1900
+local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local last_mission_index = -1
 -- Throttle smoothing logic
@@ -212,8 +212,12 @@ end
 -------------------------------------------------------------------------------
 local function update()
   local vehicle_type = param:get('SCR_USER5')
+  -- Getting SCR_USER params to PID values
   local ss_rate = param:get('SCR_USER1') -- default 0.4
   local lc_rate = param:get('SCR_USER6') -- default 0.6
+  ss_pid:setP(param:get('SCR_USER2'))
+  ss_pid:setI(param:get('SCR_USER3'))
+  ss_pid:setD(param:get('SCR_USER4'))
 
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))

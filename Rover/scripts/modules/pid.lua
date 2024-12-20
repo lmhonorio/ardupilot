@@ -24,6 +24,18 @@ function PID:new(p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min)
   return obj
 end
 
+function PID:setP(p_gain)
+  self.P = tonumber(p_gain)
+end
+
+function PID:setI(i_gain)
+  self.I = tonumber(i_gain)
+end
+
+function PID:setD(d_gain)
+  self.D = tonumber(d_gain)
+end
+
 function PID:compute(setpoint, pv, dt)
   local error = setpoint - pv
   local deriv = (error - self.last_error)/dt
