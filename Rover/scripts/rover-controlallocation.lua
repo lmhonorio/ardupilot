@@ -27,6 +27,7 @@ local throttle_accel_rate = 0.5
 -- Mission control logic - waypoints XY coordinates to calculate bearing error
 local last_wpx, last_wpy = 0, 0
 local current_wpx, current_wpy = 0, 0
+local zero_steering_error_radius = 1 --[meters]
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local ss_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8) -- for simple setpoint control
@@ -132,17 +133,40 @@ end
 --------------------------- MISSION CONTROL SECTION ---------------------------
 -------------------------------------------------------------------------------
 --[[
+Check the distance to the next waypoint, if any 
+--]]
+local function distanceToTargetWaypoint()
+  -- Call the function and check if a target location is available
+  local target_location = get_target_location()
+  if target_location then
+    local wp_lat = target_location:lat()/1e7
+    local wp_lon = target_location:lng()/1e7
+    local vehicle_position = ahrs:get_position()
+    local vh_lat = vehicle_position:lat()/1e7
+    local vh_lon = vehicle_position:lon()/1e7
+    return funcs:haversineDistance(wp_lat, wp_lon, vh_lat, vh_lon)
+  else
+    return 1e7
+  end
+end
+
+--[[
 Control the outputs using only the bearing to the next waypoint 
 --]]
 local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
   local steering_error = fun:mapError(vh_yaw - wp_bearing)
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d", 
+          math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or TRIM3
-  local mysteering = ss_pid:compute(0, -steering_error, 0.2)
-
-  return mysteering, throttle
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  local steering = 0
+  if distanceToTargetWaypoint() > zero_steering_error_radius then
+    steering = ss_pid:compute(0, -steering_error, 0.2)
+  end
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("steering: %d", 100 * math.floor(steering)))
+  return steering, throttle
 end
 
 --[[
@@ -198,12 +222,11 @@ local function getMissionSetpointsData()
 end
 
 local function followLineControl()
-  local distance, newsteering_error = getMissionSetpointsData()
+  local distance, steering_error = getMissionSetpointsData()
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
+  local steering = lc_pid:compute(0, steering_error, 0.2)
 
-  local mysteering = lc_pid:compute(0, newsteering_error, 0.2)
-
-  return mysteering, throttle
+  return steering, throttle
 end
 -------------------------------------------------------------------------------
 
