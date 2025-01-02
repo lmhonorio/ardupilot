@@ -156,14 +156,14 @@ Control the outputs using only the bearing to the next waypoint
 local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
-  local steering_error = fun:mapError(vh_yaw - wp_bearing)
+  local steering_error = fun:mapError(wp_bearing - vh_yaw)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d", 
           math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
   local steering = 0
   if distanceToTargetWaypoint() > zero_steering_error_radius then
-    steering = ss_pid:compute(0, -steering_error, 0.2)
+    steering = ss_pid:compute(0, steering_error, 0.2)
   end
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("steering: %d", 100 * math.floor(steering)))
   return steering, throttle
