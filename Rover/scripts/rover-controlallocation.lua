@@ -237,7 +237,7 @@ local function update()
   local vehicle_type = param:get('SCR_USER5')
   -- Getting SCR_USER params to PID values
   local ss_rate = param:get('SCR_USER1') -- default 0.4
-  local lc_rate = param:get('SCR_USER6') -- default 0.6
+  local lc_rate = 1.0 - ss_rate
   ss_pid:setP(param:get('SCR_USER2'))
   ss_pid:setI(param:get('SCR_USER3'))
   ss_pid:setD(param:get('SCR_USER4'))
