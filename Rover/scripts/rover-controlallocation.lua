@@ -54,6 +54,7 @@ It receives the throttle and steering values and calculates the PWM values for t
 The function also takes into account the trim values for the PWM outputs.
 --]]
 local function applyControlAllocation(t, s)
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("steer: %d  thr: %d", math.floor(100 * s), math.floor(100 * t)))
   local aloc = 450
 
   local hip = math.sqrt(t * t + s * s) + 0.0001
@@ -161,11 +162,7 @@ local function simpleSetpointControl()
     math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
-  local steering = 0
-  if distanceToTargetWaypoint() > zero_steering_error_radius then
-    steering = ss_pid:compute(0, steering_error, 0.2)
-  end
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("steering: %d", 100 * math.floor(steering)))
+  local steering = ss_pid:compute(wp_bearing, vh_yaw, 0.2)
   return steering, throttle
 end
 
@@ -273,7 +270,7 @@ local function update()
       applyControlAllocation(ss_throttle, ss_steering)
     else
       lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(lc_throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
+      applyControlAllocation(0.8 - math.abs(ss_steering), (ss_rate * ss_steering + lc_rate * lc_steering))
     end
 
     return update, 200
