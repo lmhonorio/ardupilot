@@ -241,6 +241,9 @@ local function update()
   ss_pid:setP(param:get('SCR_USER2'))
   ss_pid:setI(param:get('SCR_USER3'))
   ss_pid:setD(param:get('SCR_USER4'))
+  lc_pid:setP(param:get('SCR_USER2'))
+  lc_pid:setI(param:get('SCR_USER3'))
+  lc_pid:setD(param:get('SCR_USER4'))
 
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
