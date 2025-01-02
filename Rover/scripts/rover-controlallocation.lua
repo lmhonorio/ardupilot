@@ -137,14 +137,14 @@ Check the distance to the next waypoint, if any
 --]]
 local function distanceToTargetWaypoint()
   -- Call the function and check if a target location is available
-  local target_location = get_target_location()
+  local target_location = vehicle:get_target_location()
   if target_location then
     local wp_lat = target_location:lat()/1e7
     local wp_lon = target_location:lng()/1e7
     local vehicle_position = ahrs:get_position()
     local vh_lat = vehicle_position:lat()/1e7
     local vh_lon = vehicle_position:lon()/1e7
-    return funcs:haversineDistance(wp_lat, wp_lon, vh_lat, vh_lon)
+    return fun:haversineDistance(wp_lat, wp_lon, vh_lat, vh_lon)
   else
     return 1e7
   end
