@@ -30,7 +30,7 @@ local current_wpx, current_wpy = 0, 0
 local zero_steering_error_radius = 1 --[meters]
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local ss_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8) -- for simple setpoint control
+local ss_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)  -- for simple setpoint control
 local lc_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9) -- for line setpoint control
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
@@ -56,7 +56,7 @@ The function also takes into account the trim values for the PWM outputs.
 local function applyControlAllocation(t, s)
   local aloc = 450
 
-  local hip = math.sqrt(t*t + s*s) + 0.0001
+  local hip = math.sqrt(t * t + s * s) + 0.0001
 
   local nTa = aloc * t / hip
   local nSa = aloc * s / hip
@@ -90,7 +90,7 @@ local function applyControlAllocation(t, s)
 end
 
 --[[
-Control the actions while not armed 
+Control the actions while not armed
 --]]
 local function notArmed()
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("ROVER - disarmed."))
@@ -133,17 +133,17 @@ end
 --------------------------- MISSION CONTROL SECTION ---------------------------
 -------------------------------------------------------------------------------
 --[[
-Check the distance to the next waypoint, if any 
+Check the distance to the next waypoint, if any
 --]]
 local function distanceToTargetWaypoint()
   -- Call the function and check if a target location is available
   local target_location = vehicle:get_target_location()
   if target_location then
-    local wp_lat = target_location:lat()/1e7
-    local wp_lon = target_location:lng()/1e7
+    local wp_lat = target_location:lat() / 1e7
+    local wp_lon = target_location:lng() / 1e7
     local vehicle_position = ahrs:get_position()
-    local vh_lat = vehicle_position:lat()/1e7
-    local vh_lon = vehicle_position:lon()/1e7
+    local vh_lat = vehicle_position:lat() / 1e7
+    local vh_lon = vehicle_position:lon() / 1e7
     return fun:haversineDistance(wp_lat, wp_lon, vh_lat, vh_lon)
   else
     return 1e7
@@ -151,14 +151,14 @@ local function distanceToTargetWaypoint()
 end
 
 --[[
-Control the outputs using only the bearing to the next waypoint 
+Control the outputs using only the bearing to the next waypoint
 --]]
 local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
-  local vh_yaw = fun:mapTo360(ahrs:get_yaw()*180.0/3.1415)
+  local vh_yaw = fun:mapTo360(ahrs:get_yaw() * 180.0 / 3.1415)
   local steering_error = fun:mapError(wp_bearing - vh_yaw)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d", 
-          math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
+    math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
   local steering = 0
@@ -170,12 +170,12 @@ local function simpleSetpointControl()
 end
 
 --[[
-Controls the actions by considering the mission previous and current waypoint, 
+Controls the actions by considering the mission previous and current waypoint,
 and the line between them
 --]]
 local function getMissionSetpointsData()
   local mission_state = mission:state()
-  
+
   -- Check if mission is over
   if mission_state == MISSION_STATE.FINISHED then
     local steering = 0
@@ -190,12 +190,12 @@ local function getMissionSetpointsData()
     last_mission_index = mission:get_current_nav_index()
 
     local mylocation = ahrs:get_position()
-    last_wpx = mylocation:lat()/1e7
-    last_wpy = mylocation:lng()/1e7
+    last_wpx = mylocation:lat() / 1e7
+    last_wpy = mylocation:lng() / 1e7
 
     local missionitem = mission:get_item(last_mission_index)
-    current_wpx = missionitem:x()/1e7
-    current_wpy = missionitem:y()/1e7
+    current_wpx = missionitem:x() / 1e7
+    current_wpy = missionitem:y() / 1e7
   end
 
   local mission_index = mission:get_current_nav_index()
@@ -207,13 +207,13 @@ local function getMissionSetpointsData()
     last_mission_index = mission_index;
 
     local missionitem = mission:get_item(mission_index)
-    current_wpx = missionitem:x()/1e7
-    current_wpy = missionitem:y()/1e7
+    current_wpx = missionitem:x() / 1e7
+    current_wpy = missionitem:y() / 1e7
   end
 
   local mylocation = ahrs:get_position()
-  local myx = mylocation:lat()/1e7
-  local myy = mylocation:lng()/1e7
+  local myx = mylocation:lat() / 1e7
+  local myy = mylocation:lng() / 1e7
   local vh_yaw = fun:mapTo360(fun:toDegrees(ahrs:get_yaw()))
 
   local dist, ang = fun:pointToLineDistance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
@@ -259,8 +259,8 @@ local function update()
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     manualMode()
     return update, 200
-  -- Controlling in AUTO MODE
   else
+    -- Controlling in AUTO MODE
     if vehicle:get_mode() < DRIVING_MODES.AUTO then
       vehicle:set_mode(DRIVING_MODES.AUTO)
     end
@@ -273,7 +273,7 @@ local function update()
       applyControlAllocation(ss_throttle, ss_steering)
     else
       lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(lc_throttle, (ss_rate*ss_steering + lc_rate*lc_steering))
+      applyControlAllocation(lc_throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
     end
 
     return update, 200
