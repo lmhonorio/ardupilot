@@ -31,7 +31,7 @@ local zero_steering_error_radius = 1 --[meters]
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local ss_pid = PID:new(0.05, 0.01, 0.0, 80, -80, 0.99, -0.99)  -- for simple setpoint control
-local lc_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9) -- for line setpoint control
+local lc_pid = PID:new(0.001, 0.03, 0.0, 90, -90, 0.99, -0.99) -- for line setpoint control
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -156,7 +156,6 @@ Control the outputs using only the bearing to the next waypoint
 local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw() * 180.0 / 3.1415)
-  -- local steering_error = fun:mapError(wp_bearing - vh_yaw)
   local steering_error = fun:mapError2(wp_bearing - vh_yaw)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
     math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
@@ -273,7 +272,7 @@ local function update()
       applyControlAllocation(ss_throttle, ss_steering)
     else
       lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(0.4, (ss_rate * ss_steering + lc_rate * lc_steering))
+      applyControlAllocation(ss_throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
     end
 
     return update, 200

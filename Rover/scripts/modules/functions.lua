@@ -27,19 +27,6 @@ function funcs:mapToUnit(value)
 end
 
 -- Calculate the resulting value
-function funcs:mapError(resulting)
-  if resulting == nil then
-    return 0
-  end
-
-  if resulting == 0 then
-    return 0
-  elseif math.abs(resulting) < 180 then
-    return -resulting
-  else
-    return (math.abs(resulting)/(resulting + 0.001))*(360 - math.abs(resulting))
-  end
-end
 function funcs:mapError2(input_error)
   if input_error > -180 and input_error < 180 then
     return input_error
