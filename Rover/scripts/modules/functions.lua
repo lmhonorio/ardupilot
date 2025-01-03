@@ -40,6 +40,15 @@ function funcs:mapError(resulting)
     return (math.abs(resulting)/(resulting + 0.001))*(360 - math.abs(resulting))
   end
 end
+function funcs:mapError2(input_error)
+  if input_error > -180 and input_error < 180 then
+    return input_error
+  elseif input_error < -180 then
+    return input_error + 360
+  else
+    return input_error - 360
+  end
+end
 
 -- Function to map an angle to the range [0, 360]
 function funcs:mapTo360(angle)
@@ -147,7 +156,6 @@ function funcs:haversineDistance(lat1, lon1, lat2, lon2)
 
   return R * c
 end
-
 
 function funcs:pointToLineDistance(px, py, psi, x0, y0, x1, y1)
   local dx, dy = x1 - x0, y1 - y0
