@@ -238,12 +238,12 @@ local function update()
   -- Getting SCR_USER params to PID values
   local ss_rate = param:get('SCR_USER1')
   local lc_rate = 1.0 - ss_rate
-  ss_pid:setP(param:get('SCR_USER2'))
-  ss_pid:setI(param:get('SCR_USER3'))
-  ss_pid:setD(param:get('SCR_USER4'))
-  lc_pid:setP(param:get('SCR_USER2'))
-  lc_pid:setI(param:get('SCR_USER3'))
-  lc_pid:setD(param:get('SCR_USER4'))
+  ss_pid:setP(param:get('SCR_USER2')/1000)
+  ss_pid:setI(param:get('SCR_USER3')/1000)
+  ss_pid:setD(param:get('SCR_USER4')/1000)
+  lc_pid:setP(param:get('SCR_USER2')/1000)
+  lc_pid:setI(param:get('SCR_USER3')/1000)
+  lc_pid:setD(param:get('SCR_USER4')/1000)
 
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
