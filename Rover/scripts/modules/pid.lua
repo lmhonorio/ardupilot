@@ -57,8 +57,8 @@ end
 function PID:compute_debug(error, dt)
   local proportional_output = self.P * error
   local derivative_output = self.D * (error - self.last_error) / dt
-  self.integrator = self:limitRange(self.integrator + error * dt, self.i_min, self.i_max)
-  local integrator_output = self.I * self.integrator
+  self.integrator = self.integrator + error * dt
+  local integrator_output = self:limitRange(self.I * self.integrator, self.i_min, self.i_max)
 
   local pid_value = proportional_output + integrator_output + derivative_output
   local pid_output = self:limitRange(pid_value, self.pid_min, self.pid_max)
