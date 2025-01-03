@@ -30,7 +30,7 @@ local current_wpx, current_wpy = 0, 0
 local zero_steering_error_radius = 1 --[meters]
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local ss_pid = PID:new(0.05, 0.01, 0.0, 0.8, -0.8, 0.8, -0.8)  -- for simple setpoint control
+local ss_pid = PID:new(0.05, 0.01, 0.0, 80, -80, 0.99, -0.99)  -- for simple setpoint control
 local lc_pid = PID:new(0.001, 0.03, 0.0, 0.9, -0.9, 0.9, -0.9) -- for line setpoint control
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
