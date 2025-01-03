@@ -54,7 +54,6 @@ It receives the throttle and steering values and calculates the PWM values for t
 The function also takes into account the trim values for the PWM outputs.
 --]]
 local function applyControlAllocation(t, s)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("steer: %d  thr: %d", math.floor(100 * s), math.floor(100 * t)))
   local aloc = 450
 
   local hip = math.sqrt(t * t + s * s) + 0.0001
@@ -94,7 +93,7 @@ end
 Control the actions while not armed
 --]]
 local function notArmed()
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("ROVER - disarmed."))
+  --gcs:send_text(MAV_SEVERITY.WARNING, string.format("ROVER - disarmed."))
 
   local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
   local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
@@ -237,7 +236,7 @@ end
 local function update()
   local vehicle_type = param:get('SCR_USER5')
   -- Getting SCR_USER params to PID values
-  local ss_rate = param:get('SCR_USER1') -- default 0.4
+  local ss_rate = param:get('SCR_USER1')
   local lc_rate = 1.0 - ss_rate
   ss_pid:setP(param:get('SCR_USER2'))
   ss_pid:setI(param:get('SCR_USER3'))
