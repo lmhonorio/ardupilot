@@ -25,8 +25,8 @@ local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
 -- Mission control logic - waypoints XY coordinates to calculate bearing error
-local last_wpx, last_wpy = 0, 0
-local current_wpx, current_wpy = 0, 0
+local last_wp_x, last_wp_y = 0, 0
+local current_wp_x, current_wp_y = 0, 0
 local zero_steering_error_radius = 1 --[meters]
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
@@ -156,7 +156,7 @@ Control the outputs using only the bearing to the next waypoint
 local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw() * 180.0 / 3.1415)
-  local steering_error = fun:mapError2(wp_bearing - vh_yaw)
+  local steering_error = fun:mapErrorToRange(wp_bearing - vh_yaw)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
     math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
@@ -172,9 +172,8 @@ end
 Controls the actions by considering the mission previous and current waypoint,
 and the line between them
 --]]
-local function getMissionSetpointsData()
+local function getLineBearingFromWaypoints()
   local mission_state = mission:state()
-
   -- Check if mission is over
   if mission_state == MISSION_STATE.FINISHED then
     local steering = 0
@@ -184,44 +183,45 @@ local function getMissionSetpointsData()
 
     return steering, throttle
   end
-
+  -- First time the mission is running, start the last mission index with the first waypoint
+  -- Use current location as the reference last waypoint
   if last_mission_index == -1 then
     last_mission_index = mission:get_current_nav_index()
 
-    local mylocation = ahrs:get_position()
-    last_wpx = mylocation:lat() / 1e7
-    last_wpy = mylocation:lng() / 1e7
+    local vh_location = ahrs:get_position()
+    last_wp_x = vh_location:lat() / 1e7
+    last_wp_y = vh_location:lng() / 1e7
 
-    local missionitem = mission:get_item(last_mission_index)
-    current_wpx = missionitem:x() / 1e7
-    current_wpy = missionitem:y() / 1e7
+    local current_waypoint = mission:get_item(last_mission_index)
+    current_wp_x = current_waypoint:x() / 1e7
+    current_wp_y = current_waypoint:y() / 1e7
   end
 
+  -- If we switched waypoints, refresh the last and current waypoints to form the line
   local mission_index = mission:get_current_nav_index()
-
   if mission_index ~= last_mission_index then
-    last_wpx = current_wpx
-    last_wpy = current_wpy
+    last_wp_x = current_wp_x
+    last_wp_y = current_wp_y
 
     last_mission_index = mission_index;
 
-    local missionitem = mission:get_item(mission_index)
-    current_wpx = missionitem:x() / 1e7
-    current_wpy = missionitem:y() / 1e7
+    local current_waypoint = mission:get_item(mission_index)
+    current_wp_x = current_waypoint:x() / 1e7
+    current_wp_y = current_waypoint:y() / 1e7
   end
 
-  local mylocation = ahrs:get_position()
-  local myx = mylocation:lat() / 1e7
-  local myy = mylocation:lng() / 1e7
+  -- Get vehicle location info
+  local vh_location = ahrs:get_position()
+  local vh_x = vh_location:lat() / 1e7
+  local vh_y = vh_location:lng() / 1e7
   local vh_yaw = fun:mapTo360(fun:toDegrees(ahrs:get_yaw()))
 
-  local dist, ang = fun:pointToLineDistance(myx, myy, vh_yaw, last_wpx, last_wpy, current_wpx, current_wpy)
-
-  return dist, ang
+  -- Compare our location to the line formed by the last and current waypoints
+  return fun:lineProjectionBearing(vh_x, vh_y, vh_yaw, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
 end
 
 local function followLineControl()
-  local distance, steering_error = getMissionSetpointsData()
+  local steering_error = getLineBearingFromWaypoints()
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
   local steering = lc_pid:compute(0, steering_error, 0.2)
 
