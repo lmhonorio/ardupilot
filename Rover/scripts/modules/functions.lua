@@ -78,8 +78,12 @@ function funcs:addPolars(r1, theta1, r2, theta2)
   return funcs:toPolar(x_total, y_total)
 end
 
--- Calculates orientation based on two pairs of geographic coordinates (the vector from one to the other)
-function funcs:calculateBearing(lat_1, lon_1, lat_2, lon_2)
+--[[ 
+Calculates orientation based on two pairs of geographic coordinates (the vector from one to the other)
+First point is the origin, second on is the target of our orientation.
+0 degrees should be north, 90 degrees east
+--]]
+function funcs:calculateBearingBetweenPoints(lat_1, lon_1, lat_2, lon_2)
   local rad_lat_1, rad_lon_1 = funcs:toRadians(lat_1), funcs:toRadians(lon_1)
   local rad_lat_2, rad_lon_2 = funcs:toRadians(lat_2), funcs:toRadians(lon_2)
   local d_lon = rad_lon_2 - rad_lon_1
@@ -89,9 +93,9 @@ function funcs:calculateBearing(lat_1, lon_1, lat_2, lon_2)
   return (funcs:toDegrees(bearing) + 360) % 360
 end
 
--- Função Haversine para calcular distância entre dois pontos geográficos
+-- Calculate distance (latlon to meters)
 function funcs:haversineDistance(lat_1, lon_1, lat_2, lon_2)
-  local R = 6371000 -- Raio da Terra em metros
+  local R = 6371000 -- Earth radius [m]
   local rad_lat_1, rad_lon_1 = funcs:toRadians(lat_1), funcs:toRadians(lon_1)
   local rad_lat_2, rad_lon_2 = funcs:toRadians(lat_2), funcs:toRadians(lon_2)
   local deltaLat = rad_lat_2 - rad_lat_1
@@ -121,13 +125,38 @@ function funcs:lineProjectionBearing(p_x, p_y, vh_yaw, s_x, s_y, e_x, e_y)
     projected_x, projected_y = e_x, e_y
   end
 
-  local bearing_to_wp = funcs:calculateBearing(p_x, p_y, e_x, e_y)
+  local bearing_to_wp = funcs:calculateBearingBetweenPoints(p_x, p_y, e_x, e_y)
   --local angle_difference = (bearing_to_wp - vh_yaw + 360) % 360
   local angle_difference = (bearing_to_wp - vh_yaw/2 + 360) % 360
 
   local side_signal = funcs:pointSideWithRespectToLine(s_x, s_y, e_x, e_y, p_x, p_y)
 
   return side_signal*angle_difference
+end
+
+function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
+  -- Calculate the projection scalar t of our current (p)
+  -- on top of the line formed from start (s) to end (e) points
+  local sp_x, sp_y = p_x - s_x, p_y - s_y
+  local se_x, se_y = e_x - s_x, e_y - s_y
+  local se_length_squared = se_x^2 + se_y^2
+  local t = funcs:dotProduct(sp_x, sp_y, se_x, se_y) / se_length_squared
+
+  -- Give some incresase to t, as if we were looking a bit ahead of where we are in the line
+  t = t + 0.1
+  if t > 0.8 then
+    t = 1
+  end
+
+  -- If not 0<=t<=1, make sure we have the reference back in this range
+  local projected_x, projected_y = s_x + t * se_x, s_y + t * se_y
+  if t < 0 then
+    projected_x, projected_y = s_x, s_y
+  elseif t > 1 then
+    projected_x, projected_y = e_x, e_y
+  end
+
+  return projected_x, projected_y
 end
 
 function funcs:pointSideWithRespectToLine(p0_x, p0_y, p1_x, p1_y, r_x, r_y)

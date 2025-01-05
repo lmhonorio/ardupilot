@@ -217,13 +217,21 @@ local function getLineBearingFromWaypoints()
   local vh_yaw = fun:mapTo360(fun:toDegrees(ahrs:get_yaw()))
 
   -- Compare our location to the line formed by the last and current waypoints
-  return fun:lineProjectionBearing(vh_x, vh_y, vh_yaw, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
+  -- return fun:lineProjectionBearing(vh_x, vh_y, vh_yaw, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
+  -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
+  local line_point_x, line_point_y = fun:lineProjectionPoint(vh_x, vh_y, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
+  -- The bearing angle to the line projection
+  local vh_line_bearing = funcs:calculateBearingBetweenPoints(vh_x, vh_y, line_point_x, line_point_y)
+  -- Return the steering error from the vehicle yaw to the desired bearing
+  return fun:mapErrorToRange(vh_line_bearing - vh_yaw)
 end
 
 local function followLineControl()
   local steering_error = getLineBearingFromWaypoints()
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-  local steering = lc_pid:compute(0, steering_error, 0.2)
+  local p, i, d, steering = lc_pid:compute_debug(steering_error, 0.2)
+  -- gcs:send_text(MAV_SEVERITY.WARNING, string.format("p: %d  i: %d  d: %d",
+  --   math.floor(100*p), math.floor(100*i), math.floor(100*d)))
 
   return steering, throttle
 end
