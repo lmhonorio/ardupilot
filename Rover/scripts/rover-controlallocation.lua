@@ -160,12 +160,11 @@ local function simpleSetpointControl()
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
     math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
   local p, i, d, steering = ss_pid:compute_debug(steering_error, 0.2)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("p: %d  i: %d  d: %d",
     math.floor(100*p), math.floor(100*i), math.floor(100*d)))
 
-  return steering, throttle
+  return steering
 end
 
 --[[
@@ -228,12 +227,11 @@ end
 
 local function followLineControl()
   local steering_error = getLineBearingFromWaypoints()
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
   local p, i, d, steering = lc_pid:compute_debug(steering_error, 0.2)
   -- gcs:send_text(MAV_SEVERITY.WARNING, string.format("p: %d  i: %d  d: %d",
   --   math.floor(100*p), math.floor(100*i), math.floor(100*d)))
 
-  return steering, throttle
+  return steering
 end
 -------------------------------------------------------------------------------
 
@@ -262,25 +260,31 @@ local function update()
     return update, 2000
   end
 
-  -- Controlling in MANUAL MODE
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
+    --[[
+    Controlling in MANUAL MODE
+    --]] 
     manualMode()
     return update, 200
   else
-    -- Controlling in AUTO MODE
+    --[[
+    Controlling in AUTO MODE
+    --]]
     if vehicle:get_mode() < DRIVING_MODES.AUTO then
       vehicle:set_mode(DRIVING_MODES.AUTO)
     end
 
+    -- Acquiring throttle from internal control output
+    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
+    
+    -- Getting steering from proper method and applying control signal to the servos
     local mission_state = mission:state()
-    local lc_steering, lc_throttle = 0, 0 -- for line control method
-    local ss_steering, ss_throttle = 0, 0 -- for the simple setpoint method
-    ss_steering, ss_throttle = simpleSetpointControl()
+    local ss_steering = simpleSetpointControl()
     if mission_state == MISSION_STATE.IDLE then
-      applyControlAllocation(ss_throttle, ss_steering)
+      applyControlAllocation(throttle, ss_steering)
     else
-      lc_steering, lc_throttle = followLineControl()
-      applyControlAllocation(ss_throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
+      local lc_steering = followLineControl()
+      applyControlAllocation(throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
     end
 
     return update, 200
