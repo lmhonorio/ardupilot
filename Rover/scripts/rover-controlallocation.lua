@@ -20,6 +20,11 @@ local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local last_mission_index = -1
+-- TRIM values
+local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
+local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
+local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
+local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 -- Throttle smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
@@ -70,17 +75,11 @@ local function applyControlAllocation(t, s)
   local n_aloc_right = math.floor(nft + nfs)
   local n_aloc_left = math.floor(nft - nfs)
 
-  -- Getting the trim values for PWM outputs
-  local pwm0_trim = tonumber(param:get('SERVO1_TRIM')) or 0
-  local pwm1_trim = tonumber(param:get('SERVO2_TRIM')) or 0
-  local pwm2_trim = tonumber(param:get('SERVO3_TRIM')) or 0
-  local pwm3_trim = tonumber(param:get('SERVO4_TRIM')) or 0
-
   -- Limiting the output values to the PWM ranges
-  local pwm_0 = fun:mapMaxMin(pwm0_trim - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_1 = fun:mapMaxMin(pwm1_trim + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_2 = fun:mapMaxMin(pwm2_trim + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_3 = fun:mapMaxMin(pwm3_trim - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_0 = fun:mapMaxMin(PWM0_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_1 = fun:mapMaxMin(PWM1_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_2 = fun:mapMaxMin(PWM2_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_3 = fun:mapMaxMin(PWM3_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
 
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
@@ -94,11 +93,6 @@ Control the actions while not armed
 --]]
 local function notArmed()
   --gcs:send_text(MAV_SEVERITY.WARNING, string.format("ROVER - disarmed."))
-
-  local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
-  local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
-  local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
-  local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 
   SRV_Channels:set_output_pwm_chan_timeout(0, PWM0_TRIM_VALUE, 3000)
   SRV_Channels:set_output_pwm_chan_timeout(1, PWM1_TRIM_VALUE, 3000)
@@ -246,6 +240,12 @@ local function update()
   local p, i, d = param:get('SCR_USER2')/1000, param:get('SCR_USER3')/1000, param:get('SCR_USER4')/1000
   ss_pid:setGains(p, i, d)
   lc_pid:setGains(p, i, d)
+
+  -- Updating TRIM global variables
+  PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
+  PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
+  PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
+  PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
