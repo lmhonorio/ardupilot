@@ -244,9 +244,9 @@ local function update()
   local ss_rate = param:get('SCR_USER1')
   local lc_rate = 1.0 - ss_rate
   local p, i, d = param:get('SCR_USER2')/1000, param:get('SCR_USER3')/1000, param:get('SCR_USER4')/1000
-  ss_pid:setGain(p, i, d)
-  lc_pid:setGain(p, i, d)
-  
+  ss_pid:setGains(p, i, d)
+  lc_pid:setGains(p, i, d)
+
   if not (vehicle_type == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
     return
