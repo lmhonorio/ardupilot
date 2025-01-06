@@ -69,6 +69,9 @@ local function applyControlAllocation(t, s)
   T = math.abs(nTa / (math.abs(nTa) + math.abs(nSa) + 0.0001))
   S = math.abs(nSa / (math.abs(nTa) + math.abs(nSa) + 0.0001))
 
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("T: %d S: %d",
+    math.floor(100*T), math.floor(100*S)))
+
   local nft = t * T * aloc
   local nfs = s * S * aloc
 
@@ -80,6 +83,9 @@ local function applyControlAllocation(t, s)
   local pwm_1 = fun:mapMaxMin(PWM1_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_2 = fun:mapMaxMin(PWM2_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_3 = fun:mapMaxMin(PWM3_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("pwm_minus: %d pwm_plus: %d",
+    math.floor(pwm_0), math.floor(pwm_1)))
 
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
@@ -292,7 +298,10 @@ local function update()
       applyControlAllocation(throttle, ss_steering)
     else
       local lc_steering = followLineControl()
-      applyControlAllocation(throttle, (ss_rate * ss_steering + lc_rate * lc_steering))
+      local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+      gcs:send_text(MAV_SEVERITY.WARNING, string.format("throttle: %d  steering: %d",
+        math.floor(100*throttle), math.floor(steering_error)))
+      applyControlAllocation(throttle, steering_error)
     end
 
     return update, 200
