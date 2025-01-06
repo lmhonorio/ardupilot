@@ -216,7 +216,10 @@ local function getLineBearingFromWaypoints()
   -- The bearing angle to the line projection
   local vh_line_bearing = funcs:calculateBearingBetweenPoints(vh_x, vh_y, line_point_x, line_point_y)
   -- Return the steering error from the vehicle yaw to the desired bearing
-  return fun:mapErrorToRange(vh_line_bearing - vh_yaw)
+  local steering_error = fun:mapErrorToRange(vh_line_bearing - vh_yaw)
+  -- gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
+  --   math.floor(vh_yaw), math.floor(vh_line_bearing), math.floor(steering_error)))
+  return steering_error
 end
 
 local function followLineControl()
