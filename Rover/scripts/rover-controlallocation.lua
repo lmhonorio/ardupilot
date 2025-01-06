@@ -153,8 +153,8 @@ local function simpleSetpointControl()
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw() * 180.0 / 3.1415)
   local steering_error = fun:mapErrorToRange(wp_bearing - vh_yaw)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
-    math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
+  --gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
+  --  math.floor(vh_yaw), math.floor(wp_bearing), math.floor(steering_error)))
 
   local p, i, d, steering = ss_pid:compute_debug(steering_error, 0.2)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("p: %d  i: %d  d: %d",
@@ -214,9 +214,12 @@ local function getLineBearingFromWaypoints()
   -- Compare our location to the line formed by the last and current waypoints
   -- return fun:lineProjectionBearing(vh_x, vh_y, vh_yaw, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
   -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
+  if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
+    return 0
+  end
   local line_point_x, line_point_y = fun:lineProjectionPoint(vh_x, vh_y, last_wp_x, last_wp_y, current_wp_x, current_wp_y)
   -- The bearing angle to the line projection
-  local vh_line_bearing = funcs:calculateBearingBetweenPoints(vh_x, vh_y, line_point_x, line_point_y)
+  local vh_line_bearing = fun:calculateBearingBetweenPoints(vh_x, vh_y, line_point_x, line_point_y)
   -- Return the steering error from the vehicle yaw to the desired bearing
   local steering_error = fun:mapErrorToRange(vh_line_bearing - vh_yaw)
   -- gcs:send_text(MAV_SEVERITY.WARNING, string.format("yaw: %d  bear: %d  err: %d",
@@ -266,6 +269,8 @@ local function update()
     --[[
     Controlling in MANUAL MODE
     --]] 
+    ss_pid:resetInternalState()
+    lc_pid:resetInternalState()
     manualMode()
     return update, 200
   else
@@ -278,6 +283,7 @@ local function update()
 
     -- Acquiring throttle from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
+    throttle = fun:mapMaxMin(throttle, 0.1, 1.0)
     
     -- Getting steering from proper method and applying control signal to the servos
     local mission_state = mission:state()

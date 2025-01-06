@@ -12,7 +12,7 @@ function PID:new(p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min)
     I = i_gain or 0,
     D = d_gain or 0,
     integrator = 0,
-    last_error = 0,
+    last_error = nil,
     i_max = i_max or 0,
     i_min = i_min or 0,
     pid_max = pid_max or 1,
@@ -34,6 +34,11 @@ function PID:limitRange(value, min, max)
   return math.min(math.max(value, min), max)
 end
 
+function PID:resetInternalState()
+  self.integrator = 0
+  self.last_error = nil
+end
+
 function PID:compute(setpoint, current_value, dt)
   local error = setpoint - current_value
   local deriv = (error - self.last_error) / dt
@@ -49,15 +54,22 @@ function PID:compute(setpoint, current_value, dt)
 end
 
 function PID:compute_debug(error, dt)
+  -- Proportional output
   local proportional_output = self.P * error
-  local derivative_output = self.D * (error - self.last_error) / dt
+  -- Derivative output
+  -- If no last error, dont take into accout the derivative yet
+  local derivative_output = 0
+  if self.last_error ~= nil then
+    derivative_output = self.D * (error - self.last_error) / dt
+  end
+  self.last_error = error
+  -- Integrator output
   self.integrator = self:limitRange(self.integrator + error * dt, self.i_min, self.i_max)
   local integrator_output = self.I * self.integrator
 
+  -- PID control signal
   local pid_value = proportional_output + integrator_output + derivative_output
   local pid_output = self:limitRange(pid_value, self.pid_min, self.pid_max)
-
-  self.last_error = error
 
   return proportional_output, integrator_output, derivative_output, pid_output
 end
