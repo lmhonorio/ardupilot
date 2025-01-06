@@ -19,6 +19,7 @@ local funcs = require("functions")
 local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
+local PWM_RANGE = 450
 local last_mission_index = -1
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
@@ -58,19 +59,19 @@ It receives the throttle and steering values and calculates the PWM values for t
 The function also takes into account the trim values for the PWM outputs.
 --]]
 local function applyControlAllocation(t, s)
-  local aloc = 450
-
+  -- Hypotenuse formed by the throttle and steering desired values
   local hip = math.sqrt(t * t + s * s) + 0.0001
-
-  local nTa = aloc * t / hip
-  local nSa = aloc * s / hip
-
-  T = math.abs(nTa / (math.abs(nTa) + math.abs(nSa) + 0.0001))
-  S = math.abs(nSa / (math.abs(nTa) + math.abs(nSa) + 0.0001))
-
-  local nft = t * T * aloc
-  local nfs = s * S * aloc
-
+  -- Apply the proportion on top of the hypotenuse
+  local nTa = math.abs(PWM_RANGE * t / hip)
+  local nSa = math.abs(PWM_RANGE * s / hip)
+  local n_sum = nTa + nSa + 0.0001
+  -- Final throttle and steering values from the proportion
+  T = nTa / n_sum
+  S = nSa / n_sum
+  -- Apply the proportion to the pwm range
+  local nft = t * T * PWM_RANGE
+  local nfs = s * S * PWM_RANGE
+  -- Creating signals for right and left sides
   local n_aloc_right = math.floor(nft + nfs)
   local n_aloc_left = math.floor(nft - nfs)
 
@@ -79,7 +80,6 @@ local function applyControlAllocation(t, s)
   local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)
