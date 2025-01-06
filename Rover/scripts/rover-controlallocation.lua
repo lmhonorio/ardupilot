@@ -148,6 +148,8 @@ end
 Control the outputs using only the bearing to the next waypoint
 --]]
 local function simpleSetpointControl()
+  -- We have the yaw returned in degrees, 0 degrees to the North, 90 to the East
+  -- The bearing to waypoint has its origin on the vehicle, also following North-East frame
   local wp_bearing = vehicle:get_wp_bearing_deg()
   local vh_yaw = fun:mapTo360(ahrs:get_yaw() * 180.0 / 3.1415)
   local steering_error = fun:mapErrorToRange(wp_bearing - vh_yaw)
