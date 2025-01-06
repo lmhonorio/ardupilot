@@ -15,11 +15,13 @@ local funcs = require("functions")
 -------------------------------------------------------------------------------
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
--- Control variables
+-- Channel control variables
 local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local last_mission_index = -1
+-- Vehicle type control
+local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
 local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
 local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
@@ -211,7 +213,12 @@ end
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
 local function update()
-  local vehicle_type = param:get('SCR_USER5')
+  -- Safety check for vehicle type
+  if not (VEHICLE_TYPE == 2) then
+    gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
+    return
+  end
+
   -- Getting SCR_USER params to PID values
   local ss_rate = param:get('SCR_USER1')
   local lc_rate = 1.0 - ss_rate
@@ -219,11 +226,7 @@ local function update()
   ss_pid:setGains(p, i, d)
   lc_pid:setGains(p, i, d)
 
-  if not (vehicle_type == 2) then
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
-    return
-  end
-
+  -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
     notArmed()
     return update, 2000
