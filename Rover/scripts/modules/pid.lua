@@ -39,21 +39,7 @@ function PID:resetInternalState()
   self.last_error = nil
 end
 
-function PID:compute(setpoint, current_value, dt)
-  local error = setpoint - current_value
-  local deriv = (error - self.last_error) / dt
-  self.integrator = self.integrator + error * dt
-  self.integrator = self:limitRange(self.integrator, self.i_min, self.i_max)
-
-  local pid_value = self.P * error + self.I * self.integrator + self.D * deriv
-  local output = self:limitRange(pid_value, self.pid_min, self.pid_max)
-
-  self.last_error = error
-
-  return output
-end
-
-function PID:compute_debug(error, dt)
+function PID:compute(error, dt)
   -- Proportional output
   local proportional_output = self.P * error
   -- Derivative output
@@ -70,8 +56,7 @@ function PID:compute_debug(error, dt)
   -- PID control signal
   local pid_value = proportional_output + integrator_output + derivative_output
   local pid_output = self:limitRange(pid_value, self.pid_min, self.pid_max)
-
-  return proportional_output, integrator_output, derivative_output, pid_output
+  return pid_output
 end
 
 return PID

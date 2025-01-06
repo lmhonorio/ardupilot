@@ -167,7 +167,6 @@ local function update()
     new_control_allocation(throttle, steering)
 
     return update, 200
-
   elseif current_driving_mode == DRIVING_MODES.AUTO or current_driving_mode == DRIVING_MODES.GUIDED then
     if desired_yaw == -1 then
       desired_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
@@ -201,6 +200,6 @@ local function update()
 
     return update, 200
   end
-end -- update function
+end                 -- update function
 
 return update, 3000 -- run immediately before starting to reschedule
