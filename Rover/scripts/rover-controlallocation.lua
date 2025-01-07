@@ -67,7 +67,7 @@ local function applyControlAllocation(t, s)
   -- We do that to take the input signal into account, and also to
   -- reduce the output a bit so we dont send the full signal to the motors all the time,
   -- as if it would happen if only using the proportion of the sum
-  t_share, s_share = t*t_share, s*s_share
+  t_share, s_share = t * t_share, s * s_share
   -- The right and left motors added PWM allocation
   local pwm_aloc_r = (t_share + s_share) * PWM_RANGE
   local pwm_aloc_l = (t_share - s_share) * PWM_RANGE
@@ -250,7 +250,7 @@ local function update()
     -- Getting steering from two methods:
     -- We should pursue both the final waypoint and the current location projected in the line with a small lookahead
     -- That guarantees a fast response, but also a smooth transition between waypoints
-    -- The weighted sum of these values should be the final steering command 
+    -- The weighted sum of these values should be the final steering command
     local ss_rate = param:get('SCR_USER1')
     local ss_steering = simpleSetpointControl()
     local lc_rate = 1.0 - ss_rate
