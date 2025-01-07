@@ -54,32 +54,28 @@ MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 -------------------------------------------------------------------------------
 --[[
 Control allocation
-This function is responsible for the control allocation of the vehicle.
-It receives the throttle and steering values and calculates the PWM values for the motors.
+This function is responsible for the PWM signal allocation of the vehicle.
+It receives the throttle (t) and steering (s) values and calculates the PWM values for the motors.
 The function also takes into account the trim values for the PWM outputs.
 --]]
 local function applyControlAllocation(t, s)
-  -- Hypotenuse formed by the throttle and steering desired values
-  local hip = math.sqrt(t * t + s * s) + 0.0001
-  -- Apply the proportion on top of the hypotenuse
-  local nTa = math.abs(PWM_RANGE * t / hip)
-  local nSa = math.abs(PWM_RANGE * s / hip)
-  local n_sum = nTa + nSa + 0.0001
-  -- Final throttle and steering values from the proportion
-  T = nTa / n_sum
-  S = nSa / n_sum
-  -- Apply the proportion to the pwm range
-  local nft = t * T * PWM_RANGE
-  local nfs = s * S * PWM_RANGE
-  -- Creating signals for right and left sides
-  local n_aloc_right = math.floor(nft + nfs)
-  local n_aloc_left = math.floor(nft - nfs)
-
+  -- The throttle and steering absolute sum, to inspect the total signal we want to insert
+  local ts_sum = math.abs(t) + math.abs(s) + 0.00001
+  -- We compare the value of each input to the total sum
+  local t_share, s_share = math.abs(t) / ts_sum, math.abs(s) / ts_sum
+  -- We create the assigned amount of steering and throttle by multiplying again the shares by the inputs
+  -- We do that to take the input signal into account, and also to
+  -- reduce the output a bit so we dont send the full signal to the motors all the time,
+  -- as if it would happen if only using the proportion of the sum
+  t_share, s_share = t*t_share, s*s_share
+  -- The right and left motors added PWM allocation
+  local pwm_aloc_r = (t_share + s_share) * PWM_RANGE
+  local pwm_aloc_l = (t_share - s_share) * PWM_RANGE
   -- Limiting the output values to the PWM ranges
-  local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + n_aloc_right, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - n_aloc_left, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)
@@ -220,8 +216,6 @@ local function update()
   end
 
   -- Getting SCR_USER params to PID values
-  local ss_rate = param:get('SCR_USER1')
-  local lc_rate = 1.0 - ss_rate
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
   ss_pid:setGains(p, i, d)
   lc_pid:setGains(p, i, d)
@@ -253,9 +247,15 @@ local function update()
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
 
-    -- Getting steering from proper method and applying control signal to the servos
+    -- Getting steering from two methods:
+    -- We should pursue both the final waypoint and the current location projected in the line with a small lookahead
+    -- That guarantees a fast response, but also a smooth transition between waypoints
+    -- The weighted sum of these values should be the final steering command 
+    local ss_rate = param:get('SCR_USER1')
     local ss_steering = simpleSetpointControl()
+    local lc_rate = 1.0 - ss_rate
     local lc_steering = followLineControl()
+
     local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
     applyControlAllocation(throttle, steering_error)
 
