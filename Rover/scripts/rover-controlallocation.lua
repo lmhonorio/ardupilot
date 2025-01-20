@@ -30,6 +30,8 @@ local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
 local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
+-- DEAD ZONE thresh
+local DEAD_ZONE_THRESH = 40
 -- Signal smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
@@ -79,6 +81,11 @@ local function applyControlAllocation(t, s)
   local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- Check if the values are within the dead zone, and if so, set the outputs to the trim values
+  pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
+  pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
+  pwm_2 = funcs:applyDeadZone(pwm_2, PWM2_TRIM_VALUE, DEAD_ZONE_THRESH)
+  pwm_3 = funcs:applyDeadZone(pwm_3, PWM3_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)

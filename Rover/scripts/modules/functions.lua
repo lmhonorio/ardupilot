@@ -130,4 +130,12 @@ function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, tra
   return output_value
 end
 
+function funcs:applyDeadZone(value, trim, dead_zone)
+  -- Check if the values are within the dead zone to return TRIM
+  if value > trim - dead_zone and value < trim + dead_zone then
+    return trim
+  end
+  return value
+end
+
 return funcs
