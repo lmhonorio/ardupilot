@@ -30,10 +30,13 @@ local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
 local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
--- Throttle smoothing logic
+-- Signal smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
+local last_manual_steering = 0
+local steering_accel_rate_thresh = 0.5
+local steering_accel_rate = 0.5
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
 local last_wp_x, last_wp_y = 0, 0
 local current_wp_x, current_wp_y = 0, 0
@@ -100,14 +103,19 @@ local function manualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
 
-  local steering = (rc1_pwm - RC1_TRIM_VALUE) / 450
-  -- Compares the diff from the last manual throttle to the maximum rate we are accepting
+  -- Compares the diff from the last manual signals to the maximum rate we are accepting
   -- Make the actual command be a rate from the last to the required command if necessary
+  local raw_steering = (rc1_pwm - RC1_TRIM_VALUE) / 450
+  local steering = funcs:applyAbsSmoothing(raw_steering, last_manual_steering, steering_accel_rate_thresh,
+    steering_accel_rate)
+  last_manual_steering = steering
   local raw_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
-  local throttle = raw_throttle
-  if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
-    throttle = last_manual_throttle + (raw_throttle - last_manual_throttle) * throttle_accel_rate
-  end
+  local throttle = funcs:applyAbsSmoothing(raw_throttle, last_manual_throttle, throttle_accel_rate_thresh,
+    throttle_accel_rate)
+  -- local throttle = raw_throttle
+  -- if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
+  --   throttle = last_manual_throttle + (raw_throttle - last_manual_throttle) * throttle_accel_rate
+  -- end
   last_manual_throttle = throttle
 
   applyControlAllocation(throttle, steering)

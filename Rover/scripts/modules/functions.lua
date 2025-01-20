@@ -120,4 +120,14 @@ function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
   return projected_x, projected_y
 end
 
+function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, transition_rate)
+  -- Test if we are requiring a change in signal greater than the max allowed
+  local output_value = current_value
+  if math.abs(last_value - current_value) > max_change_rate then
+    -- If transition is high, apply the transition rate to the output signal
+    output_value = last_value + (output_value - last_value) * transition_rate
+  end
+  return output_value
+end
+
 return funcs
