@@ -118,6 +118,11 @@ local function manualMode()
   -- end
   last_manual_throttle = throttle
 
+  gcs:send_text(MAV_SEVERITY.WARNING,
+  string.format("steering pwm : %d ; throttle pwm : %d", rc3_pwm, rc1_pwm))
+  gcs:send_text(MAV_SEVERITY.WARNING,
+  string.format("STEERING sent: %d ; THROTTLE sent: %d", math.floor(steering * 1000), math.floor(throttle * 1000)))
+
   applyControlAllocation(throttle, steering)
 end
 
