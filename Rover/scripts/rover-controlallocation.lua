@@ -52,6 +52,9 @@ MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4,
 DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
 -- Mission states dictionary
 MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
+-- Break system avoidance with small signal
+local min_break_signal_up = 1525
+local min_break_signal_down = 1475
 -------------------------------------------------------------------------------
 
 -------------------------------------------------------------------------------
@@ -81,6 +84,11 @@ local function applyControlAllocation(t, s)
   local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- Apply small non breaking signal logic
+  pwm_0 = funcs:applyNonBreakingSignal(pwm_0, PWM0_TRIM_VALUE, 20, 5)
+  pwm_1 = funcs:applyNonBreakingSignal(pwm_1, PWM1_TRIM_VALUE, 20, 5)
+  pwm_2 = funcs:applyNonBreakingSignal(pwm_2, PWM2_TRIM_VALUE, 20, 5)
+  pwm_3 = funcs:applyNonBreakingSignal(pwm_3, PWM3_TRIM_VALUE, 20, 5)
   -- Check if the values are within the dead zone, and if so, set the outputs to the trim values
   pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
   pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
