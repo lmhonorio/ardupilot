@@ -138,4 +138,20 @@ function funcs:applyDeadZone(value, trim, dead_zone)
   return math.floor(value)
 end
 
+function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
+  -- The throttle and steering absolute sum, to inspect the total signal we want to insert
+  local ts_sum = math.abs(t) + math.abs(s) + 0.00001
+  -- We compare the value of each input to the total sum
+  local t_share, s_share = math.abs(t) / ts_sum, math.abs(s) / ts_sum
+  -- We create the assigned amount of steering and throttle by multiplying again the shares by the inputs
+  -- We do that to take the input signal into account, and also to
+  -- reduce the output a bit so we dont send the full signal to the motors all the time,
+  -- as if it would happen if only using the proportion of the sum
+  t_share, s_share = t * t_share, s * s_share
+  -- The right and left motors added PWM allocation
+  local pwm_aloc_l = (t_share + s_share) * pwm_range
+  local pwm_aloc_r = (t_share - s_share) * pwm_range
+  return pwm_aloc_l, pwm_aloc_r
+end
+
 return funcs

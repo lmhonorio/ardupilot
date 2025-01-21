@@ -64,33 +64,30 @@ It receives the throttle (t) and steering (s) values and calculates the PWM valu
 The function also takes into account the trim values for the PWM outputs.
 --]]
 local function applyControlAllocation(t, s)
-  -- The throttle and steering absolute sum, to inspect the total signal we want to insert
-  local ts_sum = math.abs(t) + math.abs(s) + 0.00001
-  -- We compare the value of each input to the total sum
-  local t_share, s_share = math.abs(t) / ts_sum, math.abs(s) / ts_sum
-  -- We create the assigned amount of steering and throttle by multiplying again the shares by the inputs
-  -- We do that to take the input signal into account, and also to
-  -- reduce the output a bit so we dont send the full signal to the motors all the time,
-  -- as if it would happen if only using the proportion of the sum
-  t_share, s_share = t * t_share, s * s_share
-  -- The right and left motors added PWM allocation
-  local pwm_aloc_r = (t_share + s_share) * PWM_RANGE
-  local pwm_aloc_l = (t_share - s_share) * PWM_RANGE
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
+  -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
+  -- MOTOR FRAME
+  -- 1 - 0     ^
+  --   |       | Forward direction
+  -- 2 - 3
   -- Limiting the output values to the PWM ranges
-  local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_l = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- Check if the values are within the dead zone, and if so, set the outputs to the trim values
   -- pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- pwm_2 = funcs:applyDeadZone(pwm_2, PWM2_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- pwm_3 = funcs:applyDeadZone(pwm_3, PWM3_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- Setting the PWM outputs based on the control allocation directions
-  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_2, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_3, 300)
+  -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
 end
 
 --[[
