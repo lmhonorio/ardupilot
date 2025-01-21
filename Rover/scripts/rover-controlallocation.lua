@@ -34,8 +34,8 @@ local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
 local last_manual_steering = 0
-local steering_accel_rate_thresh = 0.2
-local steering_accel_rate = 0.2
+local steering_accel_rate_thresh = 0.6
+local steering_accel_rate = 0.6
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
 local last_wp_x, last_wp_y = 0, 0
 local current_wp_x, current_wp_y = 0, 0
@@ -68,8 +68,8 @@ local function applyControlAllocation(t, s)
   -- 2 - 3
   local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
   -- Limiting the output values to the PWM ranges
-  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)

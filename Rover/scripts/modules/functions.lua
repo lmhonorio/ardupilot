@@ -151,7 +151,7 @@ function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   -- The right and left motors added PWM allocation
   local pwm_aloc_l = (t_share + s_share) * pwm_range
   local pwm_aloc_r = (t_share - s_share) * pwm_range
-  return pwm_aloc_l, pwm_aloc_r
+  return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
 end
 
 return funcs
