@@ -37,8 +37,8 @@ local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
 local throttle_accel_rate = 0.5
 local last_manual_steering = 0
-local steering_accel_rate_thresh = 0.5
-local steering_accel_rate = 0.5
+local steering_accel_rate_thresh = 0.2
+local steering_accel_rate = 0.2
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
 local last_wp_x, last_wp_y = 0, 0
 local current_wp_x, current_wp_y = 0, 0
