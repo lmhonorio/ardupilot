@@ -52,9 +52,6 @@ MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4,
 DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
 -- Mission states dictionary
 MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
--- Break system avoidance with small signal
-local min_break_signal_up = 1525
-local min_break_signal_down = 1475
 -------------------------------------------------------------------------------
 
 -------------------------------------------------------------------------------
@@ -84,16 +81,11 @@ local function applyControlAllocation(t, s)
   local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- Apply small non breaking signal logic
-  pwm_0 = funcs:applyNonBreakingSignal(pwm_0, PWM0_TRIM_VALUE, 20, 5)
-  pwm_1 = funcs:applyNonBreakingSignal(pwm_1, PWM1_TRIM_VALUE, 20, 5)
-  pwm_2 = funcs:applyNonBreakingSignal(pwm_2, PWM2_TRIM_VALUE, 20, 5)
-  pwm_3 = funcs:applyNonBreakingSignal(pwm_3, PWM3_TRIM_VALUE, 20, 5)
   -- Check if the values are within the dead zone, and if so, set the outputs to the trim values
-  pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
-  pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
-  pwm_2 = funcs:applyDeadZone(pwm_2, PWM2_TRIM_VALUE, DEAD_ZONE_THRESH)
-  pwm_3 = funcs:applyDeadZone(pwm_3, PWM3_TRIM_VALUE, DEAD_ZONE_THRESH)
+  -- pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
+  -- pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
+  -- pwm_2 = funcs:applyDeadZone(pwm_2, PWM2_TRIM_VALUE, DEAD_ZONE_THRESH)
+  -- pwm_3 = funcs:applyDeadZone(pwm_3, PWM3_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- Setting the PWM outputs based on the control allocation directions
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_0, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_1, 300)
@@ -127,16 +119,7 @@ local function manualMode()
   local raw_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
   local throttle = funcs:applyAbsSmoothing(raw_throttle, last_manual_throttle, throttle_accel_rate_thresh,
     throttle_accel_rate)
-  -- local throttle = raw_throttle
-  -- if math.abs(last_manual_throttle - raw_throttle) > throttle_accel_rate_thresh then
-  --   throttle = last_manual_throttle + (raw_throttle - last_manual_throttle) * throttle_accel_rate
-  -- end
   last_manual_throttle = throttle
-
-  gcs:send_text(MAV_SEVERITY.WARNING,
-  string.format("steering pwm : %d ; throttle pwm : %d", rc3_pwm, rc1_pwm))
-  gcs:send_text(MAV_SEVERITY.WARNING,
-  string.format("STEERING sent: %d ; THROTTLE sent: %d", math.floor(steering * 1000), math.floor(throttle * 1000)))
 
   applyControlAllocation(throttle, steering)
 end

@@ -133,21 +133,9 @@ end
 function funcs:applyDeadZone(value, trim, dead_zone)
   -- Check if the values are within the dead zone to return TRIM
   if value > trim - dead_zone and value < trim + dead_zone then
-    return trim
+    return math.floor(trim)
   end
-  return value
-end
-
-function funcs:applyNonBreakingSignal(value, trim, dead_zone, dead_zone_offset)
-  -- Check if we are close to the TRIM value, inside the deadzone, and to which side
-  -- Send a small signal, out of the dead zone, in that direction
-  if value > trim - dead_zone and value < trim then
-    return trim - dead_zone - dead_zone_offset
-  end
-  if value < trim + dead_zone and value > trim then
-    return trim + dead_zone + dead_zone_offset
-  end
-  return value
+  return math.floor(value)
 end
 
 return funcs
