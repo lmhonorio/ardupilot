@@ -24,10 +24,7 @@ local last_mission_index = -1
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
-local PWM0_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
-local PWM1_TRIM_VALUE = tonumber(param:get('SERVO2_TRIM')) or 0
-local PWM2_TRIM_VALUE = tonumber(param:get('SERVO3_TRIM')) or 0
-local PWM3_TRIM_VALUE = tonumber(param:get('SERVO4_TRIM')) or 0
+local PWM_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
 -- DEAD ZONE thresh
@@ -71,8 +68,8 @@ local function applyControlAllocation(t, s)
   --   |       | Rover forward direction
   -- 2 - 3
   -- Limiting the output values to the PWM ranges
-  local pwm_l = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
@@ -94,10 +91,10 @@ end
 Control the actions while not armed
 --]]
 local function notArmed()
-  SRV_Channels:set_output_pwm_chan_timeout(0, PWM0_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(1, PWM1_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(2, PWM2_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(3, PWM3_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(0, PWM_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(1, PWM_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(2, PWM_TRIM_VALUE, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(3, PWM_TRIM_VALUE, 3000)
 end
 
 --[[
