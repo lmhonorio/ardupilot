@@ -66,9 +66,9 @@ The function also takes into account the trim values for the PWM outputs.
 local function applyControlAllocation(t, s)
   local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
-  -- MOTOR FRAME
+  -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
-  --   |       | Forward direction
+  --   |       | Rover forward direction
   -- 2 - 3
   -- Limiting the output values to the PWM ranges
   local pwm_l = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
