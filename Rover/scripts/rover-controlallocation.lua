@@ -70,15 +70,6 @@ local function applyControlAllocation(t, s)
   -- Limiting the output values to the PWM ranges
   local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- local pwm_0 = funcs:mapMaxMin(PWM0_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- local pwm_1 = funcs:mapMaxMin(PWM1_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- local pwm_2 = funcs:mapMaxMin(PWM2_TRIM_VALUE + pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- local pwm_3 = funcs:mapMaxMin(PWM3_TRIM_VALUE - pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- Check if the values are within the dead zone, and if so, set the outputs to the trim values
-  -- pwm_0 = funcs:applyDeadZone(pwm_0, PWM0_TRIM_VALUE, DEAD_ZONE_THRESH)
-  -- pwm_1 = funcs:applyDeadZone(pwm_1, PWM1_TRIM_VALUE, DEAD_ZONE_THRESH)
-  -- pwm_2 = funcs:applyDeadZone(pwm_2, PWM2_TRIM_VALUE, DEAD_ZONE_THRESH)
-  -- pwm_3 = funcs:applyDeadZone(pwm_3, PWM3_TRIM_VALUE, DEAD_ZONE_THRESH)
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
