@@ -121,6 +121,17 @@ local function update()
     previous_driving_mode = current_driving_mode
   end
 
+  -- Battery monitoring
+  local num_batts = battery:num_instances()
+  for i=0,num_batts do
+      local voltage = battery:voltage(i)
+      if voltage > 0.1 then
+        if voltage < 45 then
+          gcs:send_text(MAV_SEVERITY.WARNING, string.format("NIVEL DA BATERIA BAIXO, VOLTE PARA A BASE"))
+        end
+      end
+  end
+
   -- Check if armed to begin control allocation safely
   if not arming:is_armed() then
     gcs:send_text(MAV_SEVERITY.INFO, string.format("BOAT - disarmed, waiting for arming."))
