@@ -1,0 +1,4 @@
+param set SIM_SPEEDUP 0
+param set SIM_WIND_EN 0
+param set SIM_ACCEL_FAIL 1
+param set SIM_GPS_DISABLE 1

@@ -1,0 +1,62 @@
+    switch (_guided_mode) {
+        case SubMode::WP:
+        {
+            // check if we've reached the destination
+            if (!g2.wp_nav.reached_destination()) {
+                // update navigation controller
+                navigate_to_waypoint();
+            } else {
+                // send notification
+                if (send_notification) {
+                    send_notification = false;
+                    rover.gcs().send_mission_item_reached_message(0);
+                }
+
+                // we have reached the destination so stay here
+                if (rover.is_boat()) {
+                    if (!start_loiter()) {
+                        stop_vehicle();
+                    }
+                } else {
+                    stop_vehicle();
+                }
+                // update distance to destination
+                _distance_to_destination = rover.current_loc.get_distance(g2.wp_nav.get_destination());
+            }
+            break;
+        }
+
+
+
+        // high level call to navigate to waypoint
+// uses wp_nav to calculate turn rate and speed to drive along the path from origin to destination
+// this function updates _distance_to_destination
+void Mode::navigate_to_waypoint()
+{
+    // apply speed nudge from pilot
+    // calc_speed_nudge's "desired_speed" argument should be negative when vehicle is reversing
+    // AR_WPNav nudge_speed_max argu,ent should always be positive even when reversing
+    const float calc_nudge_input_speed = g2.wp_nav.get_speed_max() * (g2.wp_nav.get_reversed() ? -1.0 : 1.0);
+    const float nudge_speed_max = calc_speed_nudge(calc_nudge_input_speed, g2.wp_nav.get_reversed());
+    g2.wp_nav.set_nudge_speed_max(fabsf(nudge_speed_max));
+
+    // update navigation controller
+    g2.wp_nav.update(rover.G_Dt);
+    _distance_to_destination = g2.wp_nav.get_distance_to_destination();
+
+    // pass desired speed to throttle controller
+    // do not do simple avoidance because this is already handled in the position controller
+    calc_throttle(g2.wp_nav.get_speed(), false);
+
+    float desired_heading_cd = g2.wp_nav.oa_wp_bearing_cd();
+    // retrieve turn rate from waypoint controller
+    float desired_turn_rate_rads = g2.wp_nav.get_turn_rate_rads();
+
+    // call turn rate steering controller
+    calc_steering_from_turn_rate(desired_turn_rate_rads);
+    
+}
+
+
+
+
