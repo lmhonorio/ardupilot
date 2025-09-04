@@ -103,19 +103,13 @@ function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
   local se_length_squared = se_x ^ 2 + se_y ^ 2
   local t = funcs:dotProduct(sp_x, sp_y, se_x, se_y) / se_length_squared
 
-  -- Give some incresase to t, as if we were looking a bit ahead of where we are in the line
-  t = t + 0.1
-  if t > 0.8 then
-    t = 1
+  -- Give some increase to t, as if we were looking a bit ahead of where we are in the line
+  t = t + 0.2
+  if t < 0.2 then -- Avoid initial uncertainty 
+    t = 0.2
   end
 
-  -- If not 0<=t<=1, make sure we have the reference back in this range
   local projected_x, projected_y = s_x + t * se_x, s_y + t * se_y
-  if t < 0 then
-    projected_x, projected_y = s_x, s_y
-  elseif t > 1 then
-    projected_x, projected_y = e_x, e_y
-  end
 
   return projected_x, projected_y
 end

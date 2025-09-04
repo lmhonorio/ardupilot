@@ -154,6 +154,7 @@ local function getLineBearingFromWaypoints()
   local vh_location = ahrs:get_position()
   local vh_x = vh_location:lat() / 1e7
   local vh_y = vh_location:lng() / 1e7
+  local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- In case of any nil value from the internal state, do not proceed yet
   if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
@@ -170,7 +171,7 @@ local function getLineBearingFromWaypoints()
   gcs:send_text(6, string.format("WP line bearing: %f", wp_line_bearing))
   gcs:send_text(6, string.format("Vh line bearing: %f", vh_line_bearing))
   -- Return the steering error from the vehicle yaw to the desired bearing
-  local steering_error = funcs:mapErrorToRange(wp_line_bearing - vh_line_bearing)
+  local steering_error = funcs:mapErrorToRange(vh_yaw - wp_line_bearing)
   return steering_error
 end
 -------------------------------------------------------------------------------
@@ -264,8 +265,7 @@ local function update()
       local dist = here:get_distance(target)
       gcs:send_text(6, string.format("Dist to WP: %.1f m", dist))
       if dist < thresh_distance then
-        local steering_error = ss_steering
-        applyControlAllocation(throttle, steering_error)
+        applyControlAllocation(throttle, 0) -- Apply only throttle if the WP is 1m ahead
       else
         local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
         applyControlAllocation(throttle, steering_error)
