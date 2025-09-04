@@ -171,13 +171,13 @@ end
 -- @param end_y The y-coordinate of the end point.
 -- @param vehicle_x The x-coordinate of the vehicle.
 -- @param vehicle_y The y-coordinate of the vehicle.
--- @return 1 if left, -1 if right
+-- @return -1 if left, 1 if right
 function funcs:lineSideSignal(start_x, start_y, end_x, end_y, vehicle_x, vehicle_y)
     local val = (end_x - start_x) * (vehicle_y - start_y) - (end_y - start_y) * (vehicle_x - start_x)
     if val >= 0 then
-        return 1
-    elseif val < 0 then
         return -1
+    elseif val < 0 then
+        return 1
     end
 end
 

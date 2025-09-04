@@ -157,8 +157,8 @@ local function getLineBearingFromWaypoints()
   local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- Vehicle velocity info
-  local vh_velocity = ahrs:get_velocity()
-  local vh_velocity_norm = math.sqrt(vh_velocity:north() ^ 2 + vh_velocity:east() ^ 2)
+  local vh_velocity = ahrs:groundspeed_vector()
+  local vh_velocity_norm = math.sqrt(vh_velocity:x() ^ 2 + vh_velocity:y() ^ 2)
 
   -- In case of any nil value from the internal state, do not proceed yet
   if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
@@ -171,14 +171,14 @@ local function getLineBearingFromWaypoints()
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(last_wp_x, last_wp_y, current_wp_x, current_wp_y)
   gcs:send_text(6, string.format("WP line bearing: %f", wp_line_bearing))
-  local heading_error = funcs:mapErrorToRange(vh_yaw - wp_line_bearing)
+  local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   gcs:send_text(6, string.format("HEA: %.2f deg", heading_error))
   -- Calculate the cross track error from the vehicle to the line between waypoints
-  local cross_track_error_gain = param:get('SCR_USER6') / 1000
+  local cross_track_error_gain = param:get('SCR_USER6')
   local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_x, line_point_y, vh_x, vh_y)
   local cross_track_error_sign = funcs:lineSideSignal(last_wp_x, last_wp_y, current_wp_x, current_wp_y, vh_x, vh_y)
   -- Return the steering error as the sum of both errors
-  local steering_error = heading_error + cross_track_error_sign * cross_track_error
+  local steering_error = funcs:mapErrorToRange(heading_error + cross_track_error_sign * cross_track_error)
   gcs:send_text(6, string.format("CTE: %.2f m", cross_track_error_sign * cross_track_error))
   gcs:send_text(6, string.format("STE: %.2f deg", steering_error))
 
