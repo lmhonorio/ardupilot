@@ -154,7 +154,6 @@ local function getLineBearingFromWaypoints()
   local vh_location = ahrs:get_position()
   local vh_x = vh_location:lat() / 1e7
   local vh_y = vh_location:lng() / 1e7
-  local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- In case of any nil value from the internal state, do not proceed yet
   if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
@@ -164,10 +163,14 @@ local function getLineBearingFromWaypoints()
   -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
   local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_x, vh_y, last_wp_x, last_wp_y, current_wp_x,
     current_wp_y)
-  -- The bearing angle to the line projection
+  -- The bearing angle from vehicle to the line projected position
   local vh_line_bearing = funcs:calculateBearingBetweenPoints(vh_x, vh_y, line_point_x, line_point_y)
+  -- The bearing angle between the last and current waypoints
+  local wp_line_bearing = funcs:calculateBearingBetweenPoints(last_wp_x, last_wp_y, current_wp_x, current_wp_y)
+  gcs:send_text(6, string.format("WP line bearing: %f", wp_line_bearing))
+  gcs:send_text(6, string.format("Vh line bearing: %f", vh_line_bearing))
   -- Return the steering error from the vehicle yaw to the desired bearing
-  local steering_error = funcs:mapErrorToRange(vh_line_bearing - vh_yaw)
+  local steering_error = funcs:mapErrorToRange(wp_line_bearing - vh_line_bearing)
   return steering_error
 end
 -------------------------------------------------------------------------------
