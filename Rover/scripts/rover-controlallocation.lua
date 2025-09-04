@@ -251,9 +251,26 @@ local function update()
     local ss_steering = simpleSetpointControl()
     local lc_rate = 1.0 - ss_rate
     local lc_steering = followLineControl()
-
-    local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
-    applyControlAllocation(throttle, steering_error)
+    -- Fetch the current and target position of the vehicle
+    local here = ahrs:get_position()
+    local target = vehicle:get_target_location()
+    local thresh_distance = param:get('SCR_USER6')
+    -- Check that both a vehicle location, and target location are available
+    if here and target then
+    -- Calculate the distance to the target (in meters) and choose which controller to use
+      local dist = here:get_distance(target)
+      gcs:send_text(6, string.format("Dist to WP: %.1f m", dist))
+      if dist < thresh_distance then
+        local steering_error = ss_steering
+        applyControlAllocation(throttle, steering_error)
+      else
+        local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+        applyControlAllocation(throttle, steering_error)
+      end
+    else
+      local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+      applyControlAllocation(throttle, steering_error)
+    end
 
     return update, 200
   end
