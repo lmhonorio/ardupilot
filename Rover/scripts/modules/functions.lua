@@ -175,11 +175,19 @@ end
 -- @param vehicle_y The y-coordinate of the vehicle.
 -- @return 1 if left, -1 if right
 function funcs:lineSideSignal(start_x, start_y, end_x, end_y, vehicle_x, vehicle_y)
-    local val = (end_x - start_x) * (vehicle_y - start_y) - (end_y - start_y) * (vehicle_x - start_x)
-    if val >= 0 then
-        return 1
-    elseif val < 0 then
-        return -1
+    -- Vectors
+    local dx1 = end_x - start_x
+    local dy1 = end_y - start_y
+    local dx2 = vehicle_x - start_x
+    local dy2 = vehicle_y - start_y
+    -- Cross product
+    local cross = dx1 * dy2 - dy1 * dx2
+    if cross > 0 then
+        return 1   -- left
+    elseif cross < 0 then
+        return -1  -- right
+    else
+        return 0   -- collinear
     end
 end
 
