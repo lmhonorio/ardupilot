@@ -108,7 +108,7 @@ local function manualMode()
     throttle_accel_rate)
   last_manual_throttle = throttle
 
-  -- applyControlAllocation(throttle, steering)
+  applyControlAllocation(throttle, steering)
 end
 
 --[[
@@ -158,12 +158,10 @@ local function getLineBearingFromWaypoints()
   local vh_x = vh_location:lat() / 1e7
   local vh_y = vh_location:lng() / 1e7
   local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("VH YAW: %.2f deg", vh_yaw))
 
   -- Vehicle velocity info
   local vh_velocity = ahrs:groundspeed_vector()
   local vh_velocity_norm = math.sqrt(vh_velocity:x() ^ 2 + vh_velocity:y() ^ 2)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("VH VEL: %.2f U/s", vh_velocity_norm))
 
   -- In case of any nil value from the internal state, do not proceed yet
   if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
@@ -237,10 +235,10 @@ local function update()
   lc_pid:setGains(p, i, d)
 
   -- Run not armed routine to guarantee trim values
-  -- if not arming:is_armed() then
-  --   notArmed()
-  --   return update, 2000
-  -- end
+  if not arming:is_armed() then
+    notArmed()
+    return update, 2000
+  end
 
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     --[[
@@ -289,7 +287,7 @@ local function update()
     end
 
     -- Apply the control allocation finally
-    -- applyControlAllocation(throttle, steering_error)
+    applyControlAllocation(throttle, steering_error)
 
     return update, 200
   end
