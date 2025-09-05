@@ -20,7 +20,7 @@ local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local PWM_RANGE = 450
-local last_mission_index = -1
+local current_mission_index = -1 -- The index we have just reached in the mission
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
@@ -37,10 +37,12 @@ local last_manual_steering = 0
 local steering_accel_rate_thresh = 0.6
 local steering_accel_rate = 0.6
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
-local last_wp_x, last_wp_y = 0, 0
 local current_wp_x, current_wp_y = 0, 0
+local next_wp_x, next_wp_y = 0, 0
 -- Distance to consider a waypoint reached [m]
-local thresh_dist_wp_reached = 1
+local thresh_dist_wp_reached = 2
+-- Dead zone for steering when very close to waypoint [m]
+local thresh_dist_steering_deadzone = 0.5
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local ss_pid = PID:new(0.05, 0.01, 0.0, 80, -80, 0.99, -0.99)  -- for simple setpoint control
@@ -121,37 +123,54 @@ local function getLineBearingFromWaypoints()
     local steering = 0
     local throttle = 0
     vehicle:set_mode(0)
-    last_mission_index = -1
+    current_mission_index = -1
 
     return steering, throttle
   end
 
   -- First time the mission is running, start the last mission index with the first 
   -- and second waypoints to mark the line
-  if last_mission_index == -1 then
-    last_mission_index = mission:get_current_nav_index()
-    local first_mission_index = last_mission_index
-    local future_mission_index = first_mission_index + 1
+  if current_mission_index == -1 then
+    current_mission_index = mission:get_current_nav_index()
+    local next_mission_index = current_mission_index + 1
 
-    first_waypoint = mission:get_item(first_mission_index)
-    last_wp_x = first_waypoint:x() / 1e7
-    last_wp_y = first_waypoint:y() / 1e7
+    -- Verify if there's a next waypoint available
+    local next_waypoint = mission:get_item(next_mission_index)
+    if next_waypoint then
+      -- last_wp = current waypoint (where we are going from)
+      local current_waypoint = mission:get_item(current_mission_index)
+      current_wp_x = current_waypoint:x() / 1e7
+      current_wp_y = current_waypoint:y() / 1e7
 
-    local second_waypoint = mission:get_item(future_mission_index)
-    current_wp_x = second_waypoint:x() / 1e7
-    current_wp_y = second_waypoint:y() / 1e7
+      -- current_wp = next waypoint (where we are going to)
+      next_wp_x = next_waypoint:x() / 1e7
+      next_wp_y = next_waypoint:y() / 1e7
+    else
+      -- No next waypoint, we're at the final waypoint already
+      return 0
+    end
   end
 
   -- If we switched waypoints, refresh the last and current waypoints to form the line
   local mission_index = mission:get_current_nav_index()
-  if mission_index ~= last_mission_index then
-    last_wp_x = current_wp_x
-    last_wp_y = current_wp_y
-    last_mission_index = mission_index;
-
-    local current_waypoint = mission:get_item(mission_index)
-    current_wp_x = current_waypoint:x() / 1e7
-    current_wp_y = current_waypoint:y() / 1e7
+  if mission_index ~= current_mission_index then
+    -- Update to new waypoint pair
+    local next_mission_index = mission_index + 1
+    local next_waypoint = mission:get_item(next_mission_index)
+    
+    if next_waypoint then
+      -- last_wp = current waypoint (where we just arrived or are arriving)
+      current_mission_index = mission_index
+      local current_waypoint = mission:get_item(current_mission_index)
+      current_wp_x = current_waypoint:x() / 1e7
+      current_wp_y = current_waypoint:y() / 1e7
+      
+      -- current_wp = next waypoint (where we are going next)
+      next_wp_x = next_waypoint:x() / 1e7
+      next_wp_y = next_waypoint:y() / 1e7
+    else
+      -- No next waypoint, we're at the final waypoint already
+      return 0
   end
 
   -- Get vehicle location info
@@ -165,22 +184,22 @@ local function getLineBearingFromWaypoints()
   local vh_velocity_norm = math.sqrt(vh_velocity:x() ^ 2 + vh_velocity:y() ^ 2)
 
   -- In case of any nil value from the internal state, do not proceed yet
-  if vh_x == nil or last_wp_x == nil or current_wp_x == nil then
+  if vh_x == nil or current_wp_x == nil or next_wp_x == nil then
     return 0
   end
 
   -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
-  local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_x, vh_y, last_wp_x, last_wp_y, current_wp_x,
-    current_wp_y)
+  local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_x, vh_y, current_wp_x, current_wp_y, next_wp_x,
+    next_wp_y)
   -- The bearing angle between the last and current waypoints
-  local wp_line_bearing = funcs:calculateBearingBetweenPoints(last_wp_x, last_wp_y, current_wp_x, current_wp_y)
+  local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_x, current_wp_y, next_wp_x, next_wp_y)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("WP line bearing: %f", wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("HEA: %.2f deg", heading_error))
   -- Calculate the cross track error from the vehicle to the line between waypoints
   local cross_track_error_gain = param:get('SCR_USER6')
   local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_x, line_point_y, vh_x, vh_y)
-  local cross_track_error_sign = funcs:lineSideSignal(last_wp_x, last_wp_y, current_wp_x, current_wp_y, vh_x, vh_y)
+  local cross_track_error_sign = funcs:lineSideSignal(current_wp_x, current_wp_y, next_wp_x, next_wp_y, vh_x, vh_y)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("CTE sign: %.2f m", cross_track_error_sign))
   -- Return the steering error as the sum of both errors
   local steering_error = funcs:mapErrorToRange(heading_error + cross_track_error_sign * cross_track_error)
@@ -246,9 +265,9 @@ local function update()
     Controlling in MANUAL MODE
     --]]
     -- Reseting control variables
-    last_mission_index = -1
-    last_wp_x, last_wp_y = 0, 0
+    current_mission_index = -1
     current_wp_x, current_wp_y = 0, 0
+    next_wp_x, next_wp_y = 0, 0
     -- Resetting PIDs
     -- We must reset integrator and last error if not using the pid in AUTO mode anymore
     ss_pid:resetInternalState()
