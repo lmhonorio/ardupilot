@@ -171,6 +171,7 @@ local function getLineBearingFromWaypoints()
     else
       -- No next waypoint, we're at the final waypoint already
       return 0
+    end
   end
 
   -- Get vehicle location info
