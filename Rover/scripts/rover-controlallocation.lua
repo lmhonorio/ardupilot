@@ -45,7 +45,7 @@ local thresh_dist_wp_reached = 2
 local thresh_dist_steering_deadzone = 0.5
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local ss_pid = PID:new(0.05, 0.01, 0.0, 80, -80, 0.99, -0.99)  -- for simple setpoint control
+local ss_pid = PID:new(0.050, 0, 0.010, 90, -90, 0.99, -0.99)  -- for simple setpoint control
 local lc_pid = PID:new(0.001, 0.03, 0.0, 90, -90, 0.99, -0.99) -- for line setpoint control
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
@@ -251,7 +251,7 @@ local function update()
 
   -- Getting SCR_USER params to PID values
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  ss_pid:setGains(p, i, d)
+  -- ss_pid:setGains(p, i, d)
   lc_pid:setGains(p, i, d)
 
   -- Run not armed routine to guarantee trim values
