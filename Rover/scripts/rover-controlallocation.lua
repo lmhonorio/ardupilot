@@ -93,7 +93,7 @@ end
 --[[
 Perform vehicle control in Manual mode
 --]]
-local function manualMode()
+local function applyPWMManualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
 
@@ -126,18 +126,20 @@ local function getLineBearingFromWaypoints()
     return steering, throttle
   end
 
-  -- First time the mission is running, start the last mission index with the first waypoint
-  -- Use current location as the reference last waypoint
+  -- First time the mission is running, start the last mission index with the first 
+  -- and second waypoints to mark the line
   if last_mission_index == -1 then
     last_mission_index = mission:get_current_nav_index()
+    local first_mission_index = last_mission_index
+    local future_mission_index = first_mission_index + 1
 
-    local vh_location = ahrs:get_position()
-    last_wp_x = vh_location:lat() / 1e7
-    last_wp_y = vh_location:lng() / 1e7
+    first_waypoint = mission:get_item(first_mission_index)
+    last_wp_x = first_waypoint:x() / 1e7
+    last_wp_y = first_waypoint:y() / 1e7
 
-    local current_waypoint = mission:get_item(last_mission_index)
-    current_wp_x = current_waypoint:x() / 1e7
-    current_wp_y = current_waypoint:y() / 1e7
+    local second_waypoint = mission:get_item(future_mission_index)
+    current_wp_x = second_waypoint:x() / 1e7
+    current_wp_y = second_waypoint:y() / 1e7
   end
 
   -- If we switched waypoints, refresh the last and current waypoints to form the line
@@ -145,7 +147,6 @@ local function getLineBearingFromWaypoints()
   if mission_index ~= last_mission_index then
     last_wp_x = current_wp_x
     last_wp_y = current_wp_y
-
     last_mission_index = mission_index;
 
     local current_waypoint = mission:get_item(mission_index)
@@ -244,10 +245,15 @@ local function update()
     --[[
     Controlling in MANUAL MODE
     --]]
+    -- Reseting control variables
+    last_mission_index = -1
+    last_wp_x, last_wp_y = 0, 0
+    current_wp_x, current_wp_y = 0, 0
+    -- Resetting PIDs
     -- We must reset integrator and last error if not using the pid in AUTO mode anymore
     ss_pid:resetInternalState()
     lc_pid:resetInternalState()
-    manualMode()
+    applyPWMManualMode()
     return update, 200
   else
     --[[
