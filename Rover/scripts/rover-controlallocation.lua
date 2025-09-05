@@ -175,8 +175,8 @@ local function getLineBearingFromWaypoints()
 
   -- Get vehicle location info
   local vh_location = ahrs:get_position()
-  local vh_x = vh_location:lat() / 1e7
-  local vh_y = vh_location:lng() / 1e7
+  local vh_x = vh_location:lng() / 1e7
+  local vh_y = vh_location:lat() / 1e7
   local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- Vehicle velocity info
