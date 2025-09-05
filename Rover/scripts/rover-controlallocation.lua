@@ -108,7 +108,7 @@ local function manualMode()
     throttle_accel_rate)
   last_manual_throttle = throttle
 
-  applyControlAllocation(throttle, steering)
+  -- applyControlAllocation(throttle, steering)
 end
 
 --[[
@@ -237,10 +237,10 @@ local function update()
   lc_pid:setGains(p, i, d)
 
   -- Run not armed routine to guarantee trim values
-  if not arming:is_armed() then
-    notArmed()
-    return update, 2000
-  end
+  -- if not arming:is_armed() then
+  --   notArmed()
+  --   return update, 2000
+  -- end
 
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     --[[
@@ -276,7 +276,7 @@ local function update()
     local vehicle_position = ahrs:get_position()
     local target_position = vehicle:get_target_location()
     -- Verify which error to consider for steering
-    local steering_error = 0
+    local steering_error = 0 -- Should be 0 if close enough to the waypoint indeed
     if vehicle_position and target_position then
       -- Calculate the distance to the target (in meters) and choose which controller to use
       local dist = vehicle_position:get_distance(target_position)
@@ -289,7 +289,7 @@ local function update()
     end
 
     -- Apply the control allocation finally
-    applyControlAllocation(throttle, steering_error)
+    -- applyControlAllocation(throttle, steering_error)
 
     return update, 200
   end
