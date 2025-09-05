@@ -13,10 +13,10 @@ package.path = package.path .. ';./scripts/modules/?.lua'
 local funcs = require("functions")
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
 local last_wp_x, last_wp_y = 0, 0
-local current_wp_x, current_wp_y = 5, 5
+local current_wp_x, current_wp_y = 0, 5
 
-vh_x, vh_y = -2, 2
-vh_yaw = 0
+vh_x, vh_y = 2, 2
+vh_yaw = -15
 vh_velocity_norm = 2
 
 print("last_wp_x:", last_wp_x, "last_wp_y:", last_wp_y)
