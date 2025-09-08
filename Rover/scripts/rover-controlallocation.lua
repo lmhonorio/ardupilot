@@ -37,8 +37,8 @@ local last_manual_steering = 0
 local steering_accel_rate_thresh = 0.6
 local steering_accel_rate = 0.6
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
-local current_wp_x, current_wp_y = 0, 0
-local next_wp_x, next_wp_y = 0, 0
+local current_wp_lat, current_wp_lon = 0, 0
+local next_wp_lat, next_wp_lon = 0, 0
 -- Distance to consider a waypoint reached [m]
 local thresh_dist_wp_reached = 2
 -- Dead zone for steering when very close to waypoint [m]
@@ -139,12 +139,12 @@ local function getLineBearingFromWaypoints()
     if next_waypoint then
       -- last_wp = current waypoint (where we are going from)
       local current_waypoint = mission:get_item(current_mission_index)
-      current_wp_x = current_waypoint:x() / 1e7
-      current_wp_y = current_waypoint:y() / 1e7
+      current_wp_lat = current_waypoint:x() / 1e7
+      current_wp_lon = current_waypoint:y() / 1e7
 
       -- current_wp = next waypoint (where we are going to)
-      next_wp_x = next_waypoint:x() / 1e7
-      next_wp_y = next_waypoint:y() / 1e7
+      next_wp_lat = next_waypoint:x() / 1e7
+      next_wp_lon = next_waypoint:y() / 1e7
     else
       -- No next waypoint, we're at the final waypoint already
       return 0
@@ -162,12 +162,12 @@ local function getLineBearingFromWaypoints()
       -- last_wp = current waypoint (where we just arrived or are arriving)
       current_mission_index = mission_index
       local current_waypoint = mission:get_item(current_mission_index)
-      current_wp_x = current_waypoint:x() / 1e7
-      current_wp_y = current_waypoint:y() / 1e7
+      current_wp_lat = current_waypoint:x() / 1e7
+      current_wp_lon = current_waypoint:y() / 1e7
       
       -- current_wp = next waypoint (where we are going next)
-      next_wp_x = next_waypoint:x() / 1e7
-      next_wp_y = next_waypoint:y() / 1e7
+      next_wp_lat = next_waypoint:x() / 1e7
+      next_wp_lon = next_waypoint:y() / 1e7
     else
       -- No next waypoint, we're at the final waypoint already
       return 0
@@ -176,8 +176,8 @@ local function getLineBearingFromWaypoints()
 
   -- Get vehicle location info
   local vh_location = ahrs:get_position()
-  local vh_x = vh_location:lat() / 1e7
-  local vh_y = vh_location:lng() / 1e7
+  local vh_lon = vh_location:lng() / 1e7
+  local vh_lat = vh_location:lat() / 1e7
   local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- Vehicle velocity info
@@ -185,24 +185,24 @@ local function getLineBearingFromWaypoints()
   local vh_velocity_norm = math.sqrt(vh_velocity:x() ^ 2 + vh_velocity:y() ^ 2)
 
   -- In case of any nil value from the internal state, do not proceed yet
-  if vh_x == nil or current_wp_x == nil or next_wp_x == nil then
+  if vh_lon == nil or current_wp_lat == nil or next_wp_lat == nil then
     return 0
   end
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP1: %.6f, %.6f", current_wp_x, current_wp_y))
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP2: %.6f, %.6f", next_wp_x, next_wp_y))
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("VH: %.6f, %.6f", vh_x, vh_y))
-  
-  -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
-  local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_x, vh_y, current_wp_x, current_wp_y, next_wp_x,
-    next_wp_y)
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP1: %.6f, %.6f", current_wp_lat, current_wp_lon))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP2: %.6f, %.6f", next_wp_lat, next_wp_lon))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("VH: %.6f, %.6f", vh_lon, vh_lat))
+
+  local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_lon, vh_lat, current_wp_lon, current_wp_lat,
+    next_wp_lon, next_wp_lat)
+     gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
   -- The bearing angle between the last and current waypoints
-  local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_x, current_wp_y, next_wp_x, next_wp_y)
+  local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_lat, current_wp_lon, next_wp_lat, next_wp_lon)
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("WP line bearing: %f", wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   -- Calculate the cross track error from the vehicle to the line between waypoints
   local cross_track_error_gain = param:get('SCR_USER6')
-  local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_x, line_point_y, vh_x, vh_y)
-  local cross_track_error_sign = funcs:lineSideSignal(current_wp_x, current_wp_y, next_wp_x, next_wp_y, vh_x, vh_y)
+  local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_y, line_point_x, vh_lat, vh_lon)
+  local cross_track_error_sign = funcs:lineSideSignal(current_wp_lon, current_wp_lat, next_wp_lon, next_wp_lat, vh_lon, vh_lat)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("CTE sign: %.2f m", cross_track_error_sign))
   -- Return the steering error as the sum of both errors
   local steering_error = funcs:mapErrorToRange(heading_error + cross_track_error_sign * cross_track_error)
@@ -269,8 +269,8 @@ local function update()
     --]]
     -- Reseting control variables
     current_mission_index = -1
-    current_wp_x, current_wp_y = 0, 0
-    next_wp_x, next_wp_y = 0, 0
+    current_wp_lat, current_wp_lon = 0, 0
+    next_wp_lat, next_wp_lon = 0, 0
     -- Resetting PIDs
     -- We must reset integrator and last error if not using the pid in AUTO mode anymore
     ss_pid:resetInternalState()
