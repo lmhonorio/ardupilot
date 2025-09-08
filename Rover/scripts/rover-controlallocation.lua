@@ -188,20 +188,20 @@ local function getLineBearingFromWaypoints()
   if vh_lon == nil or current_wp_lat == nil or next_wp_lat == nil then
     return 0
   end
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP1: %.6f, %.6f", current_wp_lat, current_wp_lon))
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP2: %.6f, %.6f", next_wp_lat, next_wp_lon))
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("VH: %.6f, %.6f", vh_lon, vh_lat))
+  gcs:send_text(MAV_SEVERITY.INFO, "WP1: " .. tostring(current_wp_lat) .. ", " .. tostring(current_wp_lon))
+  gcs:send_text(MAV_SEVERITY.INFO, "WP2: " .. tostring(next_wp_lat) .. ", " .. tostring(next_wp_lon))
+  gcs:send_text(MAV_SEVERITY.INFO, "VH: " .. tostring(vh_lat) .. ", " .. tostring(vh_lon))
 
-  local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_lon, vh_lat, current_wp_lon, current_wp_lat,
+  local line_point_lon, line_point_lat = funcs:lineProjectionPoint(vh_lon, vh_lat, current_wp_lon, current_wp_lat,
     next_wp_lon, next_wp_lat)
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
+  gcs:send_text(MAV_SEVERITY.INFO, "LP: " .. tostring(line_point_lat) .. ", " .. tostring(line_point_lon))
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_lat, current_wp_lon, next_wp_lat, next_wp_lon)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("WP line bearing: %f", wp_line_bearing))
+  gcs:send_text(MAV_SEVERITY.WARNING, "WP line bearing: " .. tostring(wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   -- Calculate the cross track error from the vehicle to the line between waypoints
   local cross_track_error_gain = param:get('SCR_USER6')
-  local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_y, line_point_x, vh_lat, vh_lon)
+  local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_lat, line_point_lon, vh_lat, vh_lon)
   local cross_track_error_sign = funcs:lineSideSignal(current_wp_lon, current_wp_lat, next_wp_lon, next_wp_lat, vh_lon, vh_lat)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("CTE sign: %.2f m", cross_track_error_sign))
   -- Return the steering error as the sum of both errors
