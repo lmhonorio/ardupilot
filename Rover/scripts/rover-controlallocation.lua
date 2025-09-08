@@ -194,7 +194,7 @@ local function getLineBearingFromWaypoints()
 
   local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_lon, vh_lat, current_wp_lon, current_wp_lat,
     next_wp_lon, next_wp_lat)
-     gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_lat, current_wp_lon, next_wp_lat, next_wp_lon)
   gcs:send_text(MAV_SEVERITY.WARNING, string.format("WP line bearing: %f", wp_line_bearing))
