@@ -176,8 +176,8 @@ local function getLineBearingFromWaypoints()
 
   -- Get vehicle location info
   local vh_location = ahrs:get_position()
-  local vh_x = vh_location:lng() / 1e7
-  local vh_y = vh_location:lat() / 1e7
+  local vh_x = vh_location:lat() / 1e7
+  local vh_y = vh_location:lng() / 1e7
   local vh_yaw = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
 
   -- Vehicle velocity info
@@ -188,15 +188,17 @@ local function getLineBearingFromWaypoints()
   if vh_x == nil or current_wp_x == nil or next_wp_x == nil then
     return 0
   end
-
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP1: %.6f, %.6f", current_wp_x, current_wp_y))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("WP2: %.6f, %.6f", next_wp_x, next_wp_y))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("VH: %.6f, %.6f", vh_x, vh_y))
+  
   -- Get the projected point with some lookahead so we keep pursuing the target waypoint direction
   local line_point_x, line_point_y = funcs:lineProjectionPoint(vh_x, vh_y, current_wp_x, current_wp_y, next_wp_x,
     next_wp_y)
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("LP: %.6f, %.6f", line_point_x, line_point_y))
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_x, current_wp_y, next_wp_x, next_wp_y)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("WP line bearing: %f", wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("HEA: %.2f deg", heading_error))
   -- Calculate the cross track error from the vehicle to the line between waypoints
   local cross_track_error_gain = param:get('SCR_USER6')
   local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_x, line_point_y, vh_x, vh_y)
