@@ -75,7 +75,7 @@ function funcs:calculateBearingBetweenPoints(lat_1, lon_1, lat_2, lon_2)
   local x = math.cos(rad_lat_1) * math.sin(rad_lat_2) - math.sin(rad_lat_1) * math.cos(rad_lat_2) * math.cos(d_lon)
   local bearing = math.atan(y, x)
   -- Transform to match the ardupilot convention and map to [0, 360]
-  bearing = funcs:toDegrees(math.pi / 2 - bearing)
+  bearing = funcs:toDegrees(bearing)
   return (bearing + 360) % 360
 end
 
