@@ -167,12 +167,12 @@ end
 
 -- Determines if a vehicle is to the left or right of a line segment.
 --
--- @param start_x The x-coordinate of the start point.
--- @param start_y The y-coordinate of the start point.
--- @param end_x The x-coordinate of the end point.
--- @param end_y The y-coordinate of the end point.
--- @param vehicle_x The x-coordinate of the vehicle.
--- @param vehicle_y The y-coordinate of the vehicle.
+-- @param start_x The lon coordinate of the start point.
+-- @param start_y The lat coordinate of the start point.
+-- @param end_x The lon coordinate of the end point.
+-- @param end_y The lat coordinate of the end point.
+-- @param vehicle_x The lon coordinate of the vehicle.
+-- @param vehicle_y The lat coordinate of the vehicle.
 -- @return 1 if left, -1 if right
 function funcs:lineSideSignal(start_x, start_y, end_x, end_y, vehicle_x, vehicle_y)
     -- Vectors
