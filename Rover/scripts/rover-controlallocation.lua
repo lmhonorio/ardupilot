@@ -197,6 +197,9 @@ local function getLineBearingFromWaypoints()
   gcs:send_text(MAV_SEVERITY.INFO, "LP: " .. tostring(line_point_lat) .. ", " .. tostring(line_point_lon))
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(current_wp_lat, current_wp_lon, next_wp_lat, next_wp_lon)
+  if wp_line_bearing == 90.0 then
+    return 0 -- Case of very close waypoints
+  end
   gcs:send_text(MAV_SEVERITY.WARNING, "WP line bearing: " .. tostring(wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   -- Calculate the cross track error from the vehicle to the line between waypoints
@@ -298,21 +301,22 @@ local function update()
     local lc_rate = 1.0 - ss_rate
     local lc_steering = followLineControl()
 
-    -- Fetch the current and target position of the vehicle
-    local vehicle_position = ahrs:get_position()
-    local target_position = vehicle:get_target_location()
-    -- Verify which error to consider for steering
-    local steering_error = 0 -- Should be 0 if close enough to the waypoint indeed
-    if vehicle_position and target_position then
-      -- Calculate the distance to the target (in meters) and choose which controller to use
-      local dist = vehicle_position:get_distance(target_position)
-      gcs:send_text(MAV_SEVERITY.WARNING, string.format("Dist to WP: %.1f m", dist))
-      if dist > thresh_dist_wp_reached then
-        steering_error = ss_rate * ss_steering + lc_rate * lc_steering
-      end
-    else
-      steering_error = ss_rate * ss_steering + lc_rate * lc_steering
-    end
+    -- -- Fetch the current and target position of the vehicle
+    -- local vehicle_position = ahrs:get_position()
+    -- local target_position = vehicle:get_target_location()
+    -- -- Verify which error to consider for steering
+    -- local steering_error = 0 -- Should be 0 if close enough to the waypoint indeed
+    -- if vehicle_position and target_position then
+    --   -- Calculate the distance to the target (in meters) and choose which controller to use
+    --   local dist = vehicle_position:get_distance(target_position)
+    --   gcs:send_text(MAV_SEVERITY.WARNING, string.format("Dist to WP: %.1f m", dist))
+    --   if dist > thresh_dist_wp_reached then
+    --     steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+    --   end
+    -- else
+    -- steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+    -- end
+    local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
 
     -- Apply the control allocation finally
     applyControlAllocation(throttle, steering_error)
