@@ -74,7 +74,9 @@ function funcs:calculateBearingBetweenPoints(lat_1, lon_1, lat_2, lon_2)
   local y = math.sin(d_lon) * math.cos(rad_lat_2)
   local x = math.cos(rad_lat_1) * math.sin(rad_lat_2) - math.sin(rad_lat_1) * math.cos(rad_lat_2) * math.cos(d_lon)
   local bearing = math.atan(y, x)
-  return (funcs:toDegrees(bearing) + 360) % 360
+  -- Transform to match the ardupilot convention and map to [0, 360]
+  bearing = funcs:toDegrees(math.pi / 2 - bearing)
+  return (bearing + 360) % 360
 end
 
 -- Calculate distance (latlon to meters)
@@ -103,21 +105,8 @@ function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
   local se_length_squared = se_x ^ 2 + se_y ^ 2
   local t = funcs:dotProduct(sp_x, sp_y, se_x, se_y) / se_length_squared
 
-  -- Give some incresase to t, as if we were looking a bit ahead of where we are in the line
-  t = t + 0.1
-  if t > 0.8 then
-    t = 1
-  end
-
-  -- If not 0<=t<=1, make sure we have the reference back in this range
-  local projected_x, projected_y = s_x + t * se_x, s_y + t * se_y
-  if t < 0 then
-    projected_x, projected_y = s_x, s_y
-  elseif t > 1 then
-    projected_x, projected_y = e_x, e_y
-  end
-
-  return projected_x, projected_y
+  -- Return the projected point coordinates based on the scaler t
+  return s_x + t * se_x, s_y + t * se_y
 end
 
 function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, transition_rate)
@@ -152,6 +141,54 @@ function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   local pwm_aloc_l = (t_share + s_share) * pwm_range
   local pwm_aloc_r = (t_share - s_share) * pwm_range
   return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
+end
+
+-- Calculates the cross-track error using vehicle and projection coordinates.
+--
+-- @param velocity The vehicle's current velocity.
+-- @param gain The gain constant for the cross-track correction.
+-- @param p_x The x-coordinate of the projection point on the path.
+-- @param p_y The y-coordinate of the projection point on the path.
+-- @param vh_x The vehicle's x-coordinate.
+-- @param vh_y The vehicle's y-coordinate.
+-- @return The cross-track error.
+function funcs:crossTrackError(velocity, gain, p_x, p_y, vh_x, vh_y)
+    local cross_track_error = funcs:haversineDistance(vh_x, vh_y, p_x, p_y)
+    if cross_track_error == nil then
+      return 0
+    end
+    if velocity == nil or velocity < 0.1 then
+      return 0
+    end
+    -- Calculate the steering correction based on the cross-track error
+    local steering_correction = gain * cross_track_error / velocity
+    return steering_correction
+end
+
+-- Determines if a vehicle is to the left or right of a line segment.
+--
+-- @param start_x The x-coordinate of the start point.
+-- @param start_y The y-coordinate of the start point.
+-- @param end_x The x-coordinate of the end point.
+-- @param end_y The y-coordinate of the end point.
+-- @param vehicle_x The x-coordinate of the vehicle.
+-- @param vehicle_y The y-coordinate of the vehicle.
+-- @return 1 if left, -1 if right
+function funcs:lineSideSignal(start_x, start_y, end_x, end_y, vehicle_x, vehicle_y)
+    -- Vectors
+    local dx1 = end_x - start_x
+    local dy1 = end_y - start_y
+    local dx2 = vehicle_x - start_x
+    local dy2 = vehicle_y - start_y
+    -- Cross product
+    local cross = dx1 * dy2 - dy1 * dx2
+    if cross > 0 then
+        return 1   -- left
+    elseif cross < 0 then
+        return -1  -- right
+    else
+        return 0   -- collinear
+    end
 end
 
 return funcs

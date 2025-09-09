@@ -4,13 +4,13 @@
 
 # Terminal para Robô 1
 gnome-terminal -- bash -c "sim_vehicle.py -D \
-    f rover-skid -I 0 --sysid=1 -L SEParnaiba -f rover-skid --model gazebo-rover --console --add-param-file gzrover2.param\
+    f rover-skid -I 0 --sysid=1 -L SEParnaiba -f rover-skid --model gazebo-rover --console --add-param-file nrover.param\
   --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14551 \
   --out=udp:192.168.0.131:14550 --out=udp:192.168.0.131:14551 ; exec bash"
 
 # Terminal para Robô 2
 gnome-terminal -- bash -c "sim_vehicle.py -D \
-    f rover-skid -I 1 --sysid=2 -L ARGO -f rover-skid --model gazebo-rover --console --add-param-file gzrover2.param\
+    f rover-skid -I 1 --sysid=2 -L ARGO -f rover-skid --model gazebo-rover --console --add-param-file gzrover.param\
   --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14561 \
   --out=udp:192.168.0.131:14550 --out=udp:192.168.0.131:14561 ; exec bash"
 
