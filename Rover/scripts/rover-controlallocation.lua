@@ -149,6 +149,7 @@ local function getLineBearingFromWaypoints()
     -- Update the last and current waypoints
     last_wp_lat = current_wp_lat
     last_wp_lon = current_wp_lon
+    current_mission_index = mission_index
     local current_waypoint = mission:get_item(mission_index)
     if current_waypoint then
       current_wp_lat = current_waypoint:x() / 1e7
