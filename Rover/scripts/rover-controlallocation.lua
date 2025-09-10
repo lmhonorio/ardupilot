@@ -275,19 +275,24 @@ local function update()
     current_wp_lat, current_wp_lon = 0, 0
     next_wp_lat, next_wp_lon = 0, 0
     -- Resetting PIDs
-    -- We must reset integrator and last error if not using the pid in AUTO mode anymore
     ss_pid:resetInternalState()
     lc_pid:resetInternalState()
     applyPWMManualMode()
     return update, 200
-  else
+  elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
+    --[[
+    Controlling in HOLD MODE
+    --]]
+    -- Resetting PIDs
+    ss_pid:resetInternalState()
+    lc_pid:resetInternalState()
+    -- Make the vehicle stop
+    applyControlAllocation(0, 0)
+    return update, 200
+  elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
     --[[
     Controlling in AUTO MODE
     --]]
-    if vehicle:get_mode() < DRIVING_MODES.AUTO then
-      vehicle:set_mode(DRIVING_MODES.AUTO)
-    end
-
     -- Acquiring throttle from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
