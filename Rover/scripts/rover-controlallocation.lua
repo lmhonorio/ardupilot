@@ -171,30 +171,22 @@ local function getLineBearingFromWaypoints()
   if vh_lon == nil or current_wp_lat == nil or last_wp_lat == nil then
     return 0
   end
-  gcs:send_text(MAV_SEVERITY.INFO, "WP1: " .. tostring(current_wp_lat) .. ", " .. tostring(current_wp_lon))
-  gcs:send_text(MAV_SEVERITY.INFO, "WP2: " .. tostring(last_wp_lat) .. ", " .. tostring(last_wp_lon))
-  gcs:send_text(MAV_SEVERITY.INFO, "VH: " .. tostring(vh_lat) .. ", " .. tostring(vh_lon))
 
   local line_point_lon, line_point_lat = funcs:lineProjectionPoint(vh_lon, vh_lat, last_wp_lon, last_wp_lat,
     current_wp_lon, current_wp_lat)
-  gcs:send_text(MAV_SEVERITY.INFO, "LP: " .. tostring(line_point_lat) .. ", " .. tostring(line_point_lon))
   -- The bearing angle between the last and current waypoints
   local wp_line_bearing = funcs:calculateBearingBetweenPoints(last_wp_lat, last_wp_lon, current_wp_lat,
     current_wp_lon)
   if wp_line_bearing == 90.0 then
     return 0 -- Case of very close waypoints
   end
-  gcs:send_text(MAV_SEVERITY.WARNING, "WP line bearing: " .. tostring(wp_line_bearing))
   local heading_error = funcs:mapErrorToRange(wp_line_bearing - vh_yaw)
   -- Calculate the cross track error from the vehicle to the line between waypoints
   local cross_track_error_gain = param:get('SCR_USER6')
   local cross_track_error = funcs:crossTrackError(vh_velocity_norm, cross_track_error_gain, line_point_lat, line_point_lon, vh_lat, vh_lon)
   local cross_track_error_sign = funcs:lineSideSignal(last_wp_lon, last_wp_lat, current_wp_lon, current_wp_lat, vh_lon, vh_lat)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("CTE sign: %.2f m", cross_track_error_sign))
   -- Return the steering error as the sum of both errors
   local steering_error = funcs:mapErrorToRange(heading_error + cross_track_error_sign * cross_track_error)
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("CTE: %.2f m", cross_track_error_sign * cross_track_error))
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("STE: %.2f deg", steering_error))
 
   return steering_error
 end
