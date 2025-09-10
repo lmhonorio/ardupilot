@@ -21,6 +21,7 @@ local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local PWM_RANGE = 450
 local current_mission_index = -1 -- The index we have just reached in the mission
+local current_mission_index_controls_reset = -1 -- The index we have just reached in the mission to reset controls
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
@@ -293,6 +294,18 @@ local function update()
     --[[
     Controlling in AUTO MODE
     --]]
+
+    -- Check if the vehicle waypoint has changed, and if so,
+    -- reset the PIDs internal state to avoid spikes and send a 0 signal to the motors
+    local mission_index = mission:get_current_nav_index()
+    if mission_index ~= current_mission_index_controls_reset and mission_index > 0 then
+      ss_pid:resetInternalState()
+      lc_pid:resetInternalState()
+      applyControlAllocation(0, 0)
+      current_mission_index_controls_reset = mission_index
+      return update, 200
+    end
+
     -- Acquiring throttle from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
