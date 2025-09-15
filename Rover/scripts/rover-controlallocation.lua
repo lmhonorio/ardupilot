@@ -180,7 +180,7 @@ function manual_mode()
   throttle = (trim3 - rc3_pwm) / 450
   steering = (rc1_pwm - trim1) / 450
 
-  CtrlAlocacaonovo(throttle,steering)
+  CtrlAlocacaonovo(0,0)
   
 end
 

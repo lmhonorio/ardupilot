@@ -3,11 +3,14 @@ set -euo pipefail
 
 # ===================== ENTRADAS =====================
 DEFAULT_LOCATION="ARGO"
-read -p "Digite a localização (padrão: $DEFAULT_LOCATION): " LOCATION
-LOCATION=${LOCATION:-$DEFAULT_LOCATION}
 
-read -p "Quantos robôs (N)? [2]: " N
-N=${N:-2}
+LOCATION="ARGO"
+N=2
+# read -p "Digite a localização (padrão: $DEFAULT_LOCATION): " LOCATION
+# LOCATION=${LOCATION:-$DEFAULT_LOCATION}
+
+# read -p "Quantos robôs (N)? [2]: " N
+# N=${N:-2}
 
 # ===================== PARAMS =====================
 QGC_PORT=14550          # QGC recebe de todas as instâncias
