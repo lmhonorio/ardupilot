@@ -61,7 +61,7 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param t number - Throttle command from 0 (or more) to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
-local function applyControlAllocation(t, s)
+local function ApplyControlAllocationManually(t, s)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
@@ -136,7 +136,7 @@ local function applyPWMManualMode()
     throttle_accel_rate)
   last_manual_throttle = throttle
 
-  applyControlAllocation(throttle, steering)
+  ApplyControlAllocationManually(throttle, steering)
 end
 
 --[[
@@ -291,7 +291,7 @@ local function update()
     ss_pid:resetInternalState()
     lc_pid:resetInternalState()
     -- Make the vehicle stop
-    applyControlAllocation(0, 0)
+    ApplyControlAllocationManually(0, 0)
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
     --[[
@@ -304,7 +304,7 @@ local function update()
     if mission_index ~= current_mission_index_controls_reset and mission_index > 0 then
       ss_pid:resetInternalState()
       lc_pid:resetInternalState()
-      applyControlAllocation(0, 0)
+      ApplyControlAllocationManually(0, 0)
       current_mission_index_controls_reset = mission_index
       return update, 200
     end
