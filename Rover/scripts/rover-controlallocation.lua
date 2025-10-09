@@ -84,6 +84,35 @@ local function applyControlAllocation(t, s)
 end
 
 --[[
+Control allocation in AUTO mode, where we only need to get the steering value, 
+and with a constant diagonal of forces we can calculate the available part for throttle
+-- @param steering number - Steering command from -1.0 to 1.0
+--]]
+local function applyControlAllocationAutoMode(steering)
+  -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
+  -- MOTOR SCHEMATIC IN ROVER FRAME
+  -- 1 - 0     ^
+  --   |       | Rover forward direction
+  -- 2 - 3
+  local forces_diagonal = 1.0
+  -- Pythagorean theorem to get the available throttle
+  local throttle = math.sqrt(forces_diagonal - steering * steering)
+  throttle = funcs:mapMinMax(throttle, 0.1, 1.0) -- make sure we dont stall in the same spot
+  -- Getting each share in PWM values, throttle and steering will never go above 1.0
+  local pwm_aloc_l = (throttle + steering) * PWM_RANGE
+  local pwm_aloc_r = (throttle - steering) * PWM_RANGE
+  -- Limiting the output values to the PWM ranges
+  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  -- Setting the PWM outputs based on the control allocation directions
+  -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
+end
+
+--[[
 Control the actions while not armed
 --]]
 local function notArmed()
@@ -281,9 +310,9 @@ local function update()
       return update, 200
     end
 
-    -- Acquiring throttle from internal control output
-    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-    throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
+    -- -- Acquiring throttle from internal control output
+    -- local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
+    -- throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
 
     -- Getting steering from two methods:
     -- We should pursue both the final waypoint and the current location projected in the line
@@ -312,7 +341,7 @@ local function update()
     local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
 
     -- Apply the control allocation finally
-    applyControlAllocation(throttle, steering_error)
+    applyControlAllocationAutoMode(steering_error)
 
     return update, 200
   end
