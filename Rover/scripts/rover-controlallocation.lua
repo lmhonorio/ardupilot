@@ -28,8 +28,6 @@ local VEHICLE_TYPE = param:get('SCR_USER5')
 local PWM_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
--- DEAD ZONE thresh
-local DEAD_ZONE_THRESH = 40
 -- Signal smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
@@ -40,10 +38,6 @@ local steering_accel_rate = 0.6
 -- Mission control logic - waypoints XY coordinates to calculate bearing error and setpoints
 local current_wp_lat, current_wp_lon = 0, 0
 local last_wp_lat, last_wp_lon = 0, 0
--- Distance to consider a waypoint reached [m]
-local thresh_dist_wp_reached = 2
--- Dead zone for steering when very close to waypoint [m]
-local thresh_dist_steering_deadzone = 0.5
 -- PIDs
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local ss_pid = PID:new(0.050, 0, 0.010, 90, -90, 0.99, -0.99)  -- for simple setpoint control
@@ -315,10 +309,6 @@ local function update()
       return update, 200
     end
 
-    -- -- Acquiring throttle from internal control output
-    -- local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-    -- throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
-
     -- Getting steering from two methods:
     -- We should pursue both the final waypoint and the current location projected in the line
     -- That guarantees a fast response, but also a smooth transition between waypoints
@@ -327,22 +317,6 @@ local function update()
     local ss_steering = simpleSetpointControl()
     local lc_rate = 1.0 - ss_rate
     local lc_steering = followLineControl()
-
-    -- -- Fetch the current and target position of the vehicle
-    -- local vehicle_position = ahrs:get_position()
-    -- local target_position = vehicle:get_target_location()
-    -- -- Verify which error to consider for steering
-    -- local steering_error = 0 -- Should be 0 if close enough to the waypoint indeed
-    -- if vehicle_position and target_position then
-    --   -- Calculate the distance to the target (in meters) and choose which controller to use
-    --   local dist = vehicle_position:get_distance(target_position)
-    --   gcs:send_text(MAV_SEVERITY.WARNING, string.format("Dist to WP: %.1f m", dist))
-    --   if dist > thresh_dist_wp_reached then
-    --     steering_error = ss_rate * ss_steering + lc_rate * lc_steering
-    --   end
-    -- else
-    -- steering_error = ss_rate * ss_steering + lc_rate * lc_steering
-    -- end
     local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
 
     -- Apply the control allocation finally
