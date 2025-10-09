@@ -254,6 +254,9 @@ end
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
 local function update()
+  -- start timer to measure at the end
+  local start_time = os.clock()
+
   -- Safety check for vehicle type
   if not (VEHICLE_TYPE == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
@@ -342,6 +345,10 @@ local function update()
 
     -- Apply the control allocation finally
     applyControlAllocationAutoMode(steering_error)
+
+    -- Measure the elapsed time and send to gcs in milliseconds
+    local elapsed_time = (os.clock() - start_time) * 1000
+    gcs:send_text(MAV_SEVERITY.INFO, string.format("Loop time: %.1f ms", elapsed_time))
 
     return update, 200
   end
