@@ -73,7 +73,7 @@ local function applyControlAllocation(t, s)
   -- 1 - 0     ^
   --   |       | Rover forward direction
   -- 2 - 3
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShareManually(t, s, PWM_RANGE)
   -- Limiting the output values to the PWM ranges
   local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
