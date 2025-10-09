@@ -6,8 +6,11 @@ end
 local funcs = {}
 funcs.__index = funcs
 
--------------------------------------------------------------------------------
--- General math section
+--[[
+Converts degrees to radians
+-- @param mdegrees number - Angle in degrees
+-- @return number - Angle in radians
+--]]
 function funcs:toRadians(mdegrees)
   if mdegrees == nil then
     return 0
@@ -15,6 +18,11 @@ function funcs:toRadians(mdegrees)
   return mdegrees * math.pi / 180.0
 end
 
+--[[
+Converts radians to degrees
+-- @param mradians number - Angle in radians
+-- @return number - Angle in degrees
+--]]
 function funcs:toDegrees(mradians)
   if mradians == nil then
     return 0
@@ -22,11 +30,25 @@ function funcs:toDegrees(mradians)
   return mradians * 180.0 / math.pi
 end
 
+--[[
+Dot product of two 2D vectors
+-- @param u_x number - X component of the first vector
+-- @param u_y number - Y component of the first vector
+-- @param v_x number - X component of the second vector
+-- @param v_y number - Y component of the second vector
+-- @return number - The dot product of the two vectors
+--]]
 function funcs:dotProduct(u_x, u_y, v_x, v_y)
   return u_x * v_x + u_y * v_y
 end
 
--- Limiting a value to a range
+--[[
+Limits a value to be within a specified range
+-- @param value number - Value to be limited
+-- @param min number - Minimum limit
+-- @param max number - Maximum limit
+-- @return number - Limited value
+--]]
 function funcs:mapMaxMin(value, min, max)
   if value > min and value < max then
     return value
@@ -37,10 +59,11 @@ function funcs:mapMaxMin(value, min, max)
   end
 end
 
--------------------------------------------------------------------------------
-
--- Making sure the error is within the range [-180, 180]
--- Check for the loop to bring back into the range properly
+--[[
+Making sure the error is within the range [-180, 180]
+-- @param input_error number - The input error value
+-- @return number - The mapped error value within the range [-180, 180]
+--]]
 function funcs:mapErrorToRange(input_error)
   if input_error > -180 and input_error < 180 then
     return input_error
@@ -51,7 +74,11 @@ function funcs:mapErrorToRange(input_error)
   end
 end
 
--- Function to map an angle to the range [0, 360]
+--[[
+Function to map an angle to the range [0, 360]
+-- @param angle number - The input angle in degrees
+-- @return number - The mapped angle in the range [0, 360]
+--]]
 function funcs:mapTo360(angle)
   if angle == nil then
     return 0
@@ -66,6 +93,11 @@ end
 Calculates orientation based on two pairs of geographic coordinates (the vector from one to the other)
 First point is the origin, second on is the target of our orientation.
 0 degrees should be north, 90 degrees east
+-- @param lat_1 number - Latitude of the first point in degrees
+-- @param lon_1 number - Longitude of the first point in degrees
+-- @param lat_2 number - Latitude of the second point in degrees
+-- @param lon_2 number - Longitude of the second point in degrees
+-- @return number - Bearing in degrees from the first point to the second point [0, 360]
 --]]
 function funcs:calculateBearingBetweenPoints(lat_1, lon_1, lat_2, lon_2)
   local rad_lat_1, rad_lon_1 = funcs:toRadians(lat_1), funcs:toRadians(lon_1)
@@ -79,7 +111,14 @@ function funcs:calculateBearingBetweenPoints(lat_1, lon_1, lat_2, lon_2)
   return (bearing + 360) % 360
 end
 
--- Calculate distance (latlon to meters)
+--[[
+Calculate distance (latlon to meters) using the Haversine formula
+-- @param lat_1 number - Latitude of the first point in degrees
+-- @param lon_1 number - Longitude of the first point in degrees
+-- @param lat_2 number - Latitude of the second point in degrees
+-- @param lon_2 number - Longitude of the second point in degrees
+-- @return number - Distance between the two points in meters
+--]]
 function funcs:haversineDistance(lat_1, lon_1, lat_2, lon_2)
   local R = 6371000 -- Earth radius [m]
   local rad_lat_1, rad_lon_1 = funcs:toRadians(lat_1), funcs:toRadians(lon_1)
@@ -96,7 +135,16 @@ function funcs:haversineDistance(lat_1, lon_1, lat_2, lon_2)
   return R * c
 end
 
--- Returns the point projected in a line, with some advance not to be so strict
+--[[
+Project a point (p) onto a line defined by start (s) and end (e) points
+-- @param p_x number - X coordinate of the point to be projected
+-- @param p_y number - Y coordinate of the point to be projected
+-- @param s_x number - X coordinate of the start point of the line
+-- @param s_y number - Y coordinate of the start point of the line
+-- @param e_x number - X coordinate of the end point of the line
+-- @param e_y number - Y coordinate of the end point of the line
+-- @return number, number - The projected point coordinates (x, y)
+--]]
 function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
   -- Calculate the projection scalar t of our current (p)
   -- on top of the line formed from start (s) to end (e) points
@@ -109,6 +157,14 @@ function funcs:lineProjectionPoint(p_x, p_y, s_x, s_y, e_x, e_y)
   return s_x + t * se_x, s_y + t * se_y
 end
 
+--[[
+Controls the output in manual mode to avoid sudden changes
+-- @param current_value number - The current input value
+-- @param last_value number - The last output value
+-- @param max_change_rate number - Maximum allowed change rate
+-- @param transition_rate number - Transition rate to apply when exceeding max change
+-- @return number - The smoothed output value
+--]]
 function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, transition_rate)
   -- Test if we are requiring a change in signal greater than the max allowed
   local output_value = current_value
@@ -119,14 +175,13 @@ function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, tra
   return output_value
 end
 
-function funcs:applyDeadZone(value, trim, dead_zone)
-  -- Check if the values are within the dead zone to return TRIM
-  if value > trim - dead_zone and value < trim + dead_zone then
-    return math.floor(trim)
-  end
-  return math.floor(value)
-end
-
+--[[
+Allocate the PWM signals for the right and left motors based on throttle and steering inputs
+-- @param t number - Throttle command from 0 (or more) to 1
+-- @param s number - Steering command from -1.0 to 1.0
+-- @param pwm_range number - Maximum PWM range for the motors
+-- @return number, number - The allocated PWM values for the left and right motors
+--]]
 function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   -- The throttle and steering absolute sum, to inspect the total signal we want to insert
   local ts_sum = math.abs(t) + math.abs(s) + 0.00001
@@ -143,8 +198,8 @@ function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
 end
 
--- Calculates the cross-track error using vehicle and projection coordinates.
---
+--[[
+Calculates the cross-track error using vehicle and projection coordinates.
 -- @param velocity The vehicle's current velocity.
 -- @param gain The gain constant for the cross-track correction.
 -- @param p_x The x-coordinate of the projection point on the path.
@@ -152,6 +207,7 @@ end
 -- @param vh_x The vehicle's x-coordinate.
 -- @param vh_y The vehicle's y-coordinate.
 -- @return The cross-track error.
+--]]
 function funcs:crossTrackError(velocity, gain, p_x, p_y, vh_x, vh_y)
     local cross_track_error = funcs:haversineDistance(vh_x, vh_y, p_x, p_y)
     if cross_track_error == nil then
@@ -165,8 +221,8 @@ function funcs:crossTrackError(velocity, gain, p_x, p_y, vh_x, vh_y)
     return steering_correction
 end
 
--- Determines if a vehicle is to the left or right of a line segment.
---
+--[[
+Determines if a vehicle is to the left or right of a line segment.
 -- @param start_x The lon coordinate of the start point.
 -- @param start_y The lat coordinate of the start point.
 -- @param end_x The lon coordinate of the end point.
@@ -174,6 +230,7 @@ end
 -- @param vehicle_x The lon coordinate of the vehicle.
 -- @param vehicle_y The lat coordinate of the vehicle.
 -- @return 1 if left, -1 if right
+--]]
 function funcs:lineSideSignal(start_x, start_y, end_x, end_y, vehicle_x, vehicle_y)
     -- Vectors
     local dx1 = end_x - start_x
