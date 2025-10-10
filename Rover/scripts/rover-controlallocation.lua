@@ -16,7 +16,6 @@ local funcs = require("functions")
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
 -- Channel control variables
-local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local MAX_CHANNEL_OUTPUT = 1950
 local MIN_CHANNEL_OUTPUT = 1050
 local PWM_RANGE = 450
