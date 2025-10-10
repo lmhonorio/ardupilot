@@ -95,8 +95,8 @@ local function applyControlAllocationAutoMode(steering)
   local throttle = math.sqrt(forces_diagonal - steering * steering)
   throttle = funcs:mapMaxMin(throttle, 0.1, 1.0) -- make sure we dont stall in the same spot
   -- Getting each share in PWM values, throttle and steering will never go above 1.0
-  local pwm_aloc_l = (throttle + steering) * PWM_RANGE
-  local pwm_aloc_r = (throttle - steering) * PWM_RANGE
+  local pwm_aloc_l = math.floor((throttle + steering) * PWM_RANGE)
+  local pwm_aloc_r = math.floor((throttle - steering) * PWM_RANGE)
   -- Limiting the output values to the PWM ranges
   local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
