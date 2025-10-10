@@ -93,7 +93,7 @@ local function applyControlAllocationAutoMode(steering)
   local forces_diagonal = 1.0
   -- Pythagorean theorem to get the available throttle
   local throttle = math.sqrt(forces_diagonal - steering * steering)
-  throttle = funcs:mapMinMax(throttle, 0.1, 1.0) -- make sure we dont stall in the same spot
+  throttle = funcs:mapMaxMin(throttle, 0.1, 1.0) -- make sure we dont stall in the same spot
   -- Getting each share in PWM values, throttle and steering will never go above 1.0
   local pwm_aloc_l = (throttle + steering) * PWM_RANGE
   local pwm_aloc_r = (throttle - steering) * PWM_RANGE
@@ -250,9 +250,6 @@ end
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
 local function update()
-  -- start timer to measure at the end
-  local start_time = os.clock()
-
   -- Safety check for vehicle type
   if not (VEHICLE_TYPE == 2) then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
@@ -321,10 +318,6 @@ local function update()
 
     -- Apply the control allocation finally
     applyControlAllocationAutoMode(steering_error)
-
-    -- Measure the elapsed time and send to gcs in milliseconds
-    local elapsed_time = (os.clock() - start_time) * 1000
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("Loop time: %.1f ms", elapsed_time))
 
     return update, 200
   end
