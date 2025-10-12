@@ -98,10 +98,11 @@ local function applyControlAllocationAutoMode(steering)
   local vh_lat = vh_location:lat() / 1e7
   local distance_to_wp = funcs:haversineDistance(vh_lat, vh_lon, current_wp_lat, current_wp_lon)
   local action_distance = 2 * param:get('WP_RADIUS')
+  local decay_rate = distance_to_wp / action_distance
   if distance_to_wp < action_distance then
-    throttle = throttle * (distance_to_wp / action_distance)
+    throttle = throttle * decay_rate * decay_rate -- quadratic decay
   end
-  throttle = funcs:mapMaxMin(throttle, 0.1, 1.0) -- make sure we dont stall in the same spot
+  throttle = funcs:mapMaxMin(throttle, 0.2, 1.0) -- make sure we dont stall in the same spot
   -- Getting each share in PWM values, throttle and steering will never go above 1.0
   local pwm_aloc_l = math.floor((throttle + steering) * PWM_RANGE)
   local pwm_aloc_r = math.floor((throttle - steering) * PWM_RANGE)
@@ -266,7 +267,7 @@ local function update()
 
   -- Getting SCR_USER params to PID values
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  -- ss_pid:setGains(p, i, d)
+  ss_pid:setGains(p, i, d)
   lc_pid:setGains(p, i, d)
 
   -- Run not armed routine to guarantee trim values
