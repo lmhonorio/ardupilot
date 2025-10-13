@@ -92,7 +92,7 @@ local function applyControlAllocationAutoMode(steering)
   local forces_diagonal = 1.0
   -- Pythagorean theorem to get the available throttle
   local throttle = math.sqrt(forces_diagonal - steering * steering)
-  -- Calculate our current distance to the waypoint to reduce throttle when close
+  -- Calculate our current distance to the waypoint to reduce signals when close
   local vh_location = ahrs:get_position()
   local vh_lon = vh_location:lng() / 1e7
   local vh_lat = vh_location:lat() / 1e7
@@ -100,9 +100,13 @@ local function applyControlAllocationAutoMode(steering)
   local action_distance = 2 * param:get('WP_RADIUS')
   local decay_rate = distance_to_wp / action_distance
   if distance_to_wp < action_distance then
-    throttle = throttle * decay_rate * decay_rate -- quadratic decay
+    throttle = throttle * decay_rate -- linear decay
+    steering = steering * decay_rate
   end
-  throttle = funcs:mapMaxMin(throttle, 0.2, 1.0) -- make sure we dont stall in the same spot
+  -- Making sure we dont go very low in the signals as well
+  throttle = funcs:mapMaxMin(throttle, 0.4, 1.0) -- make sure we dont stall in the same spot
+  local steering_abs = funcs:mapMaxMin(math.abs(steering), 0.4, 1.0)
+  steering = steering / math.abs(steering) * steering_abs -- keep the signal
   -- Getting each share in PWM values, throttle and steering will never go above 1.0
   local pwm_aloc_l = math.floor((throttle + steering) * PWM_RANGE)
   local pwm_aloc_r = math.floor((throttle - steering) * PWM_RANGE)
