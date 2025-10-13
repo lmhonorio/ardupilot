@@ -284,15 +284,16 @@ local function update()
     -- Acquiring throttle from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
+    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
 
     -- Getting steering from two methods:
     -- We should pursue both the final waypoint and the current location projected in the line
     -- That guarantees a fast response, but also a smooth transition between waypoints
     -- The weighted sum of these values should be the final steering command
-    local ss_rate = param:get('SCR_USER1')
-    local ss_steering = simpleSetpointControl()
-    local lc_rate = 1.0 - ss_rate
-    local lc_steering = followLineControl()
+    -- local ss_rate = param:get('SCR_USER1')
+    -- local ss_steering = simpleSetpointControl()
+    -- local lc_rate = 1.0 - ss_rate
+    -- local lc_steering = followLineControl()
 
     -- -- Fetch the current and target position of the vehicle
     -- local vehicle_position = ahrs:get_position()
@@ -309,10 +310,11 @@ local function update()
     -- else
     -- steering_error = ss_rate * ss_steering + lc_rate * lc_steering
     -- end
-    local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
+    -- local steering_error = ss_rate * ss_steering + lc_rate * lc_steering
 
-    -- Apply the control allocation finally
-    applyControlAllocation(throttle, steering_error)
+    -- -- Apply the control allocation finally
+    -- applyControlAllocation(throttle, steering_error)
+    applyControlAllocation(throttle, steering)
 
     return update, 200
   end
