@@ -123,6 +123,7 @@ local function update()
     --]]
     applyPWMManualMode()
     return update, 200
+
   elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
     --[[
     Controlling in HOLD MODE
@@ -130,6 +131,7 @@ local function update()
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
     return update, 200
+    
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
     --[[
     Controlling in AUTO MODE
@@ -138,17 +140,15 @@ local function update()
     local mission_state = mission:state()
     if mission_state == MISSION_STATE.FINISHED then
       applyControlAllocation(0, 0)
-      vehicle:set_mode(DRIVING_MODES.HOLD)
+      vehicle:set_mode(DRIVING_MODES.MANUAL)
       return update, 200
     end
-
     -- Acquiring throttle and steering from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
     local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
     -- Apply the control allocation finally
     applyControlAllocation(throttle, steering)
-
     return update, 200
   end
 end
