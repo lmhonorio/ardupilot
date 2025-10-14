@@ -284,6 +284,14 @@ local function update()
       return update, 200
     end
 
+    -- Controls end of mission
+    local mission_state = mission:state()
+    if mission_state == MISSION_STATE.FINISHED then
+      applyControlAllocation(0, 0)
+      vehicle:set_mode(DRIVING_MODES.HOLD)
+      return update, 200
+    end
+
     -- Acquiring throttle from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
