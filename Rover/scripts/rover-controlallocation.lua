@@ -65,6 +65,8 @@ Control allocation
 This function is responsible for the PWM signal allocation of the vehicle.
 It receives the throttle (t) and steering (s) values and calculates the PWM values for the motors.
 The function also takes into account the trim values for the PWM outputs.
+-- @param t number - Throttle command from 0 (or more) to 1.0
+-- @param s number - Steering command from -1.0 to 1.0
 --]]
 local function applyControlAllocation(t, s)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
