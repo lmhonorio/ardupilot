@@ -101,6 +101,22 @@ local function applyPWMManualMode()
   applyControlAllocation(throttle, steering)
 end
 
+--[[
+Perform vehicle control in Steering mode
+--]]
+local function applyPWMSteeringMode()
+  local rc1_pwm = rc:get_pwm(1)
+
+  -- Compares the diff from the last steering signals to the maximum rate we are accepting
+  -- Make the actual command be a rate from the last to the required command if necessary
+  local raw_steering = (rc1_pwm - RC1_TRIM_VALUE) / 450
+  local steering = funcs:applyAbsSmoothing(raw_steering, last_manual_steering, steering_accel_rate_thresh,
+    steering_accel_rate)
+  last_manual_steering = steering
+
+  applyControlAllocation(0, steering)
+end
+
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
@@ -122,6 +138,13 @@ local function update()
     Controlling in MANUAL MODE
     --]]
     applyPWMManualMode()
+    return update, 200
+
+  elseif vehicle:get_mode() == DRIVING_MODES.STEERING then
+    --[[
+    Controlling in STEERING MODE
+    --]]
+    applyPWMSteeringMode()
     return update, 200
 
   elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
