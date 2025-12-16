@@ -176,11 +176,23 @@ function manual_mode()
 
   rc3_pwm = rc:get_pwm(3)
   rc1_pwm = rc:get_pwm(1)
+  rc2_pwm = rc:get_pwm(2)
+  rc4_pwm = rc:get_pwm(4)
 
   throttle = (trim3 - rc3_pwm) / 450
   steering = (rc1_pwm - trim1) / 450
 
-  CtrlAlocacaonovo(0,0)
+  gcs:send_text(4, string.format("pwms %f -  %f - %f -  %f",rc1_pwm,rc2_pwm,rc3_pwm,rc4_pwm) )
+
+  if  math.abs(throttle) < 0.1 then
+    throttle = 0
+  end
+
+  if math.abs(steering) < 0.1 then
+    steering = 0
+  end
+
+  CtrlAlocacaonovo(throttle,steering)
   
 end
 
