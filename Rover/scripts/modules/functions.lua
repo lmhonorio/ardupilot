@@ -19,6 +19,18 @@ function funcs:toDegrees(mradians)
 end
 
 --[[
+Converts degrees to radians
+-- @param mdegrees number - Angle in degrees
+-- @return number - Angle in radians
+--]]
+function funcs:toRadians(mdegrees)
+  if mdegrees == nil then
+    return 0
+  end
+  return mdegrees * math.pi / 180.0
+end
+
+--[[
 Limits a value to be within a specified range
 -- @param value number - Value to be limited
 -- @param min number - Minimum limit
@@ -48,6 +60,41 @@ function funcs:mapTo360(angle)
     return angle + 360
   end
   return angle
+end
+
+--[[
+Detect NaN (in Lua: NaN ~= NaN)
+-- @param x number
+-- @return boolean
+--]]
+function funcs:isNan(x)
+  return x ~= x
+end
+
+--[[
+Wrap angle in radians to [-pi, pi)
+-- @param rad number - angle in radians
+-- @return number - wrapped radians
+--]]
+function funcs:wrapPi(rad)
+  if rad == nil then
+    return 0
+  end
+  rad = (rad + math.pi) % (2 * math.pi) - math.pi
+  return rad
+end
+
+--[[
+Yaw error in radians: (target - current) wrapped to [-pi, pi)
+-- @param current_rad number
+-- @param target_rad number
+-- @return number
+--]]
+function funcs:yawErrorRad(current_rad, target_rad)
+  if current_rad == nil or target_rad == nil then
+    return 0
+  end
+  return self:wrapPi(target_rad - current_rad)
 end
 
 --[[
