@@ -19,18 +19,6 @@ function funcs:toDegrees(mradians)
 end
 
 --[[
-Converts degrees to radians
--- @param mdegrees number - Angle in degrees
--- @return number - Angle in radians
---]]
-function funcs:toRadians(mdegrees)
-  if mdegrees == nil then
-    return 0
-  end
-  return mdegrees * math.pi / 180.0
-end
-
---[[
 Limits a value to be within a specified range
 -- @param value number - Value to be limited
 -- @param min number - Minimum limit

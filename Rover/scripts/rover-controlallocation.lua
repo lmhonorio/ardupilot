@@ -137,7 +137,7 @@ end
 
 local function start_yaw_align(target_deg)
   yaw_target_deg = funcs:mapTo360(target_deg)
-  yaw_target_rad = funcs:toRadians(yaw_target_deg)
+  yaw_target_rad = math.rad(yaw_target_deg)
 
   yaw_pid:resetInternalState()
   yaw_align_active = true
