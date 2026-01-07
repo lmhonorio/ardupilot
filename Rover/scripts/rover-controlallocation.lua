@@ -134,25 +134,6 @@ end
 --
 -- NOTE: This script assumes ahrs:get_yaw() returns yaw in radians.
 -------------------------------------------------------------------------------
-
-local function start_yaw_align(target_deg)
-  yaw_target_deg = funcs:mapTo360(target_deg)
-  yaw_target_rad = math.rad(yaw_target_deg)
-
-  yaw_pid:resetInternalState()
-  yaw_align_active = true
-  yaw_align_steps = 0
-
-  -- Stop the vehicle and take over yaw using STEERING mode
-  applyControlAllocation(0, 0)
-  vehicle:set_mode(DRIVING_MODES.STEERING)
-
-  gcs:send_text(
-    MAV_SEVERITY.INFO,
-    string.format("Yaw align start (WP yaw=%.1f deg)", yaw_target_deg)
-  )
-end
-
 local function step_yaw_align()
   -- If the pilot or failsafe switched modes, stop controlling
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
@@ -199,40 +180,56 @@ local function step_yaw_align()
   applyControlAllocation(0, pid_out)
 end
 
-local function maybe_trigger_yaw_align_on_reached_wp()
+--[[
+Check if a waypoint was reached and trigger yaw control if param4 is valid
+-- @return bool - true if yaw control was triggered
+--]]
+local function triggerYawControlOnReachedWaypoint()
   local idx = mission:get_current_nav_index()
   if not idx then
-    return
+    return false
   end
 
   -- Initialize the index tracker
   if last_nav_idx == nil then
     last_nav_idx = idx
-    return
+    return false
   end
 
   -- When the nav index changes, the previous waypoint was reached
   if idx ~= last_nav_idx then
     local reached_idx = last_nav_idx
     last_nav_idx = idx
-
     local item = mission:get_item(reached_idx)
     if not item then
-      return
+      return false
     end
 
-    -- Only handle NAV_WAYPOINT (16)
+    -- Only handle NAV_WAYPOINT (16) with valid param4 (yaw)
     if item:command() ~= 16 then
-      return
+      return false
     end
-
     local p4 = item:param4()
     if p4 == nil or funcs:isNan(p4) then
-      return
+      return false
     end
 
     -- param4 is yaw angle in degrees
-    start_yaw_align(p4)
+    yaw_target_deg = funcs:mapTo360(p4)
+    yaw_target_rad = math.rad(yaw_target_deg)
+    -- Reset PID state and start alignment
+    yaw_pid:resetInternalState()
+    yaw_align_active = true
+    yaw_align_steps = 0
+    -- Stop the vehicle and take over yaw using STEERING mode
+    applyControlAllocation(0, 0)
+    vehicle:set_mode(DRIVING_MODES.STEERING)
+
+    gcs:send_text(
+      MAV_SEVERITY.INFO,
+      string.format("Yaw align start (WP yaw=%.1f deg)", yaw_target_deg)
+    )
+    return true
   end
 end
 
@@ -331,8 +328,7 @@ local function update()
     end
 
     -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
-    maybe_trigger_yaw_align_on_reached_wp()
-    if yaw_align_active then
+    if triggerYawControlOnReachedWaypoint() then
       return update, 200
     end
 
