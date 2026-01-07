@@ -60,20 +60,16 @@ MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 local last_logged_wp_index = -1
 
 -------------------------------------------------------------------------------
--------------- FUNÇÕES DE LEITURA / DEBUG DE PARAM4 DA MISSÃO ----------------
+---------------------------- DEBUGGING LOGGING --------------------------------
 -------------------------------------------------------------------------------
-local function log_current_wp_param4()
-  -- indice do waypoint de navegação atual
+local function logCurrentWpParam4()
   local idx = mission:get_current_nav_index()
   if not idx then
     return
   end
-
-  -- evita imprimir repetidamente o mesmo waypoint
   if idx == last_logged_wp_index then
     return
   end
-
   local item = mission:get_item(idx)
   if not item then
     return
@@ -283,7 +279,7 @@ local function update()
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
     -- Temporary logging param4 of current waypoint for debugging
-    log_current_wp_param4()
+    logCurrentWpParam4()
 
     -- Controls end of mission
     local mission_state = mission:state()
