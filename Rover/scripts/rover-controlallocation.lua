@@ -169,8 +169,12 @@ local function triggerYawControlOnReachedWaypoint()
     )
     return true
   end
+  return false
 end
 
+-------------------------------------------------------------------------------
+------------------------- HIGH LEVEL CONTROL FUNCTIONS ------------------------
+-------------------------------------------------------------------------------
 --[[
 Control the actions while not armed
 --]]
@@ -206,7 +210,7 @@ end
 Perform vehicle control in Steering mode
 --]]
 local function applyPWMSteeringMode()
-  -- If the pilot or failsafe switched modes, stop controlling
+  -- If the pilot or failsafe switched modes, stop pursuing yaw alignment
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
     yaw_pid:resetInternalState()
     return
@@ -223,8 +227,7 @@ local function applyPWMSteeringMode()
   end
 
   -- Current yaw from AHRS (rad) and error to target
-  local current_yaw_rad = ahrs:get_yaw()
-  local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
+  local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
 
   -- Check if we reached the target yaw
   if math.abs(err) <= YAW_THRESH_RAD then

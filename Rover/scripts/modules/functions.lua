@@ -60,19 +60,6 @@ function funcs:isNan(x)
 end
 
 --[[
-Wrap angle in radians to [-pi, pi)
--- @param rad number - angle in radians
--- @return number - wrapped radians
---]]
-function funcs:wrapPi(rad)
-  if rad == nil then
-    return 0
-  end
-  rad = (rad + math.pi) % (2 * math.pi) - math.pi
-  return rad
-end
-
---[[
 Yaw error in radians: (target - current) wrapped to [-pi, pi)
 -- @param current_rad number
 -- @param target_rad number
@@ -82,7 +69,9 @@ function funcs:yawErrorRad(current_rad, target_rad)
   if current_rad == nil or target_rad == nil then
     return 0
   end
-  return self:wrapPi(target_rad - current_rad)
+  -- Wrap diffenrence between -pi and pi
+  local rad = target_rad - current_rad
+  return (rad + math.pi) % (2 * math.pi) - math.pi
 end
 
 --[[
