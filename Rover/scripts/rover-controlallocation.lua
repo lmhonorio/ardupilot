@@ -43,7 +43,6 @@ local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
-local yaw_align_active = false
 local yaw_target_deg = nil
 local yaw_target_rad = nil
 local yaw_align_steps = 0
@@ -124,62 +123,6 @@ end
 -------------------------------------------------------------------------------
 --------------------- YAW CONTROL VIA MAV_CMD_NAV_WAYPOINT --------------------
 -------------------------------------------------------------------------------
--- MAV_CMD_NAV_WAYPOINT (16) defines param4 as desired yaw angle (deg). If yaw
--- is not explicitly set, some GCS/flight-stacks may send NaN as "unset".
---
--- This block watches mission:get_current_nav_index(). When the index changes,
--- we treat the previous index as "reached" and, if it was a NAV_WAYPOINT with
--- a valid param4, we temporarily switch to STEERING mode and rotate in place
--- (throttle=0) until the heading error is within threshold, then go back to AUTO.
---
--- NOTE: This script assumes ahrs:get_yaw() returns yaw in radians.
--------------------------------------------------------------------------------
-local function step_yaw_align()
-  -- If the pilot or failsafe switched modes, stop controlling
-  if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
-    yaw_align_active = false
-    yaw_pid:resetInternalState()
-    return
-  end
-
-  yaw_align_steps = yaw_align_steps + 1
-
-  -- Current yaw from AHRS (rad)
-  local current_yaw_rad = ahrs:get_yaw()
-  local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
-
-  -- Timeout safety
-  if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
-    gcs:send_text(MAV_SEVERITY.WARNING, "Yaw align TIMEOUT -> back to AUTO")
-    applyControlAllocation(0, 0)
-    yaw_align_active = false
-    yaw_pid:resetInternalState()
-    vehicle:set_mode(DRIVING_MODES.AUTO)
-    return
-  end
-
-  -- Done?
-  if math.abs(err) <= YAW_THRESH_RAD then
-    applyControlAllocation(0, 0)
-    yaw_align_active = false
-    yaw_pid:resetInternalState()
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("Yaw aligned (target %.1f deg) -> AUTO", yaw_target_deg)
-    )
-    vehicle:set_mode(DRIVING_MODES.AUTO)
-    return
-  end
-
-  local pid_out = yaw_pid:compute(err, UPDATE_DT)
-  if math.abs(pid_out) < YAW_DEADBAND then
-    pid_out = 0
-  end
-
-  -- Rotate in place
-  applyControlAllocation(0, pid_out)
-end
-
 --[[
 Check if a waypoint was reached and trigger yaw control if param4 is valid
 -- @return bool - true if yaw control was triggered
@@ -219,7 +162,6 @@ local function triggerYawControlOnReachedWaypoint()
     yaw_target_rad = math.rad(yaw_target_deg)
     -- Reset PID state and start alignment
     yaw_pid:resetInternalState()
-    yaw_align_active = true
     yaw_align_steps = 0
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
@@ -268,16 +210,45 @@ end
 Perform vehicle control in Steering mode
 --]]
 local function applyPWMSteeringMode()
-  local rc1_pwm = rc:get_pwm(1)
+  -- If the pilot or failsafe switched modes, stop controlling
+  if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
+    yaw_pid:resetInternalState()
+    return
+  end
 
-  -- Compares the diff from the last steering signals to the maximum rate we are accepting
-  -- Make the actual command be a rate from the last to the required command if necessary
-  local raw_steering = (rc1_pwm - RC1_TRIM_VALUE) / 450
-  local steering = funcs:applyAbsSmoothing(raw_steering, last_manual_steering, steering_accel_rate_thresh,
-    steering_accel_rate)
-  last_manual_steering = steering
+  -- Timeout safety
+  yaw_align_steps = yaw_align_steps + 1
+  if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
+    gcs:send_text(MAV_SEVERITY.WARNING, "Yaw align TIMEOUT -> back to AUTO")
+    applyControlAllocation(0, 0)
+    yaw_pid:resetInternalState()
+    vehicle:set_mode(DRIVING_MODES.AUTO)
+    return
+  end
 
-  applyControlAllocation(0, steering)
+  -- Current yaw from AHRS (rad) and error to target
+  local current_yaw_rad = ahrs:get_yaw()
+  local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
+
+  -- Check if we reached the target yaw
+  if math.abs(err) <= YAW_THRESH_RAD then
+    applyControlAllocation(0, 0)
+    yaw_pid:resetInternalState()
+    gcs:send_text(
+      MAV_SEVERITY.INFO,
+      string.format("Yaw aligned (target %.1f deg) -> AUTO", yaw_target_deg)
+    )
+    -- Set HOLD mode so the vehicle stops before going back to AUTO
+    vehicle:set_mode(DRIVING_MODES.HOLD)
+    return
+  end
+
+  -- Rotate in place with pid output
+  local pid_out = yaw_pid:compute(err, UPDATE_DT)
+  if math.abs(pid_out) < YAW_DEADBAND then
+    pid_out = 0
+  end
+  applyControlAllocation(0, pid_out)
 end
 
 -------------------------------------------------------------------------------
@@ -299,16 +270,11 @@ local function update()
     return update, 2000
   end
 
-  -- If we are currently aligning yaw from a waypoint (param4), take over here
-  if yaw_align_active then
-    step_yaw_align()
-    return update, 200
-  end
-
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
     applyPWMManualMode()
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.STEERING then
+    -- We use steering mode for yaw alignment
     applyPWMSteeringMode()
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
