@@ -309,33 +309,17 @@ local function update()
   end
 
   if vehicle:get_mode() == DRIVING_MODES.MANUAL then
-    --[[
-    Controlling in MANUAL MODE
-    --]]
     applyPWMManualMode()
     return update, 200
-
   elseif vehicle:get_mode() == DRIVING_MODES.STEERING then
-    --[[
-    Controlling in STEERING MODE
-    --]]
     applyPWMSteeringMode()
     return update, 200
-
   elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
-    --[[
-    Controlling in HOLD MODE
-    --]]
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
     return update, 200
-
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
-    --[[
-    Controlling in AUTO MODE
-    --]]
-
-    -- Logar param4 do waypoint atual (se for NAV_WAYPOINT)
+    -- Temporary logging param4 of current waypoint for debugging
     log_current_wp_param4()
 
     -- Controls end of mission
@@ -346,8 +330,7 @@ local function update()
       return update, 200
     end
 
-    -- Se o índice de navegação mudou, o waypoint anterior foi alcançado:
-    -- se for NAV_WAYPOINT (16) e tiver param4 (yaw) válido, alinhar yaw e voltar ao AUTO
+    -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
     maybe_trigger_yaw_align_on_reached_wp()
     if yaw_align_active then
       return update, 200
@@ -357,8 +340,6 @@ local function update()
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
     throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
     local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-
-    -- Apply the control allocation finally
     applyControlAllocation(throttle, steering)
     return update, 200
   end
