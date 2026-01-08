@@ -88,8 +88,8 @@ function PID:compute(error, dt)
   end
   self.last_error = error
   -- Integrator output
-  self.integrator = self:limitRange(self.integrator + error * dt, self.i_min, self.i_max)
-  local integrator_output = self.I * self.integrator
+  self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  integrator_output = self.integrator
 
   -- PID control signal
   local pid_value = proportional_output + integrator_output + derivative_output
