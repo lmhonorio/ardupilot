@@ -154,7 +154,7 @@ local function triggerYawControlOnReachedWaypoint()
     end
 
     -- If altitude == -1, treat as pass-through waypoint: do NOT switch modes
-    if alt == -1 then
+    if p4 == -1 then
       gcs:send_text(MAV_SEVERITY.INFO, string.format("WP %d pass-through (alt=-1): skipping yaw align", reached_idx))
       -- clear any previous target just in case
       yaw_target_deg = nil
