@@ -78,7 +78,7 @@ local function logCurrentWpParam4()
   local cmd = item:command()
   -- 16 = MAV_CMD_NAV_WAYPOINT
   if cmd == 16 then
-    local p4 = item:param4() or 0
+    local p4 = item:z() or 0
     gcs:send_text(
       MAV_SEVERITY.INFO,
       string.format("WP %d (NAV_WAYPOINT) param4 = %.3f", idx, p4)
@@ -148,7 +148,7 @@ local function triggerYawControlOnReachedWaypoint()
     if item:command() ~= 16 then
       return false
     end
-    local p4 = item:param4()
+    local p4 = item:z()
     if p4 == nil or funcs:isNan(p4) then
       return false
     end
@@ -170,6 +170,15 @@ local function triggerYawControlOnReachedWaypoint()
     return true
   end
   return false
+end
+
+local function resetMissionYawState()
+  yaw_target_deg = nil
+  yaw_target_rad = nil
+  yaw_align_steps = 0
+  last_nav_idx = nil
+  last_logged_wp_index = -1
+  yaw_pid:resetInternalState()
 end
 
 -------------------------------------------------------------------------------
@@ -265,6 +274,7 @@ local function update()
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
+    resetMissionYawState()
     notArmed()
     return update, 2000
   end
@@ -281,6 +291,14 @@ local function update()
     applyControlAllocation(0, 0)
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
+    local idx = mission:get_current_nav_index()
+
+    -- Detect mission restart / rewind: current index went backwards
+    if idx and last_nav_idx and idx < last_nav_idx then
+      gcs:send_text(MAV_SEVERITY.INFO, "Mission restart detected -> resetting yaw state")
+      resetMissionYawState()
+    end
+
     -- Temporary logging param4 of current waypoint for debugging
     logCurrentWpParam4()
 
