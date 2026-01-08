@@ -37,7 +37,7 @@ local steering_accel_rate = 0.6
 -- Yaw alignment logic
 local UPDATE_PERIOD_MS = 200
 local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
-local YAW_THRESH_RAD = math.rad(10)
+local YAW_THRESH_RAD = math.rad(param:get('SCR_USER1'))
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
