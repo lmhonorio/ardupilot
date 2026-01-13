@@ -56,37 +56,6 @@ DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
 -- Mission states dictionary
 MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 
--- Controle de impressão de param4
-local last_logged_wp_index = -1
-
--------------------------------------------------------------------------------
----------------------------- DEBUGGING LOGGING --------------------------------
--------------------------------------------------------------------------------
-local function logCurrentWpParam4()
-  local idx = mission:get_current_nav_index()
-  if not idx then
-    return
-  end
-  if idx == last_logged_wp_index then
-    return
-  end
-  local item = mission:get_item(idx)
-  if not item then
-    return
-  end
-
-  local cmd = item:command()
-  -- 16 = MAV_CMD_NAV_WAYPOINT
-  if cmd == 16 then
-    local angle_from_alt = item:z() or 0
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("WP %d (NAV_WAYPOINT) param4 = %.3f", idx, angle_from_alt)
-    )
-    last_logged_wp_index = idx
-  end
-end
-
 -------------------------------------------------------------------------------
 ------------------------- LOW LEVEL ACTION FUNCTIONS --------------------------
 -------------------------------------------------------------------------------
@@ -119,6 +88,16 @@ end
 -------------------------------------------------------------------------------
 --------------------- YAW CONTROL VIA MAV_CMD_NAV_WAYPOINT --------------------
 -------------------------------------------------------------------------------
+--[[
+Reset the yaw control state
+--]]
+local function resetYawControlState()
+  yaw_target_deg = nil
+  yaw_target_rad = nil
+  yaw_align_steps = 0
+  yaw_pid:resetInternalState()
+end
+
 --[[
 Check if a waypoint was reached and trigger yaw control if param4 is valid
 -- @return bool - true if yaw control was triggered
@@ -155,12 +134,8 @@ local function triggerYawControlOnReachedWaypoint()
 
     -- If angle == -1, treat as pass-through waypoint: do NOT switch modes
     if angle_from_alt == -1 then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("WP %d pass-through (alt=-1): skipping yaw align", reached_idx))
       -- clear any previous target just in case
-      yaw_target_deg = nil
-      yaw_target_rad = nil
-      yaw_align_steps = 0
-      yaw_pid:resetInternalState()
+      resetYawControlState()
       return false
     end
     yaw_target_deg = funcs:mapTo360(angle_from_alt)
@@ -172,23 +147,9 @@ local function triggerYawControlOnReachedWaypoint()
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
     vehicle:set_mode(DRIVING_MODES.STEERING)
-
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("Yaw align start (WP yaw=%.1f deg)", yaw_target_deg)
-    )
     return true
   end
   return false
-end
-
-local function resetMissionYawState()
-  yaw_target_deg = nil
-  yaw_target_rad = nil
-  yaw_align_steps = 0
-  last_nav_idx = nil
-  last_logged_wp_index = -1
-  yaw_pid:resetInternalState()
 end
 
 -------------------------------------------------------------------------------
@@ -238,7 +199,6 @@ local function applyPWMSteeringMode()
   -- Timeout safety
   yaw_align_steps = yaw_align_steps + 1
   if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
-    gcs:send_text(MAV_SEVERITY.WARNING, "Yaw align TIMEOUT -> back to AUTO")
     applyControlAllocation(0, 0)
     yaw_pid:resetInternalState()
     vehicle:set_mode(DRIVING_MODES.AUTO)
@@ -252,10 +212,6 @@ local function applyPWMSteeringMode()
   if math.abs(err) <= YAW_THRESH_RAD then
     applyControlAllocation(0, 0)
     yaw_pid:resetInternalState()
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("Yaw aligned (target %.1f deg) -> AUTO", yaw_target_deg)
-    )
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -272,6 +228,9 @@ end
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
+--[[
+Main update function for the rover control allocation script
+--]]
 local function update()
   -- Safety check for vehicle type
   if not (VEHICLE_TYPE == 2) then
@@ -284,7 +243,8 @@ local function update()
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
-    resetMissionYawState()
+    resetYawControlState()
+    last_nav_idx = nil
     notArmed()
     return update, 2000
   end
@@ -305,12 +265,9 @@ local function update()
 
     -- Detect mission restart / rewind: current index went backwards
     if idx and last_nav_idx and idx < last_nav_idx then
-      gcs:send_text(MAV_SEVERITY.INFO, "Mission restart detected -> resetting yaw state")
-      resetMissionYawState()
+      resetYawControlState()
+      last_nav_idx = nil
     end
-
-    -- Temporary logging param4 of current waypoint for debugging
-    logCurrentWpParam4()
 
     -- Controls end of mission
     local mission_state = mission:state()
