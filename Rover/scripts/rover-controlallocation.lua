@@ -78,10 +78,10 @@ local function logCurrentWpParam4()
   local cmd = item:command()
   -- 16 = MAV_CMD_NAV_WAYPOINT
   if cmd == 16 then
-    local p4 = item:z() or 0
+    local angle_from_alt = item:z() or 0
     gcs:send_text(
       MAV_SEVERITY.INFO,
-      string.format("WP %d (NAV_WAYPOINT) param4 = %.3f", idx, p4)
+      string.format("WP %d (NAV_WAYPOINT) param4 = %.3f", idx, angle_from_alt)
     )
     last_logged_wp_index = idx
   end
@@ -148,13 +148,13 @@ local function triggerYawControlOnReachedWaypoint()
     if item:command() ~= 16 then
       return false
     end
-    local p4 = item:z()
-    if p4 == nil or funcs:isNan(p4) then
+    local angle_from_alt = item:z() -- z altitude is the yaw angle in degrees
+    if angle_from_alt == nil or funcs:isNan(angle_from_alt) then
       return false
     end
 
-    -- If altitude == -1, treat as pass-through waypoint: do NOT switch modes
-    if p4 == -1 then
+    -- If angle == -1, treat as pass-through waypoint: do NOT switch modes
+    if angle_from_alt == -1 then
       gcs:send_text(MAV_SEVERITY.INFO, string.format("WP %d pass-through (alt=-1): skipping yaw align", reached_idx))
       -- clear any previous target just in case
       yaw_target_deg = nil
@@ -163,10 +163,9 @@ local function triggerYawControlOnReachedWaypoint()
       yaw_pid:resetInternalState()
       return false
     end
-
-    -- param4 is yaw angle in degrees
-    yaw_target_deg = funcs:mapTo360(p4)
+    yaw_target_deg = funcs:mapTo360(angle_from_alt)
     yaw_target_rad = math.rad(yaw_target_deg)
+
     -- Reset PID state and start alignment
     yaw_pid:resetInternalState()
     yaw_align_steps = 0
