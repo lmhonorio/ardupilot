@@ -49,6 +49,8 @@ local yaw_align_steps = 0
 
 local last_nav_idx = nil
 
+local radio_type = 0
+
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -171,6 +173,7 @@ Perform vehicle control in Manual mode
 local function applyPWMManualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
+  local raw_throttle = 0
 
   -- Compares the diff from the last manual signals to the maximum rate we are accepting
   -- Make the actual command be a rate from the last to the required command if necessary
@@ -178,7 +181,11 @@ local function applyPWMManualMode()
   local steering = funcs:applyAbsSmoothing(raw_steering, last_manual_steering, steering_accel_rate_thresh,
     steering_accel_rate)
   last_manual_steering = steering
-  local raw_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
+  if radio_type == 1 then
+    raw_throttle = (rc3_pwm - RC3_TRIM_VALUE) / 450
+  else
+    raw_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
+  end
   local throttle = funcs:applyAbsSmoothing(raw_throttle, last_manual_throttle, throttle_accel_rate_thresh,
     throttle_accel_rate)
   last_manual_throttle = throttle
@@ -240,6 +247,9 @@ local function update()
   -- Getting SCR_USER params to PID values
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
   yaw_pid:setGains(p, i, d)
+
+  -- Getting radio type
+  radio_type = param:get('SCR_USER6') or 0
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
