@@ -58,6 +58,7 @@ MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 
 -- Controle de impressão de param4
 local last_logged_wp_index = -1
+local last_inverted_check_idx = -1
 
 -------------------------------------------------------------------------------
 ---------------------------- DEBUGGING LOGGING --------------------------------
@@ -179,6 +180,46 @@ local function resetMissionYawState()
   last_nav_idx = nil
   last_logged_wp_index = -1
   yaw_pid:resetInternalState()
+end
+
+-------------------------------------------------------------------------------
+--------------------- INVERTED FLIGHT COMMAND CHECK ---------------------------
+-------------------------------------------------------------------------------
+--[[
+Check if the current mission command is MAV_CMD_DO_INVERTED_FLIGHT (210)
+and print a message to the GCS.
+--]]
+local function checkForInvertedFlightCommand()
+  local idx = mission:get_current_nav_index()
+  if not idx then
+    return
+  end
+  
+  -- Avoid repeating the check for the same index
+  if idx == last_inverted_check_idx then
+    return
+  end
+
+  local item = mission:get_item(idx)
+  if not item then
+    return
+  end
+
+  -- 210 = MAV_CMD_DO_INVERTED_FLIGHT
+  if item:command() == 210 then
+    local p1 = item:param1() -- Inverted (0=Normal, 1=Inverted)
+    gcs:send_text(
+      MAV_SEVERITY.INFO,
+      string.format("WP %d: MAV_CMD_DO_INVERTED_FLIGHT detected! Param1=%.1f", idx, p1)
+    )
+    last_inverted_check_idx = idx
+  elseif item:command() ~= 16 then 
+       -- if it is not nav waypoint we assume we just check once
+       last_inverted_check_idx = idx
+  end
+  -- Note: If it is a NAV command (like Waypoint), we might want to check constantly 
+  -- but usually DO commands are instantaneous. 
+  -- For safety, we only log once per index to avoid spam.
 end
 
 -------------------------------------------------------------------------------
@@ -314,6 +355,9 @@ local function update()
     if triggerYawControlOnReachedWaypoint() then
       return update, 200
     end
+
+    -- Check for Inverted Flight Command (210)
+    checkForInvertedFlightCommand()
 
     -- Acquiring throttle and steering from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
