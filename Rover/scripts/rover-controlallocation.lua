@@ -41,6 +41,9 @@ local YAW_THRESH_RAD = math.rad(param:get('SCR_USER1'))
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
+local REVERSE_ALT_MIN_DEG = 360
+local REVERSE_ALT_MAX_DEG = 720
+local REVERSE_ALT_OFFSET_DEG = 360
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
 local yaw_target_deg = nil
@@ -48,6 +51,7 @@ local yaw_target_rad = nil
 local yaw_align_steps = 0
 
 local last_nav_idx = nil
+local reverse_to_next_wp = false
 
 local radio_type = 0
 
@@ -101,6 +105,32 @@ local function resetYawControlState()
 end
 
 --[[
+Decode yaw and reverse direction from waypoint z (altitude) field
+Encoding:
+  -1: pass-through waypoint
+  0..360: align yaw and drive forward on next leg
+  360..720: align yaw to (z-360) and drive reverse on next leg
+-- @param angle_from_alt number
+-- @return number|nil, bool, bool
+--]]
+local function decodeYawAndDirectionFromWaypointZ(angle_from_alt)
+  if angle_from_alt == nil or funcs:isNan(angle_from_alt) then
+    return nil, false, false
+  end
+  if angle_from_alt == -1 then
+    return nil, false, true
+  end
+
+  local reverse_leg = angle_from_alt >= REVERSE_ALT_MIN_DEG and angle_from_alt <= REVERSE_ALT_MAX_DEG
+  local yaw_deg = angle_from_alt
+  if reverse_leg then
+    yaw_deg = yaw_deg - REVERSE_ALT_OFFSET_DEG
+  end
+
+  return funcs:mapTo360(yaw_deg), reverse_leg, false
+end
+
+--[[
 Check if a waypoint was reached and trigger yaw control if param4 is valid
 -- @return bool - true if yaw control was triggered
 --]]
@@ -121,26 +151,33 @@ local function triggerYawControlOnReachedWaypoint()
     local reached_idx = last_nav_idx
     last_nav_idx = idx
     local item = mission:get_item(reached_idx)
+    reverse_to_next_wp = false
     if not item then
+      resetYawControlState()
       return false
     end
 
     -- Only handle NAV_WAYPOINT (16) with valid param4 (yaw)
     if item:command() ~= 16 then
+      resetYawControlState()
       return false
     end
-    local angle_from_alt = item:z() -- z altitude is the yaw angle in degrees
-    if angle_from_alt == nil or funcs:isNan(angle_from_alt) then
+
+    local yaw_deg, reverse_leg, is_pass_through = decodeYawAndDirectionFromWaypointZ(item:z())
+    reverse_to_next_wp = reverse_leg
+    if yaw_deg == nil and not is_pass_through then
+      resetYawControlState()
       return false
     end
 
     -- If angle == -1, treat as pass-through waypoint: do NOT switch modes
-    if angle_from_alt == -1 then
+    if is_pass_through then
       -- clear any previous target just in case
       resetYawControlState()
       return false
     end
-    yaw_target_deg = funcs:mapTo360(angle_from_alt)
+
+    yaw_target_deg = yaw_deg
     yaw_target_rad = math.rad(yaw_target_deg)
 
     -- Reset PID state and start alignment
@@ -249,12 +286,13 @@ local function update()
   yaw_pid:setGains(p, i, d)
 
   -- Getting radio type
-  radio_type = param:get('SCR_USER6') or 0
+  radio_type = param:get('RC3_REVERSED') or 0
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
     resetYawControlState()
     last_nav_idx = nil
+    reverse_to_next_wp = false
     notArmed()
     return update, 2000
   end
@@ -277,12 +315,25 @@ local function update()
     if idx and last_nav_idx and idx < last_nav_idx then
       resetYawControlState()
       last_nav_idx = nil
+      reverse_to_next_wp = false
+    end
+
+    -- When starting script in the middle of a mission, infer direction from previous waypoint
+    if idx and last_nav_idx == nil and idx > 0 then
+      local previous_item = mission:get_item(idx - 1)
+      if previous_item and previous_item:command() == 16 then
+        local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
+        reverse_to_next_wp = reverse_leg
+      else
+        reverse_to_next_wp = false
+      end
     end
 
     -- Controls end of mission
     local mission_state = mission:state()
     if mission_state == MISSION_STATE.FINISHED then
       applyControlAllocation(0, 0)
+      reverse_to_next_wp = false
       vehicle:set_mode(DRIVING_MODES.MANUAL)
       return update, 200
     end
@@ -293,8 +344,11 @@ local function update()
     end
 
     -- Acquiring throttle and steering from internal control output
-    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-    throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
+    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+    throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
+    if reverse_to_next_wp then
+      throttle = -throttle
+    end
     local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
     applyControlAllocation(throttle, steering)
     return update, 200
