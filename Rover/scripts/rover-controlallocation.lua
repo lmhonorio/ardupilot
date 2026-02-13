@@ -46,7 +46,6 @@ local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
 local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
-local yaw_target_deg = nil
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
@@ -98,7 +97,6 @@ end
 Reset the yaw control state
 --]]
 local function resetYawControlState()
-  yaw_target_deg = nil
   yaw_target_rad = nil
   yaw_align_steps = 0
   yaw_pid:resetInternalState()
@@ -163,9 +161,9 @@ local function triggerYawControlOnReachedWaypoint()
       return false
     end
 
-    local yaw_deg, reverse_leg, is_pass_through = decodeYawAndDirectionFromWaypointZ(item:z())
+    local yaw_target_deg, reverse_leg, is_pass_through = decodeYawAndDirectionFromWaypointZ(item:z())
     reverse_to_next_wp = reverse_leg
-    if yaw_deg == nil and not is_pass_through then
+    if yaw_target_deg == nil and not is_pass_through then
       resetYawControlState()
       return false
     end
@@ -177,8 +175,9 @@ local function triggerYawControlOnReachedWaypoint()
       return false
     end
 
-    yaw_target_deg = yaw_deg
-    yaw_target_rad = math.rad(yaw_target_deg)
+    if yaw_target_deg then -- deal with nil just in case, although it should be handled above
+      yaw_target_rad = math.rad(yaw_target_deg)
+    end
 
     -- Reset PID state and start alignment
     yaw_pid:resetInternalState()
