@@ -345,10 +345,13 @@ local function update()
     -- Acquiring throttle and steering from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
     throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
+    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+    -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
     if reverse_to_next_wp then
       throttle = -throttle
+      steering = funcs:reverseSteeringSignal(steering)
     end
-    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+
     applyControlAllocation(throttle, steering)
     return update, 200
   end

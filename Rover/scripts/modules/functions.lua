@@ -75,6 +75,21 @@ function funcs:yawErrorRad(current_rad, target_rad)
 end
 
 --[[
+Reverse the steering signal for correct behavior when driving in reverse
+The original signal ranges from -1 to 1. As an example, reversing it means that:
+-0.6 becomes 0.4 and 0.6 becomes -0.4.
+-- @param steering number - The original steering signal
+-- @return number - The reversed steering signal
+--]]
+function funcs:reverseSteeringSignal(steering)
+  if steering > 0 then
+    return 1 - steering
+  else
+    return steering + 1
+  end
+end
+
+--[[
 Controls the output in manual mode to avoid sudden changes
 -- @param current_value number - The current input value
 -- @param last_value number - The last output value
