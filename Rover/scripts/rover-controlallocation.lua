@@ -73,17 +73,21 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
 local function applyControlAllocation(t, s)
+  -- Check if we are driving backwards, because we should steer to the opposite direction
+  local s_from_direction = s
+  if reverse_to_next_wp then
+    s_from_direction = -s
+  end
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s_from_direction, PWM_RANGE)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
   --   |       | Rover forward direction
   -- 2 - 3
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
-  -- Limiting the output values to the PWM ranges
-  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
+  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
@@ -100,6 +104,7 @@ local function resetYawControlState()
   yaw_target_rad = nil
   yaw_align_steps = 0
   yaw_pid:resetInternalState()
+  reverse_to_next_wp = false
 end
 
 --[[
@@ -207,6 +212,7 @@ end
 Perform vehicle control in Manual mode
 --]]
 local function applyPWMManualMode()
+  reverse_to_next_wp = false
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
   local raw_throttle = 0
@@ -291,7 +297,6 @@ local function update()
   if not arming:is_armed() then
     resetYawControlState()
     last_nav_idx = nil
-    reverse_to_next_wp = false
     notArmed()
     return update, 2000
   end
@@ -314,7 +319,6 @@ local function update()
     if idx and last_nav_idx and idx < last_nav_idx then
       resetYawControlState()
       last_nav_idx = nil
-      reverse_to_next_wp = false
     end
 
     -- When starting script in the middle of a mission, infer direction from previous waypoint
