@@ -73,12 +73,7 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
 local function applyControlAllocation(t, s)
-  -- Check if we are driving backwards, because we should steer to the opposite direction
-  local s_from_direction = s
-  if reverse_to_next_wp then
-    s_from_direction = -s
-  end
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s_from_direction, PWM_RANGE)
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
