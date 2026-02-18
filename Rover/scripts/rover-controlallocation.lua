@@ -267,6 +267,63 @@ local function applyPWMSteeringMode()
   applyControlAllocation(0, pid_out)
 end
 
+--[[
+Perform vehicle control in Auto mode
+--]]
+local function applyPWMAutoMode()
+  local idx = mission:get_current_nav_index()
+
+  -- Detect mission restart / rewind: current index went backwards
+  if idx and last_nav_idx and idx < last_nav_idx then
+    resetYawControlState()
+    last_nav_idx = nil
+  end
+
+  -- When starting script in the middle of a mission, infer direction from previous waypoint
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("1."))
+  if idx and last_nav_idx == nil and idx > 0 then
+    local previous_item = mission:get_item(idx - 1)
+    if previous_item and previous_item:command() == 16 then
+      local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
+      reverse_to_next_wp = reverse_leg
+    else
+      reverse_to_next_wp = false
+    end
+  end
+
+  -- Controls end of mission
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("2."))
+  local mission_state = mission:state()
+  if mission_state == MISSION_STATE.FINISHED then
+    applyControlAllocation(0, 0)
+    reverse_to_next_wp = false
+    vehicle:set_mode(DRIVING_MODES.MANUAL)
+    return update, 200
+  end
+
+  -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("3."))
+  if triggerYawControlOnReachedWaypoint() then
+    return update, 200
+  end
+
+  -- Acquiring throttle and steering from internal control output
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
+  local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+  -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
+  if reverse_to_next_wp then
+    -- local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
+    -- steering = yaw_pid:compute(err, UPDATE_DT)
+    -- if math.abs(steering) < YAW_DEADBAND then
+    --   steering = 0
+    -- end
+    throttle = -throttle
+  end
+  gcs:send_text(MAV_SEVERITY.WARNING, string.format("4."))
+  applyControlAllocation(throttle, steering)
+end
+
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
@@ -306,57 +363,7 @@ local function update()
     applyControlAllocation(0, 0)
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
-    local idx = mission:get_current_nav_index()
-
-    -- Detect mission restart / rewind: current index went backwards
-    if idx and last_nav_idx and idx < last_nav_idx then
-      resetYawControlState()
-      last_nav_idx = nil
-    end
-
-    -- When starting script in the middle of a mission, infer direction from previous waypoint
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("1."))
-    if idx and last_nav_idx == nil and idx > 0 then
-      local previous_item = mission:get_item(idx - 1)
-      if previous_item and previous_item:command() == 16 then
-        local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
-        reverse_to_next_wp = reverse_leg
-      else
-        reverse_to_next_wp = false
-      end
-    end
-
-    -- Controls end of mission
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("2."))
-    local mission_state = mission:state()
-    if mission_state == MISSION_STATE.FINISHED then
-      applyControlAllocation(0, 0)
-      reverse_to_next_wp = false
-      vehicle:set_mode(DRIVING_MODES.MANUAL)
-      return update, 200
-    end
-
-    -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("3."))
-    if triggerYawControlOnReachedWaypoint() then
-      return update, 200
-    end
-
-    -- Acquiring throttle and steering from internal control output
-    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
-    throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
-    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-    -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
-    if reverse_to_next_wp then
-      -- local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
-      -- steering = yaw_pid:compute(err, UPDATE_DT)
-      -- if math.abs(steering) < YAW_DEADBAND then
-      --   steering = 0
-      -- end
-      throttle = -throttle
-    end
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("4."))
-    applyControlAllocation(throttle, steering)
+    applyPWMAutoMode()
     return update, 200
   end
 end
