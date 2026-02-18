@@ -162,11 +162,6 @@ local function triggerYawControlOnReachedWaypoint()
     end
 
     local yaw_target_deg, reverse_leg, is_pass_through = decodeYawAndDirectionFromWaypointZ(item:z())
-    reverse_to_next_wp = reverse_leg
-    if yaw_target_deg == nil and not is_pass_through then
-      resetYawControlState()
-      return false
-    end
 
     -- If angle == -1, treat as pass-through waypoint: do NOT switch modes
     if is_pass_through then
@@ -175,9 +170,12 @@ local function triggerYawControlOnReachedWaypoint()
       return false
     end
 
-    if yaw_target_deg then -- deal with nil just in case, although it should be handled above
-      yaw_target_rad = math.rad(yaw_target_deg)
+    reverse_to_next_wp = reverse_leg
+    if yaw_target_deg == nil then
+      resetYawControlState()
+      return false
     end
+    yaw_target_rad = math.rad(yaw_target_deg)
 
     -- Reset PID state and start alignment
     yaw_pid:resetInternalState()
@@ -347,8 +345,11 @@ local function update()
     local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
     -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
     if reverse_to_next_wp then
-      throttle = -throttle
-      steering = funcs:reverseSteeringSignal(steering)
+      local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
+      steering = yaw_pid:compute(err, UPDATE_DT)
+      if math.abs(steering) < YAW_DEADBAND then
+        steering = 0
+      end
     end
 
     applyControlAllocation(throttle, steering)
