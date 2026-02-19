@@ -51,6 +51,7 @@ local yaw_align_steps = 0
 
 local last_nav_idx = nil
 local reverse_to_next_wp = false
+local WP_RADIUS = param:get('WP_RADIUS') or 2.0 -- meters
 
 local radio_type = 0
 
@@ -87,6 +88,36 @@ local function applyControlAllocation(t, s)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
+end
+
+--[[
+Calculating the signals when driving reverse_to_next_wp
+@param t number - Throttle command from 0 (or more) to 1.0
+@param s number - Steering command from -1.0 to 1.0
+@return number, number - The modified throttle and steering commands for reverse driving
+--]]
+local function calculateReverseOutputSignals(t, s)
+  -- Obtain the target waypoint coordinates and current vehicle position to calculate the distance in meters using the haversine functions
+  local idx = mission:get_current_nav_index()
+  if not idx then
+    return -t, 0
+  end
+  local target_wp = mission:get_item(idx)
+  if not target_wp then
+    return -t, 0
+  end
+  local target_lat = target_wp:x()
+  local target_lon = target_wp:y()
+  local current_lat = ahrs:get_location():lat()
+  local current_lon = ahrs:get_location():lng()
+  local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("throttle: %.2f, steering: %.2f", t, s))
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("Distance to WP: %.2f m, WP_RADIUS: %.2f", distance_to_wp, WP_RADIUS))
+  -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.5
+  if distance_to_wp > WP_RADIUS then
+    return -0.5, 0
+  end
+  return -t, 0
 end
 
 -------------------------------------------------------------------------------
@@ -310,8 +341,7 @@ local function applyPWMAutoMode()
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
   -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
   if reverse_to_next_wp then
-    steering = 0
-    throttle = -throttle
+    throttle, steering = calculateReverseOutputSignals(throttle, steering)
   end
   applyControlAllocation(throttle, steering)
 end

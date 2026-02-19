@@ -115,4 +115,23 @@ function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
 end
 
+--[[
+Calculate the Haversine distance between two GPS coordinates
+-- @param lat1 number - Latitude of the first point in degrees
+-- @param lon1 number - Longitude of the first point in degrees
+-- @param lat2 number - Latitude of the second point in degrees
+-- @param lon2 number - Longitude of the second point in degrees
+-- @return number - Distance between the two points in meters
+--]]
+function funcs:haversineDistance(lat1, lon1, lat2, lon2)
+  local R = 6371000 -- Earth radius in meters
+  local dLat = math.rad(lat2 - lat1)
+  local dLon = math.rad(lon2 - lon1)
+  local a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+            math.cos(math.rad(lat1)) * math.cos(math.rad(lat2)) *
+            math.sin(dLon / 2) * math.sin(dLon / 2)
+  local c = 2 * math.atan(math.sqrt(a), math.sqrt(1 - a))
+  return R * c
+end
+
 return funcs
