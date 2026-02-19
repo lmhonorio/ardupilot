@@ -106,10 +106,10 @@ local function calculateReverseOutputSignals(t, s)
   if not target_wp then
     return -t, 0
   end
-  local target_lat = target_wp:x()
-  local target_lon = target_wp:y()
-  local current_lat = ahrs:get_location():lat()
-  local current_lon = ahrs:get_location():lng()
+  local target_lat = target_wp:x()/1e7
+  local target_lon = target_wp:y()/1e7
+  local current_lat = ahrs:get_location():lat()/1e7
+  local current_lon = ahrs:get_location():lng()/1e7
   local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
   gcs:send_text(MAV_SEVERITY.INFO, string.format("Distance to WP: %.2f m, WP_RADIUS: %.2f", distance_to_wp, WP_RADIUS))
   -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.5
