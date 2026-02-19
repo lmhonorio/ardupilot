@@ -280,7 +280,6 @@ local function applyPWMAutoMode()
   end
 
   -- When starting script in the middle of a mission, infer direction from previous waypoint
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("1."))
   if idx and last_nav_idx == nil and idx > 0 then
     local previous_item = mission:get_item(idx - 1)
     if previous_item and previous_item:command() == 16 then
@@ -292,7 +291,6 @@ local function applyPWMAutoMode()
   end
 
   -- Controls end of mission
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("2."))
   local mission_state = mission:state()
   if mission_state == MISSION_STATE.FINISHED then
     applyControlAllocation(0, 0)
@@ -302,7 +300,6 @@ local function applyPWMAutoMode()
   end
 
   -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("3."))
   if triggerYawControlOnReachedWaypoint() then
     return update, 200
   end
@@ -313,14 +310,9 @@ local function applyPWMAutoMode()
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
   -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
   if reverse_to_next_wp then
-    -- local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
-    -- steering = yaw_pid:compute(err, UPDATE_DT)
-    -- if math.abs(steering) < YAW_DEADBAND then
-    --   steering = 0
-    -- end
+    steering = 0
     throttle = -throttle
   end
-  gcs:send_text(MAV_SEVERITY.WARNING, string.format("4."))
   applyControlAllocation(throttle, steering)
 end
 
