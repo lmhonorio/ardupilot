@@ -97,26 +97,34 @@ Calculating the signals when driving reverse_to_next_wp
 @return number, number - The modified throttle and steering commands for reverse driving
 --]]
 local function calculateReverseOutputSignals(t, s)
+  -- Controlling steering with PID using the waypoint target yaw
+  local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
+  local s_out = yaw_pid:compute(err, UPDATE_DT)
+  gcs:send_text(MAV_SEVERITY.DEBUG, string.format("Yaw error: %.2f deg, PID output: %.2f", math.deg(err), s_out))
+  if math.abs(s_out) < YAW_DEADBAND then
+    s_out = 0
+  end
+
   -- Obtain the target waypoint coordinates and current vehicle position to calculate the distance in meters using the haversine functions
   local idx = mission:get_current_nav_index()
   if not idx then
-    return -t, 0
+    return -t, s_out
   end
   local target_wp = mission:get_item(idx)
   if not target_wp then
-    return -t, 0
+    return -t, s_out
   end
   local target_lat = target_wp:x()/1e7
   local target_lon = target_wp:y()/1e7
   local current_lat = ahrs:get_location():lat()/1e7
   local current_lon = ahrs:get_location():lng()/1e7
   local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("Distance to WP: %.2f m, WP_RADIUS: %.2f", distance_to_wp, WP_RADIUS))
   -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.3
   if distance_to_wp > 3 * WP_RADIUS then
-    return -0.3, 0
+    return -0.3, s_out
   end
-  return -t, 0
+
+  return -t, s_out
 end
 
 -------------------------------------------------------------------------------
