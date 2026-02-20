@@ -37,7 +37,7 @@ local steering_accel_rate = 0.6
 -- Yaw alignment logic
 local UPDATE_PERIOD_MS = 200
 local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
-local YAW_THRESH_RAD = math.rad(param:get('SCR_USER1'))
+local YAW_THRESH_RAD = math.rad(2)
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
 local REVERSE_ALT_MIN_DEG = 360
@@ -377,6 +377,7 @@ local function update()
   -- Getting SCR_USER params to PID values
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
   steering_steady_pid:setGains(p, i, d)
+  steering_steady_pid:setOutputLimits(param:get('SCR_USER1') / 100)
   -- steering_reverse_pid:setGains(p, i, d)
 
   -- Getting radio type

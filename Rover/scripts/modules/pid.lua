@@ -53,6 +53,15 @@ function PID:setGains(p_gain, i_gain, d_gain)
 end
 
 --[[
+Set output limits for the PID controllers
+-- @param lim_value number - The absolute value for both positive and negative limits
+--]]
+function PID:setOutputLimits(lim_value)
+  self.pid_min = -lim_value
+  self.pid_max = lim_value
+end
+
+--[[
 Limit the output ranges
 -- @param value number - Value to be limited
 -- @param min number - Minimum limit
