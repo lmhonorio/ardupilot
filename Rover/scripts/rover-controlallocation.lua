@@ -43,9 +43,9 @@ local YAW_ALIGN_TIMEOUT_MS = 15000
 local REVERSE_ALT_MIN_DEG = 360
 local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
--- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local steering_steady_pid = PID:new(0.5, 0.25, 0.25, 5, -5, 0.99, -0.99)
-local steering_reverse_pid = PID:new(8, 1, 0, 5, -5, 0.99, -0.99)
+-- Params: p_gain, i_gain, d_gain, i_max, pid_max
+local steering_steady_pid = PID:new(0.5, 0.25, 0.25, 0.7, 0.99)
+local steering_reverse_pid = PID:new(8, 1, 0, 0.7, 0.99)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
@@ -378,6 +378,7 @@ local function update()
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
   steering_steady_pid:setGains(p, i, d)
   steering_steady_pid:setOutputLimits(param:get('SCR_USER1') / 100)
+  steering_steady_pid:setIntegratorLimits(param:get('SCR_USER5') / 100)
   -- steering_reverse_pid:setGains(p, i, d)
 
   -- Getting radio type
