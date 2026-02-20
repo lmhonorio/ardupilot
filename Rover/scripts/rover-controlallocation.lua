@@ -44,7 +44,8 @@ local REVERSE_ALT_MIN_DEG = 360
 local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
 -- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
+local yaw_pid = PID:new(0.5, 0.25, 0.25, 5, -5, 0.99, -0.99)
+local steering_reverse_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
@@ -98,7 +99,7 @@ Calculating the signals when driving reverse_to_next_wp
 local function calculateReverseOutputSignals(t, s)
   -- Controlling steering with PID using the waypoint target yaw
   local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
-  local s_out = yaw_pid:compute(err, UPDATE_DT)
+  local s_out = steering_reverse_pid:compute(err, UPDATE_DT)
   gcs:send_text(MAV_SEVERITY.DEBUG, string.format("Yaw error: %.2f deg, PID output: %.2f", math.deg(err), s_out))
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
@@ -136,6 +137,7 @@ local function resetYawControlState()
   yaw_target_rad = nil
   yaw_align_steps = 0
   yaw_pid:resetInternalState()
+  steering_reverse_pid:resetInternalState()
   reverse_to_next_wp = false
 end
 
@@ -216,6 +218,7 @@ local function triggerYawControlOnReachedWaypoint()
 
     -- Reset PID state and start alignment
     yaw_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     yaw_align_steps = 0
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
@@ -272,6 +275,7 @@ local function applyPWMSteeringMode()
   -- If the pilot or failsafe switched modes, stop pursuing yaw alignment
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
     yaw_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     return
   end
 
@@ -284,6 +288,7 @@ local function applyPWMSteeringMode()
   if yaw_align_steps > yaw_align_max_steps then
     applyControlAllocation(0, 0)
     yaw_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     vehicle:set_mode(DRIVING_MODES.AUTO)
     return
   end
@@ -295,6 +300,7 @@ local function applyPWMSteeringMode()
   if math.abs(err) <= YAW_THRESH_RAD then
     applyControlAllocation(0, 0)
     yaw_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -370,7 +376,8 @@ local function update()
   end
   -- Getting SCR_USER params to PID values
   local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  yaw_pid:setGains(p, i, d)
+  -- yaw_pid:setGains(p, i, d)
+  steering_reverse_pid:setGains(p, i, d)
 
   -- Getting radio type
   radio_type = param:get('RC3_REVERSED') or 0
