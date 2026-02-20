@@ -40,7 +40,6 @@ local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
 local YAW_THRESH_RAD = math.rad(param:get('SCR_USER1'))
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
-local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
 local REVERSE_ALT_MIN_DEG = 360
 local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
@@ -114,10 +113,10 @@ local function calculateReverseOutputSignals(t, s)
   if not target_wp then
     return -t, s_out
   end
-  local target_lat = target_wp:x()/1e7
-  local target_lon = target_wp:y()/1e7
-  local current_lat = ahrs:get_location():lat()/1e7
-  local current_lon = ahrs:get_location():lng()/1e7
+  local target_lat = target_wp:x() / 1e7
+  local target_lon = target_wp:y() / 1e7
+  local current_lat = ahrs:get_location():lat() / 1e7
+  local current_lon = ahrs:get_location():lng() / 1e7
   local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
   -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.3
   if distance_to_wp > 3 * WP_RADIUS then
@@ -278,7 +277,11 @@ local function applyPWMSteeringMode()
 
   -- Timeout safety
   yaw_align_steps = yaw_align_steps + 1
-  if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
+  local yaw_align_max_steps = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
+  if reverse_to_next_wp then
+    yaw_align_max_steps = yaw_align_max_steps * 2 -- allow more time for reverse maneuvers
+  end
+  if yaw_align_steps > yaw_align_max_steps then
     applyControlAllocation(0, 0)
     yaw_pid:resetInternalState()
     vehicle:set_mode(DRIVING_MODES.AUTO)
