@@ -310,7 +310,6 @@ local function applyPWMSteeringMode()
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
-  gcs:send_text(MAV_SEVERITY.DEBUG, string.format("Yaw error: %.2f deg, PID output: %.2f", math.deg(err), s_out))
   applyControlAllocation(0, s_out)
 end
 
