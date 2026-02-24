@@ -9,7 +9,7 @@ PID.__index = PID
 --[[
 PID controller class
 Usage:
-  local pid = PID:new(p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min)
+  local pid = PID:new(p_gain, i_gain, d_gain, i_max, pid_max)
   pid:setGains(p_gain, i_gain, d_gain)
   local output = pid:compute(error, dt)
   pid:resetInternalState()
@@ -18,21 +18,19 @@ Parameters:
   i_gain (number): Integral gain
   d_gain (number): Derivative gain
   i_max (number): Maximum integrator value
-  i_min (number): Minimum integrator value
   pid_max (number): Maximum PID output value
-  pid_min (number): Minimum PID output value
 --]]
-function PID:new(p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min)
+function PID:new(p_gain, i_gain, d_gain, i_max, pid_max)
   local obj = {
     P = p_gain or 0,
     I = i_gain or 0,
     D = d_gain or 0,
     integrator = 0,
     last_error = nil,
-    i_max = i_max or 0,
-    i_min = i_min or 0,
+    i_max = i_max or 0.7,
+    i_min = -i_max or -0.7,
     pid_max = pid_max or 1,
-    pid_min = pid_min or -1
+    pid_min = -pid_max or -1
   }
   setmetatable(obj, self)
   -- self.__index = self
@@ -50,6 +48,24 @@ function PID:setGains(p_gain, i_gain, d_gain)
   self.P = tonumber(p_gain)
   self.I = tonumber(i_gain)
   self.D = tonumber(d_gain)
+end
+
+--[[
+Set output limits for the PID controllers
+-- @param lim_value number - The absolute value for both positive and negative limits
+--]]
+function PID:setOutputLimits(lim_value)
+  self.pid_min = -lim_value
+  self.pid_max = lim_value
+end
+
+--[[
+Set integrator limits for the PID controllers
+-- @param lim_value number - The absolute value for both positive and negative limits
+--]]
+function PID:setIntegratorLimits(lim_value)
+  self.i_min = -lim_value
+  self.i_max = lim_value
 end
 
 --[[

@@ -37,17 +37,21 @@ local steering_accel_rate = 0.6
 -- Yaw alignment logic
 local UPDATE_PERIOD_MS = 200
 local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
-local YAW_THRESH_RAD = math.rad(param:get('SCR_USER1'))
+local YAW_THRESH_RAD = math.rad(2)
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
-local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
--- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
-local yaw_target_deg = nil
+local REVERSE_ALT_MIN_DEG = 360
+local REVERSE_ALT_MAX_DEG = 720
+local REVERSE_ALT_OFFSET_DEG = 360
+-- Params: p_gain, i_gain, d_gain, i_max, pid_max
+local steering_steady_pid = PID:new(3.5, 8, 0, 1, 1)
+local steering_reverse_pid = PID:new(8, 1, 0, 1, 1)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
 local last_nav_idx = nil
+local reverse_to_next_wp = false
+local WP_RADIUS = param:get('WP_RADIUS') or 2.0 -- meters
 
 local radio_type = 0
 
@@ -70,21 +74,56 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
 local function applyControlAllocation(t, s)
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
   --   |       | Rover forward direction
   -- 2 - 3
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
-  -- Limiting the output values to the PWM ranges
-  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
+  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
+end
+
+--[[
+Calculating the signals when driving reverse_to_next_wp
+@param t number - Throttle command from 0 (or more) to 1.0
+@param s number - Steering command from -1.0 to 1.0
+@return number, number - The modified throttle and steering commands for reverse driving
+--]]
+local function calculateReverseOutputSignals(t, s)
+  -- Controlling steering with PID using the waypoint target yaw
+  local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
+  local s_out = steering_reverse_pid:compute(err, UPDATE_DT)
+  if math.abs(s_out) < YAW_DEADBAND then
+    s_out = 0
+  end
+
+  -- Obtain the target waypoint coordinates and current vehicle position to calculate the distance in meters using the haversine functions
+  local idx = mission:get_current_nav_index()
+  if not idx then
+    return -t, s_out
+  end
+  local target_wp = mission:get_item(idx)
+  if not target_wp then
+    return -t, s_out
+  end
+  local target_lat = target_wp:x() / 1e7
+  local target_lon = target_wp:y() / 1e7
+  local current_lat = ahrs:get_location():lat() / 1e7
+  local current_lon = ahrs:get_location():lng() / 1e7
+  local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
+  -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.3
+  if distance_to_wp > 3 * WP_RADIUS then
+    return -0.3, s_out
+  end
+
+  return -t, s_out
 end
 
 -------------------------------------------------------------------------------
@@ -94,10 +133,37 @@ end
 Reset the yaw control state
 --]]
 local function resetYawControlState()
-  yaw_target_deg = nil
   yaw_target_rad = nil
   yaw_align_steps = 0
-  yaw_pid:resetInternalState()
+  steering_steady_pid:resetInternalState()
+  steering_reverse_pid:resetInternalState()
+  reverse_to_next_wp = false
+end
+
+--[[
+Decode yaw and reverse direction from waypoint z (altitude) field
+Encoding:
+  -1: pass-through waypoint
+  0..360: align yaw and drive forward on next leg
+  360..720: align yaw to (z-360) and drive reverse on next leg
+-- @param angle_from_alt number
+-- @return number|nil, bool, bool
+--]]
+local function decodeYawAndDirectionFromWaypointZ(angle_from_alt)
+  if angle_from_alt == nil or funcs:isNan(angle_from_alt) then
+    return nil, false, false
+  end
+  if angle_from_alt == -1 then
+    return nil, false, true
+  end
+
+  local reverse_leg = angle_from_alt >= REVERSE_ALT_MIN_DEG and angle_from_alt <= REVERSE_ALT_MAX_DEG
+  local yaw_deg = angle_from_alt
+  if reverse_leg then
+    yaw_deg = yaw_deg - REVERSE_ALT_OFFSET_DEG
+  end
+
+  return funcs:mapTo360(yaw_deg), reverse_leg, false
 end
 
 --[[
@@ -121,30 +187,37 @@ local function triggerYawControlOnReachedWaypoint()
     local reached_idx = last_nav_idx
     last_nav_idx = idx
     local item = mission:get_item(reached_idx)
+    reverse_to_next_wp = false
     if not item then
+      resetYawControlState()
       return false
     end
 
     -- Only handle NAV_WAYPOINT (16) with valid param4 (yaw)
     if item:command() ~= 16 then
-      return false
-    end
-    local angle_from_alt = item:z() -- z altitude is the yaw angle in degrees
-    if angle_from_alt == nil or funcs:isNan(angle_from_alt) then
+      resetYawControlState()
       return false
     end
 
+    local yaw_target_deg, reverse_leg, is_pass_through = decodeYawAndDirectionFromWaypointZ(item:z())
+
     -- If angle == -1, treat as pass-through waypoint: do NOT switch modes
-    if angle_from_alt == -1 then
+    if is_pass_through then
       -- clear any previous target just in case
       resetYawControlState()
       return false
     end
-    yaw_target_deg = funcs:mapTo360(angle_from_alt)
+
+    reverse_to_next_wp = reverse_leg
+    if yaw_target_deg == nil then
+      resetYawControlState()
+      return false
+    end
     yaw_target_rad = math.rad(yaw_target_deg)
 
     -- Reset PID state and start alignment
-    yaw_pid:resetInternalState()
+    steering_steady_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     yaw_align_steps = 0
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
@@ -171,6 +244,7 @@ end
 Perform vehicle control in Manual mode
 --]]
 local function applyPWMManualMode()
+  reverse_to_next_wp = false
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
   local raw_throttle = 0
@@ -199,15 +273,21 @@ Perform vehicle control in Steering mode
 local function applyPWMSteeringMode()
   -- If the pilot or failsafe switched modes, stop pursuing yaw alignment
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
-    yaw_pid:resetInternalState()
+    steering_steady_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     return
   end
 
   -- Timeout safety
   yaw_align_steps = yaw_align_steps + 1
-  if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
+  local yaw_align_max_steps = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
+  if reverse_to_next_wp then
+    yaw_align_max_steps = yaw_align_max_steps * 2 -- allow more time for reverse maneuvers
+  end
+  if yaw_align_steps > yaw_align_max_steps then
     applyControlAllocation(0, 0)
-    yaw_pid:resetInternalState()
+    steering_steady_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     vehicle:set_mode(DRIVING_MODES.AUTO)
     return
   end
@@ -218,18 +298,67 @@ local function applyPWMSteeringMode()
   -- Check if we reached the target yaw
   if math.abs(err) <= YAW_THRESH_RAD then
     applyControlAllocation(0, 0)
-    yaw_pid:resetInternalState()
+    steering_steady_pid:resetInternalState()
+    steering_reverse_pid:resetInternalState()
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
   end
 
   -- Rotate in place with pid output
-  local pid_out = yaw_pid:compute(err, UPDATE_DT)
-  if math.abs(pid_out) < YAW_DEADBAND then
-    pid_out = 0
+  local s_out = steering_steady_pid:compute(err, UPDATE_DT)
+  if math.abs(s_out) < YAW_DEADBAND then
+    s_out = 0
   end
-  applyControlAllocation(0, pid_out)
+  applyControlAllocation(0, s_out)
+end
+
+--[[
+Perform vehicle control in Auto mode
+--]]
+local function applyPWMAutoMode()
+  local idx = mission:get_current_nav_index()
+
+  -- Detect mission restart / rewind: current index went backwards
+  if idx and last_nav_idx and idx < last_nav_idx then
+    resetYawControlState()
+    last_nav_idx = nil
+  end
+
+  -- When starting script in the middle of a mission, infer direction from previous waypoint
+  if idx and last_nav_idx == nil and idx > 0 then
+    local previous_item = mission:get_item(idx - 1)
+    if previous_item and previous_item:command() == 16 then
+      local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
+      reverse_to_next_wp = reverse_leg
+    else
+      reverse_to_next_wp = false
+    end
+  end
+
+  -- Controls end of mission
+  local mission_state = mission:state()
+  if mission_state == MISSION_STATE.FINISHED then
+    applyControlAllocation(0, 0)
+    reverse_to_next_wp = false
+    vehicle:set_mode(DRIVING_MODES.MANUAL)
+    return update, 200
+  end
+
+  -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
+  if triggerYawControlOnReachedWaypoint() then
+    return update, 200
+  end
+
+  -- Acquiring throttle and steering from internal control output
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
+  local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+  -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
+  if reverse_to_next_wp then
+    throttle, steering = calculateReverseOutputSignals(throttle, steering)
+  end
+  applyControlAllocation(throttle, steering)
 end
 
 -------------------------------------------------------------------------------
@@ -245,11 +374,12 @@ local function update()
     return
   end
   -- Getting SCR_USER params to PID values
-  local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  yaw_pid:setGains(p, i, d)
+  -- local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
+  -- steering_steady_pid:setGains(p, i, d)
+  -- steering_reverse_pid:setGains(p, i, d)
 
   -- Getting radio type
-  radio_type = param:get('SCR_USER6') or 0
+  radio_type = param:get('RC3_REVERSED') or 0
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
@@ -271,32 +401,7 @@ local function update()
     applyControlAllocation(0, 0)
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
-    local idx = mission:get_current_nav_index()
-
-    -- Detect mission restart / rewind: current index went backwards
-    if idx and last_nav_idx and idx < last_nav_idx then
-      resetYawControlState()
-      last_nav_idx = nil
-    end
-
-    -- Controls end of mission
-    local mission_state = mission:state()
-    if mission_state == MISSION_STATE.FINISHED then
-      applyControlAllocation(0, 0)
-      vehicle:set_mode(DRIVING_MODES.MANUAL)
-      return update, 200
-    end
-
-    -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
-    if triggerYawControlOnReachedWaypoint() then
-      return update, 200
-    end
-
-    -- Acquiring throttle and steering from internal control output
-    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-    throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
-    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-    applyControlAllocation(throttle, steering)
+    applyPWMAutoMode()
     return update, 200
   end
 end
