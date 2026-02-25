@@ -361,6 +361,16 @@ local function applyPWMAutoMode()
   applyControlAllocation(throttle, steering)
 end
 
+--[[
+Perform vehicle control in Guided mode
+--]]
+local function applyPWMGuidedMode()
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
+  local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+  applyControlAllocation(throttle, steering)
+end
+
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
@@ -402,6 +412,9 @@ local function update()
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
     applyPWMAutoMode()
+    return update, 200
+  elseif vehicle:get_mode() == DRIVING_MODES.GUIDED then
+    applyPWMGuidedMode()
     return update, 200
   end
 end
