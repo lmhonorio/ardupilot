@@ -44,8 +44,8 @@ local REVERSE_ALT_MIN_DEG = 360
 local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
-local steering_steady_pid = PID:new(3.5, 8, 0, 1, 1)
-local steering_reverse_pid = PID:new(8, 1, 0, 1, 1)
+local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
+local steering_reverse_pid = PID:new(8, 1, 0, 1, 0.95)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
@@ -88,7 +88,6 @@ local function applyControlAllocation(t, s)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
-  gcs:send_text(MAV_SEVERITY.DEBUG, string.format("Control Allocation: pwm_l=%d, pwm_r=%d", pwm_l, pwm_r))
 end
 
 --[[
@@ -290,9 +289,6 @@ local function applyPWMSteeringMode()
     steering_steady_pid:resetInternalState()
     steering_reverse_pid:resetInternalState()
     vehicle:set_mode(DRIVING_MODES.AUTO)
-    gcs:send_text(MAV_SEVERITY.WARNING,
-      string.format("Failed to reach target yaw of %.1f degrees within timeout, resuming AUTO mode",
-        math.deg(yaw_target_rad)))
     return
   end
 
@@ -304,7 +300,6 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     steering_reverse_pid:resetInternalState()
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("Reached target yaw of %.1f degrees", math.deg(yaw_target_rad)))
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -315,9 +310,6 @@ local function applyPWMSteeringMode()
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
-  gcs:send_text(MAV_SEVERITY.DEBUG,
-    string.format("Aligning yaw: current=%.1f°, target=%.1f°, error=%.1f°, steering_out=%.2f",
-      math.deg(ahrs:get_yaw()), math.deg(yaw_target_rad), math.deg(err), s_out))
   applyControlAllocation(0, s_out)
 end
 
@@ -373,11 +365,12 @@ end
 Perform vehicle control in Guided mode
 --]]
 local function applyPWMGuidedMode()
+  -- Reset values for steering control
+  resetYawControlState()
+  -- Acquiring throttle and steering from internal control outputs
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
   throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-  gcs:send_text(MAV_SEVERITY.DEBUG,
-    string.format("GUIDED mode control output: throttle=%.2f, steering=%.2f", throttle, steering))
   applyControlAllocation(throttle, steering)
 end
 
@@ -417,7 +410,6 @@ local function update()
   elseif vehicle_mode == DRIVING_MODES.STEERING then
     -- We use steering mode for yaw alignment
     applyPWMSteeringMode()
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("Aligning yaw to %.1f degrees", math.deg(yaw_target_rad)))
     return update, 200
   elseif vehicle_mode == DRIVING_MODES.HOLD then
     -- Make the vehicle stop
