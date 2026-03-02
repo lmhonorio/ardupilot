@@ -10,7 +10,7 @@ read -p "Quantos robôs (N)? [3]: " N
 N=${N:-3}
 
 # ===================== PARAMS =====================
-QGC_PORT=14551          # QGC recebe de todas as instâncias
+QGC_PORT=14550          # QGC recebe de todas as instâncias
 MAV_BASE=14555          # porta base p/ MAVROS (instância 0)
 STEP=10                 # incremento por instância: 14555, 14565, 14575...
 SYSID0=1                # SYSID da instância 0
