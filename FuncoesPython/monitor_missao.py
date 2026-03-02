@@ -48,7 +48,7 @@ def download_and_print_mission(master, target_system, target_component):
             if m and m.get_srcSystem() == target_system and m.seq == i:
                 msg_item = m
                 break
-        
+         
         if msg_item:
             # Imprime os dados do WP
             # Ajusta formatação dependendo se é _INT ou float

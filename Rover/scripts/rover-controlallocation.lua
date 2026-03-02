@@ -209,7 +209,7 @@ local function checkForInvertedFlightCommand()
   if item:command() == 210 then
     local p1 = item:param1() -- Inverted (0=Normal, 1=Inverted)
     gcs:send_text(
-      MAV_SEVERITY.INFO,
+      MAV_SEVERITY.WARNING,
       string.format("WP %d: MAV_CMD_DO_INVERTED_FLIGHT detected! Param1=%.1f", idx, p1)
     )
     last_inverted_check_idx = idx
