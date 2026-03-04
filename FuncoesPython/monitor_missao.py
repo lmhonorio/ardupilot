@@ -5,7 +5,7 @@ from pymavlink import mavutil
 # Configuração da conexão
 # Escuta na porta UDP 14550 (onde o sim_nrover_new.sh envia dados via broadcast/unicast)
 # 0.0.0.0 permite escutar em todas as interfaces
-CONNECTION_STRING = 'udp:0.0.0.0:14550'
+CONNECTION_STRING = 'udp:127.0.0.1:14560'
 
 
 def download_and_print_mission(master, target_system, target_component):
@@ -87,7 +87,14 @@ def main():
     
     print("Aguardando heartbeat...")
     master.wait_heartbeat()
-    print("Conectado! Aguardando novas missões...")
+    print("Conectado! Solicitando streams de dados do ArduPilot (incluindo Sensores)...")
+    
+    # Solicita que o ArduPilot envie as mensagens do grupo EXTRA1, EXTRA2, EXTRA3 (onde fica DISTANCE_SENSOR)
+    master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTRA1, 5, 1)
+    master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTRA2, 5, 1)
+    master.mav.request_data_stream_send(master.target_system, master.target_component, mavutil.mavlink.MAV_DATA_STREAM_EXTRA3, 5, 1)
+
+    print("Aguardando novas missões e leituras de sensores...")
 
     while True:
         # Lê mensagens
@@ -209,6 +216,15 @@ def main():
             param_id = msg.param_id
             if any(x in param_id for x in ['MNT', 'CAM', 'YAW', 'ROI']):
                 print(f"Parâmetro Alterado/Recebido: {param_id} = {msg.param_value}")
+
+        # Monitora o sensor de distância (desvio de obstáculos)
+        if msg.get_type() == 'DISTANCE_SENSOR':
+            dist_m = msg.current_distance / 100.0
+            max_dist_m = msg.max_distance / 100.0
+            
+            # Se a distância atual for menor que a máxima, significa que detectou algo dentro do alcance
+            if dist_m < max_dist_m:
+                print(f"--> [ALERTA LIDAR] (Sys{msg.get_srcSystem()}) Obstáculo detectado a {dist_m:.2f}m!")
 
 
 if __name__ == '__main__':
