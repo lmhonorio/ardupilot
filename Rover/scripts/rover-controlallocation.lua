@@ -49,6 +49,10 @@ local yaw_align_steps = 0
 
 local last_nav_idx = nil
 
+-- Parâmetro para ativar/desativar a lógica de controle personalizada em AUTO
+local act_obs_avoid_param = Parameter()
+act_obs_avoid_param:init('BATT_SOC_ACTOBSAVD')
+
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -194,7 +198,7 @@ local function checkForInvertedFlightCommand()
   if not idx then
     return
   end
-  
+
   -- Avoid repeating the check for the same index
   if idx == last_inverted_check_idx then
     return
@@ -213,12 +217,12 @@ local function checkForInvertedFlightCommand()
       string.format("WP %d: MAV_CMD_DO_INVERTED_FLIGHT detected! Param1=%.1f", idx, p1)
     )
     last_inverted_check_idx = idx
-  elseif item:command() ~= 16 then 
-       -- if it is not nav waypoint we assume we just check once
-       last_inverted_check_idx = idx
+  elseif item:command() ~= 16 then
+    -- if it is not nav waypoint we assume we just check once
+    last_inverted_check_idx = idx
   end
-  -- Note: If it is a NAV command (like Waypoint), we might want to check constantly 
-  -- but usually DO commands are instantaneous. 
+  -- Note: If it is a NAV command (like Waypoint), we might want to check constantly
+  -- but usually DO commands are instantaneous.
   -- For safety, we only log once per index to avoid spam.
 end
 
@@ -332,6 +336,14 @@ local function update()
     applyControlAllocation(0, 0)
     return update, 200
   elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
+    -- Só aplica lógica customizada em AUTO se BATT_SOC_ACTOBSAVD == 1.
+    -- Caso contrário, deixa o Rover usar o controle/mixagem padrão.
+    local act_obs_avoid = act_obs_avoid_param:get() or 0
+    if act_obs_avoid ~= 1 then
+      resetMissionYawState()
+      return update, 200
+    end
+
     local idx = mission:get_current_nav_index()
 
     -- Detect mission restart / rewind: current index went backwards
@@ -357,7 +369,7 @@ local function update()
     end
 
     -- Check for Inverted Flight Command (210)
-    checkForInvertedFlightCommand()
+    -- checkForInvertedFlightCommand()
 
     -- Acquiring throttle and steering from internal control output
     local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))

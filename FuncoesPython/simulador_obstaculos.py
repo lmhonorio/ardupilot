@@ -146,7 +146,7 @@ def main():
             master.write(buf)
 
             # 2. Injeta uma cópia no QGroundControl pra forçar ele a ver no Radar
-            sock_out.sendto(buf, ('192.168.0.131', 14550))
+            sock_out.sendto(buf, ('192.168.0.170', 14570))
 
             # 3. Injeta uma cópia no monitor_missao
             sock_out.sendto(buf, ('127.0.0.1', 14560))
