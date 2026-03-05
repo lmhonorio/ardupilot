@@ -10,21 +10,22 @@ from pymavlink import mavutil
 # Se for SITL local, geralmente tcp:127.0.0.1:5760 ou udp:127.0.0.1:14550
 CONNECTION_STRING = 'udp:127.0.0.1:14552' 
 
-# Lista de obstáculos virtuais (Latitude, Longitude)
-# ATENÇÃO: Substitua por coordenadas extremamente próximas de onde o seu Rover vai estar!
+# Lista de obstáculos virtuais
+# Cada obstáculo é uma tupla: (Latitude, Longitude, Raio_em_metros)
+# ATENÇÃO: Substitua por coordenadas e raios extremamente próximos de onde o seu Rover vai estar!
 OBSTACLES = [
-    # Exemplo: coloque coordenadas capturadas no Mission Planner
-    (-3.1231321, -41.7646546),
-    (-3.1231212, -41.7644028)
+    # Exemplo: (lat, lon, raio_m)
+    (-3.1231222, -41.7644018, 3.0),
+    (-3.1231006, -41.7644589, 3.0),
 ]
 
 # Configurações do "Sensor de Distância" (Lidar frontal simulado)
-MAX_DISTANCE_M = 10.0      # Distância máxima que o sensor enxerga (metros)
+MAX_DISTANCE_M = 20.0      # Distância máxima que o sensor enxerga (metros)
 MIN_DISTANCE_M = 0.2       # Distância mínima do sensor (metros)
-FOV_DEGREES = 30.0         # Campo de visão (cone de +- 15 graus na frente do rover)
+FOV_DEGREES = 10.0         # Campo de visão (cone de +- 15 graus na frente do rover)
 
 # Radar 2D (OBSTACLE_DISTANCE): array de distâncias ao redor do veículo
-N_BINS = 72                          # Número de setores (ex.: 72 = 5° cada)
+N_BINS = 180                          # Número de setores (ex.: 72 = 5° cada)
 INCREMENT_DEG = 360.0 / N_BINS       # Largura angular de cada bin em graus
 ANGLE_OFFSET_DEG = 0.0               # 0 = índice 0 é a frente do Rover (body frame)
 INVALID_DISTANCE = 65535              # UINT16_MAX = desconhecido/não usado
@@ -92,23 +93,55 @@ def main():
             max_distance_cm = int(MAX_DISTANCE_M * 100)
             no_obstacle_cm = max_distance_cm + 1
 
+            # Pré-calcula posição dos obstáculos no referencial do veículo (x para frente, y para direita)
+            obstacles_local = []
+            for obs_lat, obs_lon, obs_radius_m in OBSTACLES:
+                dist_center, bearing = get_distance_and_bearing(veh_lat, veh_lon, obs_lat, obs_lon)
+                # Ângulo do obstáculo em relação à frente do Rover (0° = frente, cresce clockwise)
+                rel_bearing_deg = (bearing - veh_hdg + 360) % 360
+                # Converte para ângulo matemático (0° = +x, anti-horário)
+                theta_math = math.radians(-rel_bearing_deg)
+                cx = dist_center * math.cos(theta_math)
+                cy = dist_center * math.sin(theta_math)
+                obstacles_local.append((cx, cy, obs_radius_m))
+
             # Array de distâncias do radar 2D: cada índice = um setor angular (0 = frente)
             distances = [no_obstacle_cm] * N_BINS
 
-            for obs_lat, obs_lon in OBSTACLES:
-                dist, bearing = get_distance_and_bearing(veh_lat, veh_lon, obs_lat, obs_lon)
+            # Para cada bin, traça um raio a partir do veículo e calcula interseção com cada círculo (obstáculo)
+            for j in range(N_BINS):
+                theta_body_deg = j * INCREMENT_DEG          # 0° = frente, clockwise
+                theta_math = math.radians(-theta_body_deg)  # converte para sistema trigonométrico padrão
+                dx = math.cos(theta_math)
+                dy = math.sin(theta_math)
 
-                # Ângulo do obstáculo em relação à frente do Rover (body frame, 0° = frente, 0..360)
-                rel_bearing = (bearing - veh_hdg + 360) % 360
+                closest_t = None  # distância ao longo do raio, em metros
 
-                # Índice do bin que corresponde a esse ângulo (0 = frente, incremento clockwise)
-                idx = int(round(rel_bearing / INCREMENT_DEG)) % N_BINS
+                for cx, cy, radius_m in obstacles_local:
+                    # Interseção raio-círculo: |t*d - C|^2 = R^2, com d unitário
+                    # t^2 - 2(d·C)t + (|C|^2 - R^2) = 0
+                    dc = dx * cx + dy * cy
+                    c2 = cx * cx + cy * cy
+                    r2 = radius_m * radius_m
+                    disc = dc * dc - (c2 - r2)
+                    if disc < 0:
+                        continue  # sem interseção
+                    sqrt_disc = math.sqrt(disc)
+                    t1 = dc - sqrt_disc
+                    t2 = dc + sqrt_disc
 
-                if MIN_DISTANCE_M <= dist <= MAX_DISTANCE_M:
-                    dist_cm = int(dist * 100)
+                    for t in (t1, t2):
+                        if t is None or t < 0:
+                            continue
+                        if t < MIN_DISTANCE_M or t > MAX_DISTANCE_M:
+                            continue
+                        if closest_t is None or t < closest_t:
+                            closest_t = t
+
+                if closest_t is not None:
+                    dist_cm = int(closest_t * 100)
                     dist_cm = min(max(dist_cm, min_distance_cm), max_distance_cm)
-                    if distances[idx] == no_obstacle_cm or dist_cm < distances[idx]:
-                        distances[idx] = dist_cm
+                    distances[j] = dist_cm
 
             # Log resumido: obstáculo mais próximo na frente (bins centrais)
             half_fov_bins = int((FOV_DEGREES / 2.0) / INCREMENT_DEG)
@@ -145,11 +178,9 @@ def main():
             # 1. Envia pro ArduPilot (via MAVProxy)
             master.write(buf)
 
-            # 2. Injeta uma cópia no QGroundControl pra forçar ele a ver no Radar
-            sock_out.sendto(buf, ('192.168.0.170', 14570))
-
-            # 3. Injeta uma cópia no monitor_missao
+            # 2. Injeta uma cópia no QGroundControl/monitor_missao (se necessário)
             sock_out.sendto(buf, ('127.0.0.1', 14560))
+            sock_out.sendto(buf, ('192.168.0.170', 14570))
 
         # Espera curta só pra manter um refresh de aprox 10-20Hz pra não inundar a conexão
         time.sleep(0.05)

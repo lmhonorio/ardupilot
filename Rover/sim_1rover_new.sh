@@ -54,5 +54,5 @@ gnome-terminal -- bash -c "export MAP_SERVICE=GoogleSat; mavproxy.py \
   --master=udp:127.0.0.1:14551 \
   --out=udp:127.0.0.1:14552 \
   --out=udp:192.168.0.131:14550 --out=udp:127.0.0.1:14560 \
-  --cmd='param set AVOID_ENABLE 1; param set PRX_TYPE 1' 
+  --cmd='param set AVOID_ENABLE 1; param set PRX_TYPE 1; param set AVOID_MARGIN 2.0' 
   --map; exec bash"
