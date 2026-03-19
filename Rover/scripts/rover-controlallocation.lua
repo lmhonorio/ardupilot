@@ -361,19 +361,6 @@ local function applyPWMAutoMode()
   applyControlAllocation(throttle, steering)
 end
 
---[[
-Perform vehicle control in Guided mode
---]]
-local function applyPWMGuidedMode()
-  -- Reset values for steering control
-  resetYawControlState()
-  -- Acquiring throttle and steering from internal control outputs
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
-  throttle = funcs:mapMaxMin(math.abs(throttle), 0.1, 1.0)
-  local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-  applyControlAllocation(throttle, steering)
-end
-
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
@@ -411,15 +398,12 @@ local function update()
     -- We use steering mode for yaw alignment
     applyPWMSteeringMode()
     return update, 200
-  elseif vehicle_mode == DRIVING_MODES.HOLD then
-    -- Make the vehicle stop
-    applyControlAllocation(0, 0)
-    return update, 200
   elseif vehicle_mode == DRIVING_MODES.AUTO then
     applyPWMAutoMode()
     return update, 200
-  elseif vehicle_mode == DRIVING_MODES.GUIDED then
-    applyPWMGuidedMode()
+  elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
+    -- Make the vehicle stop
+    applyControlAllocation(0, 0)
     return update, 200
   end
 end
