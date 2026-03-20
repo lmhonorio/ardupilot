@@ -21,6 +21,19 @@ RADIO_CHANNEL_BANDWIDTH = 450
 SYSTEM_STARTED = Parameter()
 local desired_yaw = -1.0
 
+-- Sonar servo controls
+PWM_MIN_SERVO = 500
+PWM_MAX_SERVO = 2500
+PWM_MIN_OUTPUT = 800                                                       -- points to the right, looking from the back of the boat
+PWM_MAX_OUTPUT = 2200                                                      -- points to the left, looking from the back of the boat
+PWM_OUTPUT_SERVO_RATIO = (PWM_MAX_OUTPUT - PWM_MIN_OUTPUT) /
+    (PWM_MAX_SERVO - PWM_MIN_SERVO)                                        -- Ratio to convert the servo PWM range to the desired output PWM range for the sonar servo
+PWM_CENTER_OUTPUT = (PWM_MAX_OUTPUT - PWM_MIN_OUTPUT) / 2 + PWM_MIN_OUTPUT -- aligns servo to the center position
+ANGLE_MIN_SERVO = 0
+ANGLE_MAX_SERVO = 180
+ANGLE_MID_SERVO = (ANGLE_MAX_SERVO + ANGLE_MIN_SERVO) / 2
+SERVO_PWM_ANGLE_RATIO = (PWM_MAX_SERVO - PWM_MIN_SERVO) / (ANGLE_MAX_SERVO - ANGLE_MIN_SERVO)
+
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -90,6 +103,34 @@ local function new_control_allocation(t, s)
   end
 end -- new_control_allocation function
 
+--[[
+Control Sonar Servo Function
+It controls the servo responsible for the sonar rotation, making it point to the desired yaw direction
+@parameter driving_mode: integer - current driving mode of the vehicle, used to determine if the sonar should be controlled or set to neutral position
+@parameter yaw_angle_degrees: number - the current yaw angle in degrees
+@parameter goal_angle_degrees: number - the desired yaw angle in degrees
+--]]
+local function control_sonar_servo(driving_mode, yaw_angle_degrees, goal_angle_degrees)
+  -- Only control the sonar servo in AUTO mode, in other modes it should be in the neutral position (pointing backwards)
+  if driving_mode == DRIVING_MODES.AUTO then
+    -- WORLD FRAME is 0 to the north, 90 degrees to the east
+    -- We add 90 degrees as the sonar looks sideways from the boat perspective
+    local sonar_angle_degrees = funcs:mapTo360(yaw_angle_degrees + 90)
+    -- Angle difference from sonar to goal in world frame
+    local sonar_goal_angle_diff_degrees = funcs:mapTo180(goal_angle_degrees - sonar_angle_degrees)
+    -- The servo angle it must turn to have the sonar pointing to the desired yaw direction
+    -- We add the servo mid range angle as this is where the offset from the sonar side inpection angle, when it is looking at min degrees
+    -- This angle is in SERVO FRAME given the offset
+    local servo_angle_degrees = funcs:mapTo180(ANGLE_MIN_SERVO + sonar_goal_angle_diff_degrees + ANGLE_MID_SERVO)
+    -- Obtaining PWM in servo and output ranges and sending to the servo output
+    local servo_pwm = math.floor(PWM_MIN_SERVO + servo_angle_degrees * SERVO_PWM_ANGLE_RATIO)
+    local output_pwm = math.floor((servo_pwm - PWM_MIN_SERVO) * PWM_OUTPUT_SERVO_RATIO + PWM_MIN_OUTPUT)
+    SRV_Channels:set_output_pwm_chan_timeout(6, output_pwm, 300)
+  else
+    -- In other modes, set the servo to the neutral position (aligned to center filming sideways)
+    SRV_Channels:set_output_pwm_chan_timeout(6, PWM_CENTER_OUTPUT, 300)
+  end
+end
 
 --[[
 Main update function
@@ -131,6 +172,12 @@ local function update()
       end
     end
   end
+
+  -- Control the sonar servo based on the desired yaw
+  -- Get the goal angle in world frame from user parameter
+  local boat_yaw_degrees = funcs:mapTo360(funcs:toDegrees(ahrs:get_yaw()))
+  local goal_angle_to_point_sonar_degrees = param:get('SCR_USER6') or 0
+  control_sonar_servo(current_driving_mode, boat_yaw_degrees, goal_angle_to_point_sonar_degrees)
 
   -- Check if armed to begin control allocation safely
   if not arming:is_armed() then

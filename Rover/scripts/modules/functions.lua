@@ -46,6 +46,25 @@ function funcs:mapTo360(angle)
   end
   if angle < 0 then
     return angle + 360
+  elseif angle >= 360 then
+    return angle - 360
+  end
+  return angle
+end
+
+--[[
+Function to map an angle to the range [-180, 180]
+-- @param angle number - The input angle in degrees
+-- @return number - The mapped angle in the range [-180, 180]
+--]]
+function funcs:mapTo180(angle)
+  if angle == nil then
+    return 0
+  end
+  if angle < 0 then
+    return angle + 180
+  elseif angle >= 180 then
+    return angle - 180
   end
   return angle
 end
