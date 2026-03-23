@@ -24,11 +24,7 @@ local desired_yaw = -1.0
 -- Sonar servo controls
 PWM_MIN_SERVO = 500
 PWM_MAX_SERVO = 2500
-PWM_MIN_OUTPUT = 800                                                       -- points to the right, looking from the back of the boat
-PWM_MAX_OUTPUT = 2200                                                      -- points to the left, looking from the back of the boat
-PWM_OUTPUT_SERVO_RATIO = (PWM_MAX_OUTPUT - PWM_MIN_OUTPUT) /
-    (PWM_MAX_SERVO - PWM_MIN_SERVO)                                        -- Ratio to convert the servo PWM range to the desired output PWM range for the sonar servo
-PWM_CENTER_OUTPUT = (PWM_MAX_OUTPUT - PWM_MIN_OUTPUT) / 2 + PWM_MIN_OUTPUT -- aligns servo to the center position
+PWM_MID = 1500
 ANGLE_MIN_SERVO = 0
 ANGLE_MAX_SERVO = 180
 ANGLE_MID_SERVO = (ANGLE_MAX_SERVO + ANGLE_MIN_SERVO) / 2
@@ -114,7 +110,7 @@ It controls the servo responsible for the sonar rotation, making it point to the
 --]]
 local function control_sonar_servo(driving_mode, yaw_angle_degrees, goal_angle_degrees)
   -- Only control the sonar servo in AUTO mode, in other modes it should be in the neutral position (pointing backwards)
-  if driving_mode == DRIVING_MODES.AUTO or driving_mode == DRIVING_MODES.AUTO then
+  if driving_mode == DRIVING_MODES.AUTO then
     -- WORLD FRAME is 0 to the north, 90 degrees to the east
     -- We add 90 degrees as the sonar looks sideways from the boat perspective
     local sonar_angle_degrees = funcs:mapTo360(yaw_angle_degrees + 90)
@@ -130,12 +126,15 @@ local function control_sonar_servo(driving_mode, yaw_angle_degrees, goal_angle_d
     end
     last_servo_angle_degrees = servo_angle_degrees
     -- Obtaining PWM in servo and output ranges and sending to the servo output
+    -- The output gear has a ratio of 1:3, so we divide the servo PWM by 3 to get the output PWM_RANGE
     local servo_pwm = math.floor(PWM_MIN_SERVO + servo_angle_degrees * SERVO_PWM_ANGLE_RATIO)
-    local output_pwm = math.floor((servo_pwm - PWM_MIN_SERVO) * PWM_OUTPUT_SERVO_RATIO + PWM_MIN_OUTPUT)
+    local servo_pwm_offset = funcs:mapMaxMin(servo_pwm - PWM_MID, -1000, 1000)
+    local output_pwm_offset = math.floor(servo_pwm_offset / 3)
+    local output_pwm = math.floor(PWM_MID + output_pwm_offset)
     SRV_Channels:set_output_pwm_chan_timeout(6, output_pwm, 300)
   else
     -- In other modes, set the servo to the neutral position (aligned to center filming sideways)
-    SRV_Channels:set_output_pwm_chan_timeout(6, PWM_CENTER_OUTPUT, 300)
+    SRV_Channels:set_output_pwm_chan_timeout(6, PWM_MID, 300)
     last_servo_angle_degrees = ANGLE_MID_SERVO
   end
 end
