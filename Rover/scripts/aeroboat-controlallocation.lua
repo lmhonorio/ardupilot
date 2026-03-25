@@ -31,6 +31,7 @@ ANGLE_MID_SERVO = (ANGLE_MAX_SERVO + ANGLE_MIN_SERVO) / 2
 SERVO_PWM_ANGLE_RATIO = (PWM_MAX_SERVO - PWM_MIN_SERVO) / (ANGLE_MAX_SERVO - ANGLE_MIN_SERVO)
 local last_servo_angle_degrees = ANGLE_MID_SERVO
 SERVO_ANGLE_DEADBAND_DEGREES = 3
+local auto_servo_control_enabled = 0
 
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
@@ -110,7 +111,7 @@ It controls the servo responsible for the sonar rotation, making it point to the
 --]]
 local function control_sonar_servo(driving_mode, yaw_angle_degrees, goal_angle_degrees)
   -- Only control the sonar servo in AUTO mode, in other modes it should be in the neutral position (pointing backwards)
-  if driving_mode == DRIVING_MODES.AUTO then
+  if driving_mode == DRIVING_MODES.AUTO and auto_servo_control_enabled == 1 then
     -- WORLD FRAME is 0 to the north, 90 degrees to the east
     -- We add 90 degrees as the sonar looks sideways from the boat perspective
     local sonar_angle_degrees = funcs:mapTo360(yaw_angle_degrees + 90)
@@ -152,6 +153,9 @@ local function update()
     gcs:send_text(MAV_SEVERITY.INFO, string.format("Not a boat, exiting this lua script."))
     return
   end
+
+  -- Check if we are controlling the servo for the sonar rotation autonomously
+  auto_servo_control_enabled = tonumber(param:get('SCR_USER1')) or 0
 
   -- Check if the system was already started before running this function
   if not SYSTEM_STARTED:init('BATT_SOC_SYSSTART') then
