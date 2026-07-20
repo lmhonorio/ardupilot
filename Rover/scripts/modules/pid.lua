@@ -91,20 +91,31 @@ end
 Compute the PID outputs
 -- @param error number - The current error value
 -- @param dt number - Time difference since last computation
+-- @param freeze_integrator boolean - Keep the integrator unchanged for this cycle
 -- @return number - The computed PID output
 --]]
-function PID:compute(error, dt)
+function PID:compute(error, dt, freeze_integrator)
+  if dt == nil or dt <= 0 then
+    dt = 0
+  end
+
   -- Proportional output
   local proportional_output = self.P * error
   -- Derivative output
   -- If no last error, dont take into accout the derivative yet
   local derivative_output = 0
-  if self.last_error ~= nil then
+  if self.last_error ~= nil and dt > 0 then
     derivative_output = self.D * (error - self.last_error) / dt
   end
   self.last_error = error
+
   -- Integrator output
-  self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  local pid_without_new_integrator = proportional_output + self.integrator + derivative_output
+  local saturated_high = pid_without_new_integrator >= self.pid_max and error > 0
+  local saturated_low = pid_without_new_integrator <= self.pid_min and error < 0
+  if not freeze_integrator and dt > 0 and not saturated_high and not saturated_low then
+    self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  end
   local integrator_output = self.integrator
 
   -- PID control signal
