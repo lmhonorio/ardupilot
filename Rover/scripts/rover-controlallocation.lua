@@ -53,6 +53,8 @@ local last_nav_idx = nil
 local last_reverse_nav_idx = nil
 local reverse_to_next_wp = false
 local reverse_warning_reason = nil
+local reverse_status_steps = 0
+local reverse_armed_nav_idx = nil
 local WP_RADIUS = param:get('WP_RADIUS') or 2.0 -- meters
 local REVERSE_THROTTLE_FAR = -0.30
 local REVERSE_THROTTLE_MID = -0.15
@@ -158,8 +160,16 @@ local function calculateReverseOutputSignals(t, s)
 
   local target_lat = target_x / 1e7
   local target_lon = target_y / 1e7
-  local current_lat = current_location:lat() / 1e7
-  local current_lon = current_location:lng() / 1e7
+  local current_lat_raw = current_location:lat()
+  local current_lon_raw = current_location:lng()
+  if current_lat_raw == nil or current_lon_raw == nil then
+    steering_reverse_pid:resetInternalState()
+    sendReverseWarningOnce("invalid_location", "Reverse nav: invalid vehicle coordinates.")
+    return 0, 0
+  end
+
+  local current_lat = current_lat_raw / 1e7
+  local current_lon = current_lon_raw / 1e7
 
   reverse_warning_reason = nil
 
@@ -188,6 +198,13 @@ local function calculateReverseOutputSignals(t, s)
   -- so no extra inversion is applied here.
   s_out = funcs:mapMaxMin(s_out, -0.95, 0.95)
   reverse_throttle = funcs:mapMaxMin(reverse_throttle, -0.30, -0.08)
+  reverse_status_steps = reverse_status_steps + 1
+  if reverse_status_steps >= 10 then
+    gcs:send_text(MAV_SEVERITY.INFO,
+      string.format("Reverse nav: idx=%d dist=%.1f thr=%.2f steer=%.2f err=%.2f",
+        idx, distance_to_wp, reverse_throttle, s_out, reverse_yaw_error))
+    reverse_status_steps = 0
+  end
   return reverse_throttle, s_out
 end
 
@@ -205,6 +222,8 @@ local function resetYawControlState()
   reverse_to_next_wp = false
   last_reverse_nav_idx = nil
   reverse_warning_reason = nil
+  reverse_status_steps = 0
+  reverse_armed_nav_idx = nil
 end
 
 --[[
@@ -276,6 +295,10 @@ local function triggerYawControlOnReachedWaypoint()
     end
 
     reverse_to_next_wp = reverse_leg
+    if reverse_leg then
+      reverse_armed_nav_idx = idx
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("Reverse nav armed: idx=%d", idx))
+    end
     if yaw_target_deg == nil then
       resetYawControlState()
       return false
@@ -367,6 +390,11 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     steering_reverse_pid:resetInternalState()
+    if reverse_to_next_wp then
+      vehicle:set_mode(DRIVING_MODES.AUTO)
+      return
+    end
+
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -398,6 +426,10 @@ local function applyPWMAutoMode()
     if previous_item and previous_item:command() == 16 then
       local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
       reverse_to_next_wp = reverse_leg
+      if reverse_leg and reverse_armed_nav_idx ~= idx then
+        reverse_armed_nav_idx = idx
+        gcs:send_text(MAV_SEVERITY.INFO, string.format("Reverse nav inferred: idx=%d", idx))
+      end
     else
       reverse_to_next_wp = false
     end
@@ -428,6 +460,8 @@ local function applyPWMAutoMode()
     steering_reverse_pid:resetInternalState()
     last_reverse_nav_idx = nil
     reverse_warning_reason = nil
+    reverse_status_steps = 0
+    reverse_armed_nav_idx = nil
   end
   applyControlAllocation(throttle, steering)
 end
@@ -477,6 +511,8 @@ local function update()
     steering_reverse_pid:resetInternalState()
     last_reverse_nav_idx = nil
     reverse_warning_reason = nil
+    reverse_status_steps = 0
+    reverse_armed_nav_idx = nil
     applyControlAllocation(0, 0)
     return update, 200
   end
@@ -484,6 +520,8 @@ local function update()
   steering_reverse_pid:resetInternalState()
   last_reverse_nav_idx = nil
   reverse_warning_reason = nil
+  reverse_status_steps = 0
+  reverse_armed_nav_idx = nil
 end
 
 return update, 3000 -- run immediately before starting to reschedule
