@@ -224,6 +224,10 @@ local function triggerYawControlOnReachedWaypoint()
     end
 
     reverse_to_next_wp = reverse_leg
+    if reverse_leg then
+      reverse_armed_nav_idx = idx
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("Reverse nav armed: idx=%d", idx))
+    end
     if yaw_target_deg == nil then
       resetYawControlState()
       return false
@@ -315,6 +319,11 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     steering_reverse_pid:resetInternalState()
+    if reverse_to_next_wp then
+      vehicle:set_mode(DRIVING_MODES.AUTO)
+      return
+    end
+
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -346,6 +355,10 @@ local function applyPWMAutoMode()
     if previous_item and previous_item:command() == 16 then
       local _, reverse_leg, _ = decodeYawAndDirectionFromWaypointZ(previous_item:z())
       reverse_to_next_wp = reverse_leg
+      if reverse_leg and reverse_armed_nav_idx ~= idx then
+        reverse_armed_nav_idx = idx
+        gcs:send_text(MAV_SEVERITY.INFO, string.format("Reverse nav inferred: idx=%d", idx))
+      end
     else
       reverse_to_next_wp = false
     end
