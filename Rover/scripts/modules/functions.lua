@@ -60,18 +60,6 @@ function funcs:isNan(x)
 end
 
 --[[
-Wrap an angle in radians to [-pi, pi)
--- @param angle_rad number
--- @return number
---]]
-function funcs:wrapToPi(angle_rad)
-  if angle_rad == nil then
-    return 0
-  end
-  return (angle_rad + math.pi) % (2 * math.pi) - math.pi
-end
-
---[[
 Yaw error in radians: (target - current) wrapped to [-pi, pi)
 -- @param current_rad number
 -- @param target_rad number
@@ -82,7 +70,8 @@ function funcs:yawErrorRad(current_rad, target_rad)
     return 0
   end
   -- Wrap diffenrence between -pi and pi
-  return funcs:wrapToPi(target_rad - current_rad)
+  local rad = target_rad - current_rad
+  return (rad + math.pi) % (2 * math.pi) - math.pi
 end
 
 --[[
@@ -147,26 +136,6 @@ function funcs:haversineDistance(lat1, lon1, lat2, lon2)
 
   local c = 2 * math.atan(math.sqrt(a), math.sqrt(1 - a))
   return R * c
-end
-
---[[
-Calculate the initial bearing from one GPS coordinate to another
--- @param lat1 number - Latitude of the first point in degrees
--- @param lon1 number - Longitude of the first point in degrees
--- @param lat2 number - Latitude of the second point in degrees
--- @param lon2 number - Longitude of the second point in degrees
--- @return number - Bearing in radians wrapped to [-pi, pi)
---]]
-function funcs:bearingBetweenCoordinates(lat1, lon1, lat2, lon2)
-  local delta_lon = math.rad(lon2 - lon1)
-  local lat1_rad = math.rad(lat1)
-  local lat2_rad = math.rad(lat2)
-
-  local y = math.sin(delta_lon) * math.cos(lat2_rad)
-  local x = math.cos(lat1_rad) * math.sin(lat2_rad) -
-      math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(delta_lon)
-
-  return funcs:wrapToPi(math.atan(y, x))
 end
 
 return funcs

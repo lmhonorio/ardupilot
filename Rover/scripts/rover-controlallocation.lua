@@ -50,13 +50,8 @@ local yaw_target_rad = nil
 local yaw_align_steps = 0
 
 local last_nav_idx = nil
-local last_reverse_nav_idx = nil
 local reverse_to_next_wp = false
-local reverse_warning_reason = nil
 local WP_RADIUS = param:get('WP_RADIUS') or 2.0 -- meters
-local REVERSE_THROTTLE_FAR = -0.30
-local REVERSE_THROTTLE_MID = -0.15
-local REVERSE_THROTTLE_NEAR = -0.08
 
 local radio_type = 0
 
@@ -96,99 +91,54 @@ local function applyControlAllocation(t, s)
 end
 
 --[[
-Send one GCS warning per reverse navigation fault until valid data returns.
--- @param reason string
--- @param message string
---]]
-local function sendReverseWarningOnce(reason, message)
-  if reverse_warning_reason ~= reason then
-    gcs:send_text(MAV_SEVERITY.WARNING, message)
-    reverse_warning_reason = reason
-  end
-end
-
---[[
 Calculating the signals when driving reverse_to_next_wp
 @param t number - Throttle command from 0 (or more) to 1.0
 @param s number - Steering command from -1.0 to 1.0
 @return number, number - The modified throttle and steering commands for reverse driving
 --]]
 local function calculateReverseOutputSignals(t, s)
+  -- Obtain the target waypoint coordinates and current vehicle position to calculate the distance in meters using the haversine functions
   local idx = mission:get_current_nav_index()
   if not idx then
-    steering_reverse_pid:resetInternalState()
-    last_reverse_nav_idx = nil
-    sendReverseWarningOnce("missing_nav_index", "Reverse nav: no current waypoint index.")
-    return 0, 0
+    return -t, 0
   end
-
-  if last_reverse_nav_idx ~= idx then
-    steering_reverse_pid:resetInternalState()
-    last_reverse_nav_idx = idx
-  end
-
   local target_wp = mission:get_item(idx)
   if not target_wp then
-    steering_reverse_pid:resetInternalState()
-    sendReverseWarningOnce("missing_waypoint", "Reverse nav: no current waypoint item.")
-    return 0, 0
+    return -t, 0
   end
-
+  local target_lat = target_wp:x() / 1e7
+  local target_lon = target_wp:y() / 1e7
   local current_location = ahrs:get_location()
   if not current_location then
-    steering_reverse_pid:resetInternalState()
-    sendReverseWarningOnce("missing_location", "Reverse nav: no valid vehicle location.")
-    return 0, 0
+    return -t, 0
   end
-
-  local current_yaw = ahrs:get_yaw()
-  if current_yaw == nil then
-    steering_reverse_pid:resetInternalState()
-    sendReverseWarningOnce("missing_yaw", "Reverse nav: no valid vehicle yaw.")
-    return 0, 0
-  end
-
-  local target_x = target_wp:x()
-  local target_y = target_wp:y()
-  if target_x == nil or target_y == nil then
-    steering_reverse_pid:resetInternalState()
-    sendReverseWarningOnce("invalid_waypoint", "Reverse nav: invalid waypoint coordinates.")
-    return 0, 0
-  end
-
-  local target_lat = target_x / 1e7
-  local target_lon = target_y / 1e7
   local current_lat = current_location:lat() / 1e7
   local current_lon = current_location:lng() / 1e7
-
-  reverse_warning_reason = nil
-
   local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
-  local reverse_throttle = REVERSE_THROTTLE_NEAR
-  if distance_to_wp > 3 * WP_RADIUS then
-    reverse_throttle = REVERSE_THROTTLE_FAR
-  elseif distance_to_wp > WP_RADIUS then
-    reverse_throttle = REVERSE_THROTTLE_MID
-  end
 
-  -- The bearing points from the rover position to the waypoint.
-  local bearing_to_wp = funcs:bearingBetweenCoordinates(current_lat, current_lon, target_lat, target_lon)
-  -- While reversing, the vehicle body should face away from that bearing so its rear moves toward the waypoint.
-  local reverse_target_yaw = funcs:wrapToPi(bearing_to_wp + math.pi)
-  -- The PID uses the body yaw error, not the bearing itself, to steer continuously during the reverse leg.
-  local reverse_yaw_error = funcs:yawErrorRad(current_yaw, reverse_target_yaw)
-  local freeze_integrator = distance_to_wp <= WP_RADIUS
-  local s_out = steering_reverse_pid:compute(reverse_yaw_error, UPDATE_DT, freeze_integrator)
-
+  -- Recalculate the bearing on every update so the rear of the rover keeps
+  -- pointing at the active waypoint. get_yaw() is the direction of the front
+  -- of the rover, therefore reverse travel requires bearing + 180 degrees.
+  local lat1 = math.rad(current_lat)
+  local lat2 = math.rad(target_lat)
+  local delta_lon = math.rad(target_lon - current_lon)
+  local bearing_to_wp_rad = math.atan(
+    math.sin(delta_lon) * math.cos(lat2),
+    math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(delta_lon)
+  )
+  local reverse_yaw_target_rad = bearing_to_wp_rad + math.pi
+  local err = funcs:yawErrorRad(ahrs:get_yaw(), reverse_yaw_target_rad)
+  local s_out = steering_reverse_pid:compute(err, UPDATE_DT)
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
 
-  -- applyControlAllocation keeps the same steering sign convention with negative throttle,
-  -- so no extra inversion is applied here.
-  s_out = funcs:mapMaxMin(s_out, -0.95, 0.95)
-  reverse_throttle = funcs:mapMaxMin(reverse_throttle, -0.30, -0.08)
-  return reverse_throttle, s_out
+  -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.3
+  if distance_to_wp > 3 * WP_RADIUS then
+    return -0.3, s_out
+  end
+
+  return -t, s_out
 end
 
 -------------------------------------------------------------------------------
@@ -203,8 +153,6 @@ local function resetYawControlState()
   steering_steady_pid:resetInternalState()
   steering_reverse_pid:resetInternalState()
   reverse_to_next_wp = false
-  last_reverse_nav_idx = nil
-  reverse_warning_reason = nil
 end
 
 --[[
@@ -311,7 +259,7 @@ end
 Perform vehicle control in Manual mode
 --]]
 local function applyPWMManualMode()
-  resetYawControlState()
+  reverse_to_next_wp = false
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
   local raw_throttle = 0
@@ -406,8 +354,8 @@ local function applyPWMAutoMode()
   -- Controls end of mission
   local mission_state = mission:state()
   if mission_state == MISSION_STATE.FINISHED then
-    resetYawControlState()
     applyControlAllocation(0, 0)
+    reverse_to_next_wp = false
     vehicle:set_mode(DRIVING_MODES.MANUAL)
     return update, 200
   end
@@ -424,10 +372,6 @@ local function applyPWMAutoMode()
   -- Reverse signals in case the waypoint tells us to drive backwards on the next leg
   if reverse_to_next_wp then
     throttle, steering = calculateReverseOutputSignals(throttle, steering)
-  else
-    steering_reverse_pid:resetInternalState()
-    last_reverse_nav_idx = nil
-    reverse_warning_reason = nil
   end
   applyControlAllocation(throttle, steering)
 end
@@ -474,16 +418,9 @@ local function update()
     return update, 200
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
     -- Make the vehicle stop
-    steering_reverse_pid:resetInternalState()
-    last_reverse_nav_idx = nil
-    reverse_warning_reason = nil
     applyControlAllocation(0, 0)
     return update, 200
   end
-
-  steering_reverse_pid:resetInternalState()
-  last_reverse_nav_idx = nil
-  reverse_warning_reason = nil
 end
 
 return update, 3000 -- run immediately before starting to reschedule
