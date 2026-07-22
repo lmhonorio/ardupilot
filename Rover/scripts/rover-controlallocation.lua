@@ -43,14 +43,16 @@ local YAW_ALIGN_TIMEOUT_MS = 15000
 local REVERSE_ALT_MIN_DEG = 360
 local REVERSE_ALT_MAX_DEG = 720
 local REVERSE_ALT_OFFSET_DEG = 360
+local REVERSE_STEERING_DISABLE_DISTANCE_M = 0.5
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
-local steering_reverse_pid = PID:new(8, 1, 0, 1, 0.95)
+local steering_reverse_pid = PID:new(5, 0, 0, 1, 0.95)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 
 local last_nav_idx = nil
 local reverse_to_next_wp = false
+local reverse_steering_disabled_near_wp = false
 local WP_RADIUS = param:get('WP_RADIUS') or 2.0 -- meters
 
 local radio_type = 0
@@ -116,6 +118,17 @@ local function calculateReverseOutputSignals(t, s)
   local current_lon = current_location:lng() / 1e7
   local distance_to_wp = funcs:haversineDistance(current_lat, current_lon, target_lat, target_lon)
 
+  -- The bearing becomes very sensitive to position noise close to the target.
+  -- Stop correcting the steering inside this radius and clear the accumulated
+  -- PID state so it cannot affect the next reverse leg.
+  if distance_to_wp <= REVERSE_STEERING_DISABLE_DISTANCE_M then
+    reverse_steering_disabled_near_wp = true
+    steering_reverse_pid:resetInternalState()
+  end
+  if reverse_steering_disabled_near_wp then
+    return -t, 0
+  end
+
   -- Recalculate the bearing on every update so the rear of the rover keeps
   -- pointing at the active waypoint. get_yaw() is the direction of the front
   -- of the rover, therefore reverse travel requires bearing + 180 degrees.
@@ -135,7 +148,7 @@ local function calculateReverseOutputSignals(t, s)
 
   -- If the distance is bigger than the waypoint radius, set a constant throttle to 0.3
   if distance_to_wp > 3 * WP_RADIUS then
-    return -0.3, s_out
+    return -0.4, s_out
   end
 
   return -t, s_out
@@ -153,6 +166,7 @@ local function resetYawControlState()
   steering_steady_pid:resetInternalState()
   steering_reverse_pid:resetInternalState()
   reverse_to_next_wp = false
+  reverse_steering_disabled_near_wp = false
 end
 
 --[[
@@ -182,7 +196,8 @@ local function decodeYawAndDirectionFromWaypointZ(angle_from_alt)
 end
 
 --[[
-Check if a waypoint was reached and trigger yaw control if param4 is valid
+Check if a waypoint was reached and trigger fixed-yaw control before the next
+leg. This alignment sequence is used for both forward and reverse legs.
 -- @return bool - true if yaw control was triggered
 --]]
 local function triggerYawControlOnReachedWaypoint()
@@ -203,12 +218,13 @@ local function triggerYawControlOnReachedWaypoint()
     last_nav_idx = idx
     local item = mission:get_item(reached_idx)
     reverse_to_next_wp = false
+    reverse_steering_disabled_near_wp = false
     if not item then
       resetYawControlState()
       return false
     end
 
-    -- Only handle NAV_WAYPOINT (16) with valid param4 (yaw)
+    -- Only handle NAV_WAYPOINT (16); direction/yaw are encoded in altitude.
     if item:command() ~= 16 then
       resetYawControlState()
       return false
@@ -319,11 +335,6 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     steering_reverse_pid:resetInternalState()
-    if reverse_to_next_wp then
-      vehicle:set_mode(DRIVING_MODES.AUTO)
-      return
-    end
-
     -- Set HOLD mode so the vehicle stops before going back to AUTO
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -401,10 +412,15 @@ local function update()
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
     return
   end
-  -- Getting SCR_USER params to PID values
-  -- local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  -- steering_steady_pid:setGains(p, i, d)
-  -- steering_reverse_pid:setGains(p, i, d)
+  -- In-place yaw alignment PID gains used in STEERING mode. The user
+  -- parameters are stored multiplied by 1000 (for example: 3500, 8000, 0
+  -- result in P=3.5, I=8, D=0). Reverse steering remains fixed at P=5, I=0, D=0.
+  local steering_p = tonumber(param:get('SCR_USER2'))
+  local steering_i = tonumber(param:get('SCR_USER3'))
+  local steering_d = tonumber(param:get('SCR_USER4'))
+  if steering_p and steering_i and steering_d then
+    steering_steady_pid:setGains(steering_p / 1000, steering_i / 1000, steering_d / 1000)
+  end
 
   -- Getting radio type
   radio_type = param:get('RC3_REVERSED') or 0
