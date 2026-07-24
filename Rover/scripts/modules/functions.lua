@@ -95,7 +95,7 @@ end
 
 --[[
 Allocate the PWM signals for the right and left motors based on throttle and steering inputs
--- @param t number - Throttle command from 0 (or more) to 1
+-- @param t number - Throttle command from -1.0 to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 -- @param pwm_range number - Maximum PWM range for the motors
 -- @return number, number - The allocated PWM values for the left and right motors
