@@ -25,13 +25,14 @@ Limits a value to be within a specified range
 -- @param max number - Maximum limit
 -- @return number - Limited value
 --]]
-function funcs:mapMaxMin(value, min, max)
-  if value > min and value < max then
-    return value
-  elseif value < min then
-    return min
+function funcs:mapMaxMin(value, minimum, maximum)
+  value = tonumber(value) or 0
+  if value < minimum then
+    return minimum
+  elseif value > maximum then
+    return maximum
   else
-    return max
+    return value
   end
 end
 
