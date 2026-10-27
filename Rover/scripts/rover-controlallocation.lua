@@ -12,6 +12,7 @@
 package.path = package.path .. ';/scripts/modules/?.lua'
 local PID = require("pid")
 local funcs = require("functions")
+local Autotune = require("autotune")
 -------------------------------------------------------------------------------
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
@@ -49,10 +50,31 @@ local last_nav_idx = nil
 
 local radio_type = 0
 
+-- Tuning selector parameter (SCR_USER6):
+--   0 = normal operation
+--   1 = Pixhawk PID tune (Rover QuickTune) - starts when entering CIRCLE mode
+--   2 = yaw PI autotune (relay)            - starts when entering HOLD mode
+-- After a successful tune the selector returns to 0 automatically.
+-- The yaw autotune can also be triggered in HOLD by an RC switch with RCx_OPTION = 301.
+-- Results are saved to SCR_USER2 (P) and SCR_USER3 (I).
+local TUNE_SELECT_PARAM = 'SCR_USER6'
+local TUNE_MODE = { NORMAL = 0, PIXHAWK = 1, YAW = 2 }
+local AUTOTUNE_RC_FUNC = 301
+local AUTOTUNE_PERIOD_MS = 50
+local autotune = Autotune:new({ relay = 0.45 })
+local autotune_target_rad = nil
+local autotune_done = false
+
+-- Load tuned gains if present (0 means "not tuned yet", keep defaults)
+local saved_p, saved_i = param:get('SCR_USER2') or 0, param:get('SCR_USER3') or 0
+if saved_p > 0 and saved_i > 0 then
+  steering_steady_pid:setGains(saved_p, saved_i, 0)
+end
+
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
-DRIVING_MODES = { MANUAL = 0, ACRO = 1, STEERING = 3, HOLD = 4, AUTO = 10, RTL = 11, GUIDED = 15 }
+DRIVING_MODES = { MANUAL = 0, ACRO = 1, STEERING = 3, HOLD = 4, CIRCLE = 9, AUTO = 10, RTL = 11, GUIDED = 15 }
 -- Mission states dictionary
 MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 
@@ -288,6 +310,70 @@ local function applyPWMAutoMode()
   applyControlAllocation(throttle, steering)
 end
 
+--[[
+Pass the ArduRover internal controllers' outputs straight to the allocation
+(used by CIRCLE/ACRO/RTL, e.g. during Rover QuickTune)
+--]]
+local function applyPWMInternalControl()
+  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
+  applyControlAllocation(throttle, steering)
+end
+
+--[[
+Yaw PI autotune in HOLD mode.
+Switch high starts the relay test around the current yaw; switch low aborts/rearms.
+-- @return bool - true while the autotune owns the outputs
+--]]
+local function runYawAutotune()
+  local sw = rc:get_aux_cached(AUTOTUNE_RC_FUNC)
+  if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
+    sw = 2
+  end
+  if sw ~= 2 then
+    if autotune.status == "running" then
+      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted by switch")
+    end
+    autotune:reset()
+    autotune_done = false
+    return false
+  end
+  if autotune_done then
+    return false
+  end
+
+  if autotune.status == "idle" then
+    autotune_target_rad = ahrs:get_yaw()
+    autotune:start()
+    gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: started")
+  end
+
+  local err = funcs:yawErrorRad(ahrs:get_yaw(), autotune_target_rad)
+  local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
+  applyControlAllocation(0, s_out)
+
+  if status == "done" then
+    local r = autotune:result()
+    param:set_and_save('SCR_USER2', r.P)
+    param:set_and_save('SCR_USER3', r.I)
+    steering_steady_pid:setGains(r.P, r.I, 0)
+    steering_steady_pid:resetInternalState()
+    gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
+    gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: saved P=%.3f I=%.3f", r.P, r.I))
+    if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
+      param:set_and_save(TUNE_SELECT_PARAM, TUNE_MODE.NORMAL)
+      gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER6 set to 0 (normal)")
+    end
+    autotune_done = true
+    applyControlAllocation(0, 0)
+  elseif status == "fail" then
+    gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: failed - " .. autotune:result().msg)
+    autotune_done = true
+    applyControlAllocation(0, 0)
+  end
+  return true
+end
+
 -------------------------------------------------------------------------------
 -------------------------------- MAIN LOOP ------------------------------------
 -------------------------------------------------------------------------------
@@ -311,12 +397,23 @@ local function update()
   if not arming:is_armed() then
     resetYawControlState()
     last_nav_idx = nil
+    autotune:reset()
+    autotune_done = false
     notArmed()
     return update, 2000
   end
 
   -- Run control output allocation based on the current driving mode
   local vehicle_mode = vehicle:get_mode()
+
+  -- Leaving HOLD aborts/rearms the yaw autotune
+  if vehicle_mode ~= DRIVING_MODES.HOLD and (autotune.status ~= "idle" or autotune_done) then
+    if autotune.status == "running" then
+      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (left HOLD)")
+    end
+    autotune:reset()
+    autotune_done = false
+  end
   if vehicle_mode == DRIVING_MODES.MANUAL then
     applyPWMManualMode()
     return update, 200
@@ -327,11 +424,20 @@ local function update()
   elseif vehicle_mode == DRIVING_MODES.AUTO then
     applyPWMAutoMode()
     return update, 200
+  elseif vehicle_mode == DRIVING_MODES.HOLD and runYawAutotune() then
+    return update, AUTOTUNE_PERIOD_MS
+  elseif vehicle_mode == DRIVING_MODES.CIRCLE or vehicle_mode == DRIVING_MODES.ACRO
+      or vehicle_mode == DRIVING_MODES.RTL then
+    applyPWMInternalControl()
+    return update, 200
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
     return update, 200
   end
+  -- Unhandled mode: stop safely but keep the script alive
+  applyControlAllocation(0, 0)
+  return update, 200
 end
 
 return update, 3000 -- run immediately before starting to reschedule

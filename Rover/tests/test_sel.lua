@@ -1,0 +1,13 @@
+local H = dofile('harness.lua'); local S,P,run = H.S,H.P,H.run
+print("== SCR_USER6=2, switch off, start in MANUAL then enter HOLD")
+P.SCR_USER6 = 2; S.mode = 0; run(4)
+assert(P.SCR_USER2 == 0, "tuned outside HOLD!")
+S.mode = 4; run(60, function() return P.SCR_USER2 ~= 0 end); run(S.t+0.5)
+print(string.format("   P=%.3f I=%.3f SCR_USER6=%d", P.SCR_USER2, P.SCR_USER3, P.SCR_USER6))
+assert(P.SCR_USER6 == 0)
+print("== re-entering HOLD with SCR_USER6=0 must NOT retune")
+local p0=P.SCR_USER2; S.mode=0; run(S.t+1); S.mode=4; S.yaw=0; run(S.t+5)
+assert(P.SCR_USER2==p0 and math.abs(S.rate)<1e-6); print("   ok")
+print("== abort by leaving HOLD")
+P.SCR_USER6=2; P.SCR_USER2=0; S.mode=0; run(S.t+1); S.mode=4; run(S.t+3); S.mode=0; run(S.t+1)
+assert(P.SCR_USER2==0); print("   ok")

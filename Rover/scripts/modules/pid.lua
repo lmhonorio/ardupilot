@@ -28,9 +28,9 @@ function PID:new(p_gain, i_gain, d_gain, i_max, pid_max)
     integrator = 0,
     last_error = nil,
     i_max = i_max or 0.7,
-    i_min = -i_max or -0.7,
+    i_min = -(i_max or 0.7),
     pid_max = pid_max or 1,
-    pid_min = -pid_max or -1
+    pid_min = -(pid_max or 1)
   }
   setmetatable(obj, self)
   -- self.__index = self
@@ -103,8 +103,13 @@ function PID:compute(error, dt)
     derivative_output = self.D * (error - self.last_error) / dt
   end
   self.last_error = error
-  -- Integrator output
-  self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  -- Integrator output with conditional-integration anti-windup:
+  -- do not integrate while the output is saturated in the same direction as the error
+  local unsat = proportional_output + self.integrator + derivative_output
+  local saturated = (unsat >= self.pid_max and error > 0) or (unsat <= self.pid_min and error < 0)
+  if not saturated then
+    self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  end
   local integrator_output = self.integrator
 
   -- PID control signal
