@@ -9,7 +9,7 @@
 --| '8' # Walking_Height
 --@return number|nil
 -- External modules
-package.path = package.path .. ';/scripts/modules/?.lua'
+package.path = package.path .. ';./scripts/?.lua;./scripts/modules/?.lua;/scripts/modules/?.lua'
 local PID = require("pid")
 local funcs = require("functions")
 -------------------------------------------------------------------------------
@@ -67,6 +67,22 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param t number - Throttle command from -1.0 to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
+-- CAN selected: hand the same left/right command to c620_can.lua and do not
+-- pulse the servo pins. PWM selected: drive the pins and leave the CAN bus quiet.
+local function can_selected()
+  return C620 ~= nil and C620.output_is_can()
+end
+
+local function norm_from_pwm(pwm)
+  local value = (pwm - PWM_TRIM_VALUE) / PWM_RANGE
+  if value > 1 then
+    return 1
+  elseif value < -1 then
+    return -1
+  end
+  return value
+end
+
 local function applyControlAllocation(t, s)
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
@@ -78,6 +94,19 @@ local function applyControlAllocation(t, s)
   local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
   local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
   local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  if can_selected() then
+    C620.set_norms({
+      norm_from_pwm(pwm_r),
+      norm_from_pwm(pwm_l),
+      norm_from_pwm(pwm_l),
+      norm_from_pwm(pwm_r),
+      0, 0, 0, 0
+    })
+    return
+  end
+  if C620 ~= nil then
+    C620.clear_script_norms()
+  end
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
@@ -184,10 +213,15 @@ end
 Control the actions while not armed
 --]]
 local function notArmed()
-  SRV_Channels:set_output_pwm_chan_timeout(0, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(1, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(2, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(3, PWM_TRIM_VALUE, 3000)
+  -- Trim pulses on MAIN 1..4 make the C620 drop CAN. With CAN on, send no pulse.
+  local pwm = PWM_TRIM_VALUE
+  if can_selected() then
+    pwm = 0
+  end
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm, 3000)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm, 3000)
 end
 
 --[[
