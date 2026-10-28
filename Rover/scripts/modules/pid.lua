@@ -28,13 +28,11 @@ function PID:new(p_gain, i_gain, d_gain, i_max, pid_max)
     integrator = 0,
     last_error = nil,
     i_max = i_max or 0.7,
-    i_min = -i_max or -0.7,
+    i_min = -(i_max or 0.7),
     pid_max = pid_max or 1,
-    pid_min = -pid_max or -1
+    pid_min = -(pid_max or 1)
   }
   setmetatable(obj, self)
-  -- self.__index = self
-
   return obj
 end
 
@@ -94,23 +92,20 @@ Compute the PID outputs
 -- @return number - The computed PID output
 --]]
 function PID:compute(error, dt)
-  -- Proportional output
   local proportional_output = self.P * error
-  -- Derivative output
-  -- If no last error, dont take into accout the derivative yet
   local derivative_output = 0
   if self.last_error ~= nil then
     derivative_output = self.D * (error - self.last_error) / dt
   end
   self.last_error = error
-  -- Integrator output
-  self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
-  local integrator_output = self.integrator
-
-  -- PID control signal
-  local pid_value = proportional_output + integrator_output + derivative_output
-  local pid_output = self:limitRange(pid_value, self.pid_min, self.pid_max)
-  return pid_output
+  -- Conditional-integration anti-windup
+  local unsat = proportional_output + self.integrator + derivative_output
+  local saturated = (unsat >= self.pid_max and error > 0) or (unsat <= self.pid_min and error < 0)
+  if not saturated then
+    self.integrator = self:limitRange(self.integrator + self.I * error * dt, self.i_min, self.i_max)
+  end
+  local pid_value = proportional_output + self.integrator + derivative_output
+  return self:limitRange(pid_value, self.pid_min, self.pid_max)
 end
 
 return PID

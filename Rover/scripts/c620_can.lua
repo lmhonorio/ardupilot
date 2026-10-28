@@ -54,6 +54,11 @@ local script_norm = { 0, 0, 0, 0, 0, 0, 0, 0 }
 local script_ms = uint32_t(0)
 local script_fresh = false
 
+-- Wheel autotune applies current directly (bypasses the speed PID).
+local current_override = { nil, nil, nil, nil, nil, nil, nil, nil }
+local current_override_ms = uint32_t(0)
+local current_override_fresh = false
+
 local esc = {}
 for i = 1, MAX_ESC do
   esc[i] = {
@@ -325,30 +330,38 @@ local function run_control()
       fb.target_rpm = 0
       fb.current_a = 0
     else
-      local cmd = 0
-      if armed then
-        cmd = command_norm(i)
-      end
+      local override_live = current_override_fresh and as_number(millis() - current_override_ms) < 500
       local current_a
-      if speed_mode then
-        fb.target_rpm = cmd * max_rpm
-        local err = fb.target_rpm - fb.wheel_rpm
-        local derivative = 0
-        if dt > 0 then
-          derivative = kd * (err - fb.last_error) / dt
-        end
-        fb.last_error = err
-        local unsat = kff * fb.target_rpm + kp * err + fb.integrator + derivative
-        local saturated = (unsat >= max_current and err > 0) or (unsat <= -max_current and err < 0)
-        if not saturated then
-          fb.integrator = constrain(fb.integrator + ki * err * dt, -imax, imax)
-        end
-        current_a = constrain(kff * fb.target_rpm + kp * err + fb.integrator + derivative, -max_current, max_current)
-      else
+      if override_live and current_override[i + 1] ~= nil then
         fb.target_rpm = 0
         fb.integrator = 0
         fb.last_error = 0
-        current_a = constrain(cmd * max_current, -max_current, max_current)
+        current_a = constrain(current_override[i + 1], -max_current, max_current)
+      else
+        local cmd = 0
+        if armed then
+          cmd = command_norm(i)
+        end
+        if speed_mode then
+          fb.target_rpm = cmd * max_rpm
+          local err = fb.target_rpm - fb.wheel_rpm
+          local derivative = 0
+          if dt > 0 then
+            derivative = kd * (err - fb.last_error) / dt
+          end
+          fb.last_error = err
+          local unsat = kff * fb.target_rpm + kp * err + fb.integrator + derivative
+          local saturated = (unsat >= max_current and err > 0) or (unsat <= -max_current and err < 0)
+          if not saturated then
+            fb.integrator = constrain(fb.integrator + ki * err * dt, -imax, imax)
+          end
+          current_a = constrain(kff * fb.target_rpm + kp * err + fb.integrator + derivative, -max_current, max_current)
+        else
+          fb.target_rpm = 0
+          fb.integrator = 0
+          fb.last_error = 0
+          current_a = constrain(cmd * max_current, -max_current, max_current)
+        end
       end
       fb.current_a = current_a
       raw[i + 1] = dir * current_a * RAW_PER_AMP
@@ -371,7 +384,7 @@ local function hold_trim()
   -- MAIN OUT 1..4 are wired to the C620 PWM inputs. A pulse, even at trim,
   -- makes the ESC leave CAN. Zero width suppresses the pulse while CAN commands.
   for i = 0, MAX_ESC - 1 do
-    local drive = is_throttle(i) or (script_fresh and i < 4)
+    local drive = is_throttle(i) or ((script_fresh or current_override_fresh) and i < 4)
     if drive then
       SRV_Channels:set_output_pwm_chan_timeout(i, 0, 300)
     end
@@ -417,7 +430,7 @@ local function prearm()
     if esc[i + 1].detected then
       saw = true
     end
-    local need = is_throttle(i) or (script_fresh and i < 4)
+    local need = is_throttle(i) or ((script_fresh or current_override_fresh) and i < 4)
     if need and not esc[i + 1].detected then
       arming:set_aux_auth_failed(auth_id, string.format("ESC %d not found", i + 1))
       return
@@ -495,6 +508,122 @@ end
 
 function C620.clear_script_norms()
   script_fresh = false
+end
+
+function C620.set_current_amps(amps)
+  for i = 1, MAX_ESC do
+    current_override[i] = amps[i]
+  end
+  current_override_ms = millis()
+  current_override_fresh = true
+end
+
+function C620.clear_current_override()
+  current_override_fresh = false
+end
+
+function C620.get_wheel_rpm(idx)
+  local fb = esc[idx]
+  if fb == nil then
+    return nil
+  end
+  return fb.wheel_rpm
+end
+
+function C620.esc_healthy(idx)
+  return healthy(idx - 1)
+end
+
+-- Mean signed wheel rpm of MAIN 1..4 with live CAN feedback.
+function C620.mean_drive_rpm()
+  local sum = 0
+  local n = 0
+  for i = 1, 4 do
+    if healthy(i - 1) then
+      sum = sum + esc[i].wheel_rpm
+      n = n + 1
+    end
+  end
+  if n == 0 then
+    return nil
+  end
+  return sum / n
+end
+
+-- Left = MAIN 2+3, right = MAIN 1+4 (rover mixer mapping).
+function C620.side_rpms()
+  local function side_mean(a, b)
+    local sum = 0
+    local n = 0
+    if healthy(a - 1) then
+      sum = sum + esc[a].wheel_rpm
+      n = n + 1
+    end
+    if healthy(b - 1) then
+      sum = sum + esc[b].wheel_rpm
+      n = n + 1
+    end
+    if n == 0 then
+      return nil
+    end
+    return sum / n
+  end
+  local left = side_mean(2, 3)
+  local right = side_mean(1, 4)
+  return left, right, left ~= nil and right ~= nil
+end
+
+function C620.drive_ok()
+  if not latched_can or driver == nil then
+    return false
+  end
+  for i = 0, 3 do
+    if not healthy(i) then
+      return false
+    end
+  end
+  return true
+end
+
+function C620.wheel_radius_m()
+  local r = pget("WENC_RADIUS", 0)
+  if r <= 0 then
+    r = pget("WENC2_RADIUS", 0)
+  end
+  if r <= 0 then
+    r = 0.1
+  end
+  return r
+end
+
+function C620.track_width_m()
+  local y1 = math.abs(pget("WENC_POS_Y", 0))
+  local y2 = math.abs(pget("WENC2_POS_Y", 0))
+  local w = y1 + y2
+  if w < 0.05 then
+    w = 0.4
+  end
+  return w
+end
+
+function C620.body_speed_mps()
+  local rpm = C620.mean_drive_rpm()
+  if rpm == nil then
+    return nil
+  end
+  return rpm * (2 * math.pi * C620.wheel_radius_m()) / 60.0
+end
+
+-- Body-z yaw rate matching AHRS gyro.z (z down): (v_left - v_right) / track.
+function C620.yaw_rate_rads()
+  local left, right, ok = C620.side_rpms()
+  if not ok then
+    return nil
+  end
+  local r = C620.wheel_radius_m()
+  local v_l = left * (2 * math.pi * r) / 60.0
+  local v_r = right * (2 * math.pi * r) / 60.0
+  return (v_l - v_r) / C620.track_width_m()
 end
 
 local function update()
