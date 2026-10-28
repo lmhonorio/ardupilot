@@ -183,6 +183,7 @@ local params_extra = {"CRUISE_SPEED", "CRUISE_THROTTLE"}                -- table
 local last_axis_change = get_time()     -- time (in seconds) that axis last changed
 local last_pilot_input = get_time()     -- time pilot last provided RC input
 local tune_done_time = nil              -- time that tuning completed (used for auto save feature)
+local quicktune_mode_reported = false
 local axes_done = {}                    -- list of axes that have been tuned
 local filters_done = {}                 -- table recording if filters have been set for each axis
 local gcs_pid_mask_done = {}            -- table recording if GCS_PID_MASK has been set for each axis
@@ -401,14 +402,14 @@ function update_steering_ff(ff_pname)
     ff_turn_rate_sum = ff_turn_rate_sum + math.abs(turn_rate_rads)
     ff_turn_rate_count = ff_turn_rate_count + 1
     if (update_user) then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%% complete", ff_pname, complete_pct))
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%%; steering %.2f, turn rate %.1f deg/s", ff_pname, complete_pct, steering_out, math.deg(math.abs(turn_rate_rads))))
     end
   else
     if update_user then
       if not steering_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase steering (%d%% < %d%%)", math.floor(steering_out * 100), math.floor(STR_RAT_FF_STEERING_MIN * 100)))
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low steering command (%d%% < %d%%); drive a controlled turn", math.floor(steering_out * 100), math.floor(STR_RAT_FF_STEERING_MIN * 100)))
       elseif not turnrate_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase turn rate (%d deg/s < %d)", math.floor(math.deg(math.abs(turn_rate_rads))), math.floor(math.deg(STR_RAT_FF_TURNRATE_MIN))))
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low turn rate (%d deg/s < %d); drive a controlled turn", math.floor(math.deg(math.abs(turn_rate_rads))), math.floor(math.deg(STR_RAT_FF_TURNRATE_MIN))))
       end
     end
   end
@@ -450,8 +451,15 @@ function update_speed_ff(ff_pname)
   -- get steering, turn rate, throttle and speed
   local _, throttle_out = vehicle:get_steering_and_throttle()
   local velocity_ned = ahrs:get_velocity_NED()
+  local speed = nil
   if velocity_ned then
-    speed = ahrs:earth_to_body(velocity_ned):x()
+    local velocity_body = ahrs:earth_to_body(velocity_ned)
+    if velocity_body then
+      local measured_speed = velocity_body:x()
+      if measured_speed == measured_speed and measured_speed ~= math.huge and measured_speed ~= -math.huge then
+        speed = measured_speed
+      end
+    end
   end
 
   -- update user every 5 sec
@@ -467,18 +475,20 @@ function update_speed_ff(ff_pname)
 
   -- check throttle and speed
   local throttle_ok = throttle_out >= SPEED_FF_THROTTLE_MIN
-  local speed_ok = speed > SPEED_FF_SPEED_MIN:get()
+  local speed_ok = speed ~= nil and speed > SPEED_FF_SPEED_MIN:get()
   if (throttle_ok and speed_ok) then
     ff_throttle_sum = ff_throttle_sum + throttle_out
     ff_speed_sum = ff_speed_sum + speed
     ff_speed_count = ff_speed_count + 1
     if (update_user) then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%% complete", ff_pname, complete_pct))
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%%; throttle %.2f, speed %.2f m/s", ff_pname, complete_pct, throttle_out, speed or 0))
     end
   else
     if update_user then
       if not throttle_ok then
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase throttle (%d < %d)", math.floor(throttle_out * 100), math.floor(SPEED_FF_THROTTLE_MIN * 100)))
+      elseif speed == nil then
+        gcs:send_text(MAV_SEVERITY.WARNING, "RTun: waiting for valid velocity")
       elseif not speed_ok then
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase speed (%3.1f < %3.1f)", speed, SPEED_FF_SPEED_MIN:get()))
       end
@@ -520,7 +530,9 @@ init_params_tables()
 reset_axes_done()
 get_all_params()
 save_gcs_pid_mask()
-gcs:send_text(MAV_SEVERITY.INFO, "Rover quiktune loaded")
+gcs:send_text(MAV_SEVERITY.INFO, string.format(
+  "Rover QuickTune loaded; SCR_USER1=%d, RTUN_ENABLE=%d",
+  param:get('SCR_USER1') or -1, RTUN_ENABLE:get()))
 
 -- main update function
 local last_warning = get_time()
@@ -535,28 +547,25 @@ function update()
     last_pilot_input = get_time()
   end
 
-  -- Tuning selector (SCR_USER6): 1 = Pixhawk tune. Entering CIRCLE acts as the switch
-  -- in the middle position (tune); leaving CIRCLE acts as switch low (abort and revert gains).
+  -- SCR_USER1=1 starts QuickTune on arming, independent of driving mode.
   local sw_pos
-  if param:get('SCR_USER6') == 1 then
-    sw_pos = (vehicle:get_mode() == 9) and 1 or 0
+  if param:get('SCR_USER1') == 1 then
+    sw_pos = arming:is_armed() and 1 or 0
   else
     sw_pos = rc:get_aux_cached(RTUN_RC_FUNC:get())
   end
-  if not sw_pos then
-    return
-  end
+  if not sw_pos then return end
 
-  -- get output throttle
-  local _, throttle_out = vehicle:get_steering_and_throttle()
-
-  -- check switch position (0:low is stop, 1:middle is tune, 2:high is save gains
-  if sw_pos == 1 and (not arming:is_armed() or (throttle_out <= 0)) and get_time() > last_warning + 5 then
-    gcs:send_text(MAV_SEVERITY.CRITICAL, "RTun: must be armed and moving to tune")
+  -- QuickTune measures controller response; it does not drive the rover.
+  -- In Manual mode, neutral RC sticks produce zero steering/throttle output.
+  if sw_pos == 1 and param:get('SCR_USER1') == 1 and vehicle:get_mode() == 0
+      and get_time() > last_warning + 5 then
+    gcs:send_text(MAV_SEVERITY.WARNING,
+      "RTun: QuickTune measures only; Manual needs RC steering/throttle input")
     last_warning = get_time()
-    return
   end
   if sw_pos == 0 or not arming:is_armed() then
+    quicktune_started = false
     -- abort, revert parameters
     if need_restore then
       need_restore = false
@@ -599,9 +608,10 @@ function update()
          restore_gcs_pid_mask()
          tune_done_time = nil
          -- back to normal operation once the tune is saved
-         if param:get('SCR_USER6') == 1 then
-           param:set_and_save('SCR_USER6', 0)
-           gcs:send_text(MAV_SEVERITY.NOTICE, "RTun: done, SCR_USER6 set to 0 (normal)")
+         if param:get('SCR_USER1') == 1 then
+           param:set_and_save('SCR_USER1', 0)
+           quicktune_started = false
+           gcs:send_text(MAV_SEVERITY.NOTICE, "RTun: done, SCR_USER1 set to 0 (normal)")
          end
       end
     end
@@ -611,6 +621,10 @@ function update()
   if not need_restore then
     -- we are just starting tuning, get current values
     get_all_params()
+    if not quicktune_started then
+      quicktune_started = true
+      gcs:send_text(MAV_SEVERITY.NOTICE, string.format("RTun: QuickTune started; armed, mode %d", vehicle:get_mode()))
+    end
   end
 
   -- return immediately if pilot has provided input recently

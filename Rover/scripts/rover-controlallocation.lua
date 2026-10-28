@@ -39,31 +39,64 @@ local steering_accel_rate = 0.6
 local UPDATE_PERIOD_MS = 200
 local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
 local YAW_THRESH_RAD = math.rad(2)
+local YAW_RATE_THRESH_RAD_S = math.rad(2)
+local YAW_SETTLE_STEPS = 3 -- require 600 ms continuously within angle and rate limits
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
+local yaw_settle_steps = 0
 
 local last_nav_idx = nil
 
 local radio_type = 0
 
--- Tuning selector parameter (SCR_USER6):
+-- Tuning selector parameter (SCR_USER1):
 --   0 = normal operation
---   1 = Pixhawk PID tune (Rover QuickTune) - starts when entering CIRCLE mode
---   2 = yaw PI autotune (relay)            - starts when entering HOLD mode
+--   1 = Pixhawk PID tune (Rover QuickTune) - starts while armed
+--   2 = yaw PI autotune (relay)            - starts while armed
 -- After a successful tune the selector returns to 0 automatically.
--- The yaw autotune can also be triggered in HOLD by an RC switch with RCx_OPTION = 301.
+-- Yaw autotune is selected only through SCR_USER1.
 -- Results are saved to SCR_USER2 (P) and SCR_USER3 (I).
-local TUNE_SELECT_PARAM = 'SCR_USER6'
+local TUNE_SELECT_PARAM = 'SCR_USER1'
 local TUNE_MODE = { NORMAL = 0, PIXHAWK = 1, YAW = 2 }
-local AUTOTUNE_RC_FUNC = 301
 local AUTOTUNE_PERIOD_MS = 50
-local autotune = Autotune:new({ relay = 0.45 })
+
+-- Yaw autotune parameters
+local YAW_TUNE_PARAM_TABLE_KEY = 16
+assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 2), 'could not add yaw autotune parameter table')
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG', 45), 'could not add yaw autotune max angle parameter')
+--[[
+  // @Param: YAWT_MAX_ANG
+  // @DisplayName: Yaw autotune maximum angle
+  // @Description: Abort yaw autotune if the yaw error exceeds this angle
+  // @Units: deg
+  // @Range: 5 90
+  // @User: Standard
+--]]
+local yaw_max_angle_param = Parameter()
+assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG parameter')
+
+--[[
+  // @Param: YAWT_MAX_OUT
+  // @DisplayName: Yaw autotune maximum motor output
+  // @Description: Maximum steering command applied by yaw autotune; lower values reduce wheel spin speed
+  // @Units: %
+  // @Range: 5 45
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 20), 'could not add yaw autotune max output parameter')
+local yaw_max_out_param = Parameter()
+assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT parameter')
+
+local autotune = Autotune:new({ relay = 0.20 })
 local autotune_target_rad = nil
 local autotune_done = false
+local yaw_tune_last_progress = 0
+local yaw_tune_last_log_s = 0
+local selector_armed_reported = false
 
 -- Load tuned gains if present (0 means "not tuned yet", keep defaults)
 local saved_p, saved_i = param:get('SCR_USER2') or 0, param:get('SCR_USER3') or 0
@@ -74,7 +107,7 @@ end
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
-DRIVING_MODES = { MANUAL = 0, ACRO = 1, STEERING = 3, HOLD = 4, CIRCLE = 9, AUTO = 10, RTL = 11, GUIDED = 15 }
+DRIVING_MODES = { MANUAL = 0, ACRO = 1, STEERING = 3, HOLD = 4, LOITER = 5, SIMPLE = 7, CIRCLE = 9, AUTO = 10, RTL = 11, SMART_RTL = 12, GUIDED = 15 }
 -- Mission states dictionary
 MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
 
@@ -115,6 +148,7 @@ Reset the yaw control state
 local function resetYawControlState()
   yaw_target_rad = nil
   yaw_align_steps = 0
+  yaw_settle_steps = 0
   steering_steady_pid:resetInternalState()
 end
 
@@ -191,6 +225,7 @@ local function triggerYawControlOnReachedWaypoint()
     -- Reset PID state and start alignment
     steering_steady_pid:resetInternalState()
     yaw_align_steps = 0
+    yaw_settle_steps = 0
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
     vehicle:set_mode(DRIVING_MODES.STEERING)
@@ -245,6 +280,7 @@ local function applyPWMSteeringMode()
   -- If the pilot or failsafe switched modes, stop pursuing yaw alignment
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
     steering_steady_pid:resetInternalState()
+    yaw_settle_steps = 0
     return
   end
 
@@ -254,6 +290,7 @@ local function applyPWMSteeringMode()
   if yaw_align_steps > yaw_align_max_steps then
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
+    yaw_settle_steps = 0
     vehicle:set_mode(DRIVING_MODES.AUTO)
     return
   end
@@ -261,10 +298,19 @@ local function applyPWMSteeringMode()
   -- Current yaw from AHRS (rad) and error to target
   local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
 
-  -- Check if we reached the target yaw
-  if math.abs(err) <= YAW_THRESH_RAD then
+  -- Require both heading and yaw rate to settle before stopping. This avoids
+  -- switching to HOLD while the rover is still rotating through the target.
+  local yaw_rate = ahrs:get_gyro():z()
+  if math.abs(err) <= YAW_THRESH_RAD and math.abs(yaw_rate) <= YAW_RATE_THRESH_RAD_S then
+    yaw_settle_steps = yaw_settle_steps + 1
+  else
+    yaw_settle_steps = 0
+  end
+
+  if yaw_settle_steps >= YAW_SETTLE_STEPS then
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
+    yaw_settle_steps = 0
     -- Set HOLD mode so the vehicle stops for the external ROS photo routine
     vehicle:set_mode(DRIVING_MODES.HOLD)
     return
@@ -326,32 +372,30 @@ Switch high starts the relay test around the current yaw; switch low aborts/rear
 -- @return bool - true while the autotune owns the outputs
 --]]
 local function runYawAutotune()
-  local sw = rc:get_aux_cached(AUTOTUNE_RC_FUNC)
-  if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
-    sw = 2
-  end
-  if sw ~= 2 then
-    if autotune.status == "running" then
-      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted by switch")
-    end
-    autotune:reset()
-    autotune_done = false
-    return false
-  end
-  if autotune_done then
-    return false
-  end
-
+  if autotune_done then return false end
   if autotune.status == "idle" then
     autotune_target_rad = ahrs:get_yaw()
+    autotune.relay = math.max(0.05, math.min(0.45, yaw_max_out_param:get() / 100))
     autotune:start()
-    gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: started")
+    yaw_tune_last_progress = 0
+    yaw_tune_last_log_s = -1
+    gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
+      "YawTune: started; target %.1f deg, max error %.1f deg, max output %.0f%%",
+      math.deg(autotune_target_rad), yaw_max_angle_param:get(), autotune.relay * 100))
   end
-
   local err = funcs:yawErrorRad(ahrs:get_yaw(), autotune_target_rad)
+  local yaw_rate = ahrs:get_gyro():z()
+  autotune.max_amp_rad = math.rad(yaw_max_angle_param:get())
   local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
   applyControlAllocation(0, s_out)
-
+  if autotune.cycle > yaw_tune_last_progress or autotune.t - yaw_tune_last_log_s >= 2 then
+    yaw_tune_last_progress = autotune.cycle
+    yaw_tune_last_log_s = autotune.t
+    gcs:send_text(MAV_SEVERITY.INFO, string.format(
+      "YawTune: t %.0fs cycle %d/%d err %.1fdeg rate %.1fdeg/s out %.2f",
+      autotune.t, autotune.cycle, autotune.skip_cycles + autotune.cycles,
+      math.deg(err), math.deg(yaw_rate), s_out))
+  end
   if status == "done" then
     local r = autotune:result()
     param:set_and_save('SCR_USER2', r.P)
@@ -360,14 +404,16 @@ local function runYawAutotune()
     steering_steady_pid:resetInternalState()
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: saved P=%.3f I=%.3f", r.P, r.I))
+    gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: finished successfully; steering output stopped")
     if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
       param:set_and_save(TUNE_SELECT_PARAM, TUNE_MODE.NORMAL)
-      gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER6 set to 0 (normal)")
+      gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER1 set to 0 (normal)")
     end
     autotune_done = true
     applyControlAllocation(0, 0)
   elseif status == "fail" then
     gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: failed - " .. autotune:result().msg)
+    gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: steering output stopped; selector remains available for retry")
     autotune_done = true
     applyControlAllocation(0, 0)
   end
@@ -395,6 +441,10 @@ local function update()
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
+    if autotune.status == "running" then
+      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (disarmed)")
+    end
+    selector_armed_reported = false
     resetYawControlState()
     last_nav_idx = nil
     autotune:reset()
@@ -403,16 +453,26 @@ local function update()
     return update, 2000
   end
 
-  -- Run control output allocation based on the current driving mode
   local vehicle_mode = vehicle:get_mode()
-
-  -- Leaving HOLD aborts/rearms the yaw autotune
-  if vehicle_mode ~= DRIVING_MODES.HOLD and (autotune.status ~= "idle" or autotune_done) then
+  local selector = param:get(TUNE_SELECT_PARAM)
+  if not selector_armed_reported then
+    if selector == TUNE_MODE.YAW then
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: SCR_USER1=2; starting while armed (mode %d)", vehicle_mode))
+    elseif selector == TUNE_MODE.PIXHAWK then
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: SCR_USER1=1; QuickTune enabled while armed (mode %d)", vehicle_mode))
+    end
+    selector_armed_reported = selector == TUNE_MODE.YAW or selector == TUNE_MODE.PIXHAWK
+  end
+  if selector ~= TUNE_MODE.YAW and (autotune.status ~= "idle" or autotune_done) then
     if autotune.status == "running" then
-      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (left HOLD)")
+      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (SCR_USER1 changed)")
     end
     autotune:reset()
     autotune_done = false
+  elseif selector == TUNE_MODE.YAW then
+    runYawAutotune()
+    if autotune.status == "fail" or autotune_done then applyControlAllocation(0, 0) end
+    return update, AUTOTUNE_PERIOD_MS
   end
   if vehicle_mode == DRIVING_MODES.MANUAL then
     applyPWMManualMode()
@@ -424,8 +484,9 @@ local function update()
   elseif vehicle_mode == DRIVING_MODES.AUTO then
     applyPWMAutoMode()
     return update, 200
-  elseif vehicle_mode == DRIVING_MODES.HOLD and runYawAutotune() then
-    return update, AUTOTUNE_PERIOD_MS
+  elseif vehicle_mode == DRIVING_MODES.SIMPLE then
+    applyPWMInternalControl()
+    return update, 200
   elseif vehicle_mode == DRIVING_MODES.CIRCLE or vehicle_mode == DRIVING_MODES.ACRO
       or vehicle_mode == DRIVING_MODES.RTL then
     applyPWMInternalControl()
@@ -440,5 +501,8 @@ local function update()
   return update, 200
 end
 
+gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
+  "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG=%.1f deg, YAWT_MAX_OUT=%.0f%%",
+  VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_angle_param:get(), yaw_max_out_param:get()))
 return update, 3000 -- run immediately before starting to reschedule
 -------------------------------------------------------------------------------

@@ -198,7 +198,9 @@ Validado com Lua 5.4.6 (a mesma versão do ArduPilot), rodando os scripts reais 
 | Motor fraco | 3,45 / 1,01 | 1,2 s, overshoot 1,1° | 2,6 s, sem overshoot |
 | Mais inércia | 1,98 / 0,50 | 1,2 s, overshoot 0,8° | 5,0 s, overshoot 24,6° |
 
-**Limitação conhecida:** o alinhamento roda a 5 Hz (200 ms). O HOLD é declarado ao entrar em ±2°, mesmo com o rover ainda girando, o que pode deixar overshoot de 10–25° e um erro final de ~2° com inércia alta. As melhorias possíveis são rodar o STEERING a 50 ms e exigir velocidade de giro ≈ 0 para declarar o alinhamento.
+O alinhamento só conclui após permanecer por 600 ms dentro de ±2° do rumo e abaixo de 2°/s de velocidade angular. O controlador do modo STEERING ainda atualiza a cada 200 ms; valide o tempo de acomodação e o overshoot no SITL e no veículo.
+
+Durante o QuickTune em CIRCLE (`SCR_USER6 = 1`), o alocador atualiza o PWM a 40 Hz para acompanhar a frequência de medição do QuickTune. Em outros modos, a frequência normal do alocador permanece inalterada.
 
 ### Rodando os testes
 
