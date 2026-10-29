@@ -57,6 +57,9 @@ local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_LOG_INTERVAL_MS = 1000
 local last_yaw_align_log_ms = 0
+local YAW_SEQUENCE_DEGREES = { 0, 90, 180, 270, 360 }
+local yaw_sequence_active = false
+local yaw_sequence_index = 0
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
@@ -80,7 +83,7 @@ local AUTOTUNE_PERIOD_MS = UPDATE_PERIOD_MS
 
 -- Yaw autotune parameters
 local YAW_TUNE_PARAM_TABLE_KEY = 16
-assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 2), 'could not add yaw autotune parameter table')
+assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 3), 'could not add yaw autotune parameter table')
 assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG', 45), 'could not add yaw autotune max angle parameter')
 --[[
   // @Param: YAWT_MAX_ANG
@@ -105,6 +108,22 @@ assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 20), 'could not a
 local yaw_max_out_param = Parameter()
 assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT parameter')
 
+--[[
+  // @Param: YAWT_GAIN_MULT
+  // @DisplayName: Yaw autotune gain multiplier
+  // @Description: Multiplier applied to tuned P and I gains when aligning yaw
+  // @Range: 0.1 10000
+  // @Increment: 0.1
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 3, 'GAIN_MULT', 1), 'could not add yaw autotune gain multiplier parameter')
+local yaw_gain_multiplier_param = Parameter()
+assert(yaw_gain_multiplier_param:init('YAWT_GAIN_MULT'), 'could not bind YAWT_GAIN_MULT parameter')
+
+local function getYawGainMultiplier()
+  return math.max(0.1, math.min(10000, yaw_gain_multiplier_param:get()))
+end
+
 local autotune = Autotune:new({ relay = 0.20 })
 local autotune_target_rad = nil
 local autotune_done = false
@@ -115,7 +134,8 @@ local selector_armed_reported = false
 -- Load tuned gains if present (0 means "not tuned yet", keep defaults)
 local saved_p, saved_i = param:get('SCR_USER2') or 0, param:get('SCR_USER3') or 0
 if saved_p > 0 and saved_i > 0 then
-  steering_steady_pid:setGains(saved_p, saved_i, 0)
+  local gain_multiplier = getYawGainMultiplier()
+  steering_steady_pid:setGains(saved_p * gain_multiplier, saved_i * gain_multiplier, 0)
 end
 
 -- Severity for logging in GCS
@@ -168,6 +188,52 @@ local function resetYawControlState()
   yaw_align_steps = 0
   yaw_settle_steps = 0
   steering_steady_pid:resetInternalState()
+end
+
+local function startYawVerificationSequence()
+  yaw_sequence_active = true
+  yaw_sequence_index = 1
+  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
+  yaw_align_steps = 0
+  yaw_settle_steps = 0
+  last_yaw_align_log_ms = 0
+  steering_steady_pid:resetInternalState()
+  gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: tentando orientar: 0°, 90°, 180°')
+  gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: depois 270° e 360°/0°')
+  gcs:send_text(MAV_SEVERITY.INFO, string.format(
+    'YawTune: tentando orientar para %d° (etapa 1/%d)',
+    YAW_SEQUENCE_DEGREES[yaw_sequence_index], #YAW_SEQUENCE_DEGREES))
+  if not vehicle:set_mode(DRIVING_MODES.STEERING) then
+    yaw_sequence_active = false
+    resetYawControlState()
+    gcs:send_text(MAV_SEVERITY.ERROR, 'YawTune: nao foi possivel entrar em STEERING; sequencia cancelada')
+    applyControlAllocation(0, 0)
+  end
+end
+
+local function advanceYawVerificationSequence()
+  local completed_heading = YAW_SEQUENCE_DEGREES[yaw_sequence_index]
+  gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
+    'YawTune: orientacao para %d° concluida', completed_heading))
+  if yaw_sequence_index >= #YAW_SEQUENCE_DEGREES then
+    yaw_sequence_active = false
+    yaw_sequence_index = 0
+    resetYawControlState()
+    applyControlAllocation(0, 0)
+    vehicle:set_mode(DRIVING_MODES.HOLD)
+    gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: sequencia concluida; rover em HOLD')
+    return
+  end
+
+  yaw_sequence_index = yaw_sequence_index + 1
+  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
+  yaw_align_steps = 0
+  yaw_settle_steps = 0
+  last_yaw_align_log_ms = 0
+  steering_steady_pid:resetInternalState()
+  gcs:send_text(MAV_SEVERITY.INFO, string.format(
+    'YawTune: tentando orientar para %d° (etapa %d/%d)',
+    YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
 end
 
 --[[
@@ -309,7 +375,17 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     yaw_settle_steps = 0
-    vehicle:set_mode(DRIVING_MODES.AUTO)
+    if yaw_sequence_active then
+      local failed_heading = YAW_SEQUENCE_DEGREES[yaw_sequence_index]
+      yaw_sequence_active = false
+      yaw_sequence_index = 0
+      resetYawControlState()
+      vehicle:set_mode(DRIVING_MODES.HOLD)
+      gcs:send_text(MAV_SEVERITY.ERROR, string.format(
+        'YawTune: timeout at %d°; sequence stopped in HOLD', failed_heading))
+    else
+      vehicle:set_mode(DRIVING_MODES.AUTO)
+    end
     return
   end
 
@@ -337,8 +413,12 @@ local function applyPWMSteeringMode()
     applyControlAllocation(0, 0)
     steering_steady_pid:resetInternalState()
     yaw_settle_steps = 0
-    -- Set HOLD mode so the vehicle stops for the external ROS photo routine
-    vehicle:set_mode(DRIVING_MODES.HOLD)
+    if yaw_sequence_active then
+      advanceYawVerificationSequence()
+    else
+      -- Set HOLD mode so the vehicle stops for the external ROS photo routine
+      vehicle:set_mode(DRIVING_MODES.HOLD)
+    end
     return
   end
 
@@ -424,19 +504,24 @@ local function runYawAutotune()
   end
   if status == "done" then
     local r = autotune:result()
+    local gain_multiplier = getYawGainMultiplier()
+    local effective_p = r.P * gain_multiplier
+    local effective_i = r.I * gain_multiplier
     param:set_and_save('SCR_USER2', r.P)
     param:set_and_save('SCR_USER3', r.I)
-    steering_steady_pid:setGains(r.P, r.I, 0)
+    steering_steady_pid:setGains(effective_p, effective_i, 0)
     steering_steady_pid:resetInternalState()
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
-    gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: saved P=%.3f I=%.3f", r.P, r.I))
-    gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: finished successfully; steering output stopped")
+    gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
+      "YawTune: saved base P=%.3f I=%.3f; using P=%.3f I=%.3f (x%.2f)",
+      r.P, r.I, effective_p, effective_i, gain_multiplier))
     if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
       param:set_and_save(TUNE_SELECT_PARAM, TUNE_MODE.NORMAL)
       gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER1 set to 0 (normal)")
     end
     autotune_done = true
     applyControlAllocation(0, 0)
+    startYawVerificationSequence()
   elseif status == "fail" then
     gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: failed - " .. autotune:result().msg)
     gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: steering output stopped; selector remains available for retry")
@@ -467,6 +552,11 @@ local function update()
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
+    if yaw_sequence_active then
+      gcs:send_text(MAV_SEVERITY.WARNING, 'YawTune: heading sequence aborted (disarmed)')
+    end
+    yaw_sequence_active = false
+    yaw_sequence_index = 0
     if autotune.status == "running" then
       gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (disarmed)")
     end
@@ -480,6 +570,12 @@ local function update()
   end
 
   local vehicle_mode = vehicle:get_mode()
+  if yaw_sequence_active and vehicle_mode ~= DRIVING_MODES.STEERING then
+    yaw_sequence_active = false
+    yaw_sequence_index = 0
+    resetYawControlState()
+    gcs:send_text(MAV_SEVERITY.WARNING, 'YawTune: heading sequence aborted (mode changed)')
+  end
   local selector = param:get(TUNE_SELECT_PARAM)
   if not selector_armed_reported then
     if selector == TUNE_MODE.YAW then

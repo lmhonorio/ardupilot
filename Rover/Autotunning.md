@@ -38,9 +38,9 @@ Confira que os arquivos instalados são desta branch. A documentação antiga us
 | 1 | Apenas informa que QuickTune foi selecionado; segue controle normal | Inicia QuickTune automaticamente enquanto armado, em qualquer modo |
 | 2 | Executa o autotune de yaw enquanto armado, em qualquer modo | Deixa de usar seleção automática; consulta a chave RC |
 
-O script de yaw cria também `YAWT_MAX_ANG` (padrão 45°) e `YAWT_MAX_OUT` (padrão 20%). A amplitude efetiva do relé é `YAWT_MAX_OUT / 100`, limitada a 5–45%.
+O script de yaw cria `YAWT_MAX_ANG` (padrão 45°), `YAWT_MAX_OUT` (padrão 20%) e `YAWT_GAIN_MULT` (padrão 1). A amplitude efetiva do relé é `YAWT_MAX_OUT / 100`, limitada a 5–45%. `YAWT_GAIN_MULT` multiplica P e I usados pelo PI de orientação; por exemplo, fator 10 aplica P=10 e I=5 se os ganhos base forem P=1 e I=0,5. Os ganhos base, sem multiplicador, continuam salvos em `SCR_USER2/3`.
 
-`SCR_USER2` e `SCR_USER3` guardam P e I do PI de yaw. Se ambos forem maiores que zero quando `rover-controlallocation.lua` inicia, são usados diretamente, sem divisão por 1000. Se algum for zero ou negativo, o script mantém os defaults P=3,5 e I=8. O autotune grava os valores e os aplica ao PID em memória ao terminar com sucesso.
+`SCR_USER2` e `SCR_USER3` guardam P e I base do PI de yaw. Se ambos forem maiores que zero quando `rover-controlallocation.lua` inicia, o script aplica `YAWT_GAIN_MULT` a esses valores, sem divisão por 1000. Se algum for zero ou negativo, o script mantém os defaults P=3,5 e I=8. Ao terminar com sucesso, o autotune grava os ganhos base e usa no PID em memória os ganhos multiplicados.
 
 ## 3. QuickTune dos controladores nativos
 
@@ -135,7 +135,7 @@ Ki = Kp / Ti
 
 `A` é a amplitude média do erro e `Pu` é o período médio da oscilação, após descartar os ciclos iniciais. O algoritmo rejeita ciclos com variação acima de 25%, período fora de 0,4–20 s, erro maior que `YAWT_MAX_ANG`, ou experimento acima de 60 s.
 
-Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `SCR_USER2` e `Ki` para `SCR_USER3`. O controlador é PI (`D=0`) e a saída fica limitada pelo PID Lua. Ganhos só são apropriados se o sentido do comando fizer o erro diminuir e a estimativa de yaw for estável; o autotune não verifica sozinho a polaridade física de cada motor.
+Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `SCR_USER2` e `Ki` para `SCR_USER3`. O controlador é PI (`D=0`) e a saída fica limitada pelo PID Lua. Depois de um ajuste bem-sucedido, o script aplica os ganhos multiplicados por `YAWT_GAIN_MULT` e tenta orientar o rover sucessivamente para 0°, 90°, 180°, 270° e 360°/0°. Cada tentativa e conclusão é informada no GCS. Ao terminar, o rover entra em `HOLD`; se uma etapa exceder o timeout, a sequência é interrompida e o rover também entra em `HOLD`. Ganhos só são apropriados se o sentido do comando fizer o erro diminuir e a estimativa de yaw for estável; o autotune não verifica sozinho a polaridade física de cada motor.
 
 ### Execução
 
@@ -143,14 +143,14 @@ Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `S
 2. Confirme que `SCR_USER1` não está em 1 e que o rover não está seguindo uma missão.
 3. Com o rover parado, selecione `HOLD`, arme e então coloque `SCR_USER1=2`. Como a implementação não exige HOLD, faça isso somente quando puder aceitar que o script tome os motores.
 4. Observe o rover: ele deve alternar giros ao redor do yaw inicial. Se o erro crescer continuamente, o sentido de controle ou a estimativa de yaw pode estar incorreto; interrompa o ensaio.
-5. Sucesso salva P em `SCR_USER2`, I em `SCR_USER3`, atualiza o PI em memória, zera a saída e grava `SCR_USER1=0`. Falha também zera a saída, mas não salva ganhos nem retorna automaticamente o seletor a zero.
+5. Sucesso salva P base em `SCR_USER2`, I base em `SCR_USER3`, aplica o multiplicador e inicia a sequência automática de headings. O seletor volta a `SCR_USER1=0`. Falha zera a saída, mas não salva ganhos nem retorna automaticamente o seletor a zero.
 6. Para abortar durante execução, altere `SCR_USER1` para 0/1 ou desarme. O código não detecta saída de HOLD como cancelamento.
 
-Mensagens incluem `YawTune: started`, progresso de erro/taxa/saída, `Ku`, `Pu`, amplitude e `YawTune: saved P=... I=...`. Em falha, podem aparecer `inconsistent cycles`, `Pu out of range`, `amplitude below hysteresis`, `oscillation too large` ou `timeout`.
+Mensagens incluem `YawTune: started`, progresso de erro/taxa/saída, `Ku`, `Pu`, amplitude, ganhos base/efetivos e o heading de cada etapa. Em falha, podem aparecer `inconsistent cycles`, `Pu out of range`, `amplitude below hysteresis`, `oscillation too large` ou `timeout`.
 
 ### Uso dos ganhos em missão
 
-O PI ajustado é usado somente pelo `rover-controlallocation.lua` durante o alinhamento customizado após a chegada a um waypoint: a missão avança, o Lua lê o `z` do waypoint recém-alcançado como yaw desejado, muda para `STEERING` e corrige o rumo. O alinhamento termina depois de permanecer 600 ms dentro de ±2° e com velocidade angular abaixo de 2°/s; então o script entra em `HOLD`. Há timeout de 15 s. Os ganhos não substituem `ATC_STR_RAT_*` usados pelo controlador nativo na navegação.
+O PI ajustado é usado pelo `rover-controlallocation.lua` durante a sequência de verificação após o autotune e durante o alinhamento customizado após a chegada a um waypoint. Para o waypoint, a missão avança, o Lua lê o `z` do waypoint recém-alcançado como yaw desejado, muda para `STEERING` e corrige o rumo. Cada alinhamento termina depois de permanecer 600 ms dentro de ±2° e com velocidade angular abaixo de 2°/s; então o script entra em `HOLD`. Cada etapa tem timeout de 15 s. Os ganhos não substituem `ATC_STR_RAT_*` usados pelo controlador nativo na navegação.
 
 Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign target=... current=... error=...`, em graus. Se o erro aumentar em vez de diminuir sob correção, interrompa e investigue sinal da realimentação/mistura antes de ajustar ganhos.
 
@@ -163,6 +163,7 @@ Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign targe
 | `SCR_USER3` | I do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
 | `YAWT_MAX_ANG` | Limite do erro angular do experimento; acima dele o autotune aborta. Padrão: 45°. |
 | `YAWT_MAX_OUT` | Amplitude desejada do relé em porcentagem. Padrão: 20%, limitada internamente a 5–45%. |
+| `YAWT_GAIN_MULT` | Multiplicador dos ganhos P/I durante alinhamentos. Padrão: 1; faixa aceita: 0,1–10000. Os valores base permanecem em `SCR_USER2/3`. |
 
 `SCR_USER2/3` não são parâmetros `ATC_*`. Eles só alimentam o `steering_steady_pid` usado para alinhamento após waypoint; não ajustam a navegação normal em `AUTO`.
 
