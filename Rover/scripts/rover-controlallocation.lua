@@ -64,7 +64,7 @@ local radio_type = 0
 -- Results are saved to SCR_USER2 (P) and SCR_USER3 (I).
 local TUNE_SELECT_PARAM = 'SCR_USER1'
 local TUNE_MODE = { NORMAL = 0, PIXHAWK = 1, YAW = 2 }
-local AUTOTUNE_PERIOD_MS = 50
+local AUTOTUNE_PERIOD_MS = UPDATE_PERIOD_MS
 
 -- Yaw autotune parameters
 local YAW_TUNE_PARAM_TABLE_KEY = 16
