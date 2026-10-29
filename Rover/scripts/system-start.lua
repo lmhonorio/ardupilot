@@ -22,11 +22,11 @@ function system_start()
     assert(param:add_table(PARAM_TABLE_KEY, "BATT_SOC", 32), 'could not add param table')
 
     -- Add the parameters to the table
-    -- OBS: Keep the index in order, otherwise it will not work
+    -- Indices existentes preservados para manter a configuracao gravada.
     -- OBS: Always use the name as short as possible, as the table has a limit and the parameter wont be set
-    assert(param:add_param(PARAM_TABLE_KEY, 2,  '_ACTOBSAVD', 0), 'could not add ACTIVATE_OBSTACLE_AVOIDANCE')
-    assert(param:add_param(PARAM_TABLE_KEY, 3,  '_OBSYAW', 0), 'could not add OBSTACLE_AVOIDANCE_YAW')
-    assert(param:add_param(PARAM_TABLE_KEY, 4,  '_OBSTHR', 0), 'could not add OBSTACLE_AVOIDANCE_THROTTLE')
+    -- Keep index 2/storage, but use a MAVLink-compatible name (<=16 chars).
+    -- The old BATT_SOC_ACTOBSAVD name had 18 characters and was truncated.
+    assert(param:add_param(PARAM_TABLE_KEY, 2,  '_ALLOC', 0), 'could not add CONTROL_ALLOCATION')
     assert(param:add_param(PARAM_TABLE_KEY, 5,  '_SYSSTART', 1), 'could not add SYSTEM_STARTED')
     
     -- Check if the parameter was set properly

@@ -1,0 +1,217 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.6">
+  <model name="rover_mid360">
+    <pose>0 0 0.2 0 0 0</pose>
+    <include>
+      <uri>model://husky</uri>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+    <link name="cam_link">
+      <pose>0 0 0 0 0 0 </pose>
+      <inertial>
+        <mass>0.01</mass>
+        <inertia>
+          <ixx>0.0001</ixx>
+          <iyy>0.0001</iyy>
+          <izz>0.0001</izz>
+        </inertia>
+      </inertial>
+      <sensor name="front_camera" type="camera">
+        <pose>0.52 0 0.27 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.2</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+        </camera>
+        <always_on>true</always_on>
+        <update_rate>20</update_rate>
+        <visualize>false</visualize>
+      </sensor>
+    </link>
+    <joint name="camera_mount" type="fixed">
+      <child>cam_link</child>
+      <parent>husky::base_link</parent>
+      <axis>
+        <xyz>0 0 1</xyz>
+        <limit>
+          <upper>0</upper>
+          <lower>0</lower>
+        </limit>
+      </axis>
+    </joint>
+    <link name="imu_link">
+      <pose>0 0 0 0 0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 0 0</pose>
+        <mass>0.015</mass>
+        <inertia>
+          <ixx>1e-05</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1e-05</iyy>
+          <iyz>0</iyz>
+          <izz>1e-05</izz>
+        </inertia>
+      </inertial>
+      <sensor name="imu_sensor" type="imu">
+        <pose>0 0 0 3.141593 0 0</pose>
+        <always_on>1</always_on>
+        <update_rate>1000.0</update_rate>
+      </sensor>
+    </link>
+    <joint name="imu_joint" type="revolute">
+      <child>imu_link</child>
+      <parent>husky::base_link</parent>
+      <axis>
+        <xyz>1 0 0</xyz>
+        <limit>
+          <lower>0</lower>
+          <upper>0</upper>
+          <effort>0</effort>
+          <velocity>0</velocity>
+        </limit>
+        <dynamics>
+          <damping>0.7</damping>
+        </dynamics>
+        <use_parent_model_frame>1</use_parent_model_frame>
+      </axis>
+    </joint>
+    <plugin name="ArduCopter_Plugin" filename="libArduPilotPlugin.so">
+      <fdm_addr>127.0.0.1</fdm_addr>
+      <fdm_port_in>9002</fdm_port_in>
+      <fdm_port_out>9003</fdm_port_out>
+      <modelXYZToAirplaneXForwardZDown>0 0 0 3.141593 0 0</modelXYZToAirplaneXForwardZDown>
+      <gazeboXYZToNED>0 0 0 3.141593 0 0</gazeboXYZToNED>
+      <imuName>rover_mid360::imu_link::imu_sensor</imuName>
+      <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
+      <!-- Wheel velocity servos: effort limits are joint torque (N m).
+           These gains belong to the Gazebo actuators, not the ArduRover PIDs.
+           See ../../ALLOCATION_VALIDATION.md for the measured validation. -->
+      <control channel="0">
+        <type>VELOCITY</type>
+        <useForce>true</useForce>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+        <offset>-0.5</offset>
+        <p_gain>10</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0.02</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20</cmd_max>
+        <cmd_min>-20</cmd_min>
+        <jointName>husky::front_left_joint</jointName>
+        <multiplier>70</multiplier>
+      </control>
+      <control channel="2">
+        <type>VELOCITY</type>
+        <useForce>true</useForce>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+        <offset>-0.5</offset>
+        <p_gain>10</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0.02</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20</cmd_max>
+        <cmd_min>-20</cmd_min>
+        <jointName>husky::front_right_joint</jointName>
+        <multiplier>70</multiplier>
+      </control>
+      <control channel="0">
+        <type>VELOCITY</type>
+        <useForce>true</useForce>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+        <offset>-0.5</offset>
+        <p_gain>10</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0.02</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20</cmd_max>
+        <cmd_min>-20</cmd_min>
+        <jointName>husky::back_left_joint</jointName>
+        <multiplier>70</multiplier>
+      </control>
+      <control channel="2">
+        <type>VELOCITY</type>
+        <useForce>true</useForce>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+        <offset>-0.5</offset>
+        <p_gain>10</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0.02</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20</cmd_max>
+        <cmd_min>-20</cmd_min>
+        <jointName>husky::back_right_joint</jointName>
+        <multiplier>70</multiplier>
+      </control>
+    </plugin>
+    <link name="mid360_link">
+      <pose>0 0 0.40 0 0 0</pose>
+      <inertial>
+        <mass>0.265</mass>
+        <inertia>
+          <ixx>0.000173</ixx>
+          <iyy>0.000173</iyy>
+          <izz>0.000187</izz>
+        </inertia>
+      </inertial>
+      <visual name="housing">
+        <geometry>
+          <box>
+            <size>0.065 0.065 0.060</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.1 0.1 0.1 1</ambient>
+          <diffuse>0.1 0.1 0.1 1</diffuse>
+        </material>
+      </visual>
+      <sensor name="mid360" type="ray">
+        <pose>0 0 0.031 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1000</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159265359</min_angle>
+              <max_angle>3.13530946828</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>20</samples>
+              <resolution>1</resolution>
+              <min_angle>-0.12217304764</min_angle>
+              <max_angle>0.90757121104</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.1</min>
+            <max>40</max>
+            <resolution>0.01</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0</mean>
+            <stddev>0.02</stddev>
+          </noise>
+        </ray>
+      </sensor>
+    </link>
+    <joint name="mid360_mount" type="fixed">
+      <parent>husky::base_link</parent>
+      <child>mid360_link</child>
+    </joint>
+  </model>
+</sdf>

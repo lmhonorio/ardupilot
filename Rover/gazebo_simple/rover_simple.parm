@@ -1,0 +1,32 @@
+# Plugin: canais 0 e 2 = SERVO1 e SERVO3, esquerda e direita.
+SERVO1_FUNCTION 73
+SERVO3_FUNCTION 74
+SERVO1_MIN 1000
+SERVO1_MAX 2000
+SERVO1_TRIM 1500
+SERVO3_MIN 1000
+SERVO3_MAX 2000
+SERVO3_TRIM 1500
+CRUISE_SPEED 1
+# Feedforward do Husky deste cenario: coleta indicou ~24% de saida por m/s.
+CRUISE_THROTTLE 24
+ATC_SPEED_P 0.15
+# Navegacao de precisao: velocidade em m/s e raio de aceitacao em metros.
+# CRUISE_SPEED permanece como referencia da calibracao de CRUISE_THROTTLE.
+WP_SPEED 0.4
+WP_RADIUS 0.2
+WP_ACCEL 0.4
+WP_JERK 1.0
+ATC_ACCEL_MAX 0.5
+ATC_DECEL_MAX 0.5
+# Pivo lento: perfil que concluiu o ensaio sem exceder 1.5 m/s.
+# A aceitacao de 0.2 m ainda nao foi atingida na trajetoria medida.
+ATC_TURN_MAX_G 0.1
+ATC_STR_RAT_MAX 60
+ATC_STR_ACC_MAX 90
+WP_PIVOT_ANGLE 60
+WP_PIVOT_RATE 30
+WP_PIVOT_DELAY 0.2
+# Sensores publicados no Gazebo; ainda sem ponte de proximidade MAVLink.
+AVOID_ENABLE 0
+PRX1_TYPE 0

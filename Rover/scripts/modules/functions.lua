@@ -26,13 +26,9 @@ Limits a value to be within a specified range
 -- @return number - Limited value
 --]]
 function funcs:mapMaxMin(value, min, max)
-  if value > min and value < max then
-    return value
-  elseif value < min then
-    return min
-  else
-    return max
-  end
+  assert(self:isFinite(value) and self:isFinite(min) and self:isFinite(max) and min <= max,
+    "mapMaxMin requires finite values and ordered limits")
+  return math.min(math.max(value, min), max)
 end
 
 --[[
@@ -41,13 +37,10 @@ Function to map an angle to the range [0, 360]
 -- @return number - The mapped angle in the range [0, 360]
 --]]
 function funcs:mapTo360(angle)
-  if angle == nil then
+  if not self:isFinite(angle) then
     return 0
   end
-  if angle < 0 then
-    return angle + 360
-  end
-  return angle
+  return angle % 360
 end
 
 --[[
@@ -57,6 +50,10 @@ Detect NaN (in Lua: NaN ~= NaN)
 --]]
 function funcs:isNan(x)
   return x ~= x
+end
+
+function funcs:isFinite(value)
+  return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
 
 --[[
@@ -93,26 +90,86 @@ function funcs:applyAbsSmoothing(current_value, last_value, max_change_rate, tra
 end
 
 --[[
-Allocate the PWM signals for the right and left motors based on throttle and steering inputs
--- @param t number - Throttle command from 0 (or more) to 1
+Compatibility wrapper returning signed PWM offsets for each side
+-- @param t number - Signed throttle command from -1 to 1
 -- @param s number - Steering command from -1.0 to 1.0
 -- @param pwm_range number - Maximum PWM range for the motors
 -- @return number, number - The allocated PWM values for the left and right motors
 --]]
 function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
-  -- The throttle and steering absolute sum, to inspect the total signal we want to insert
-  local ts_sum = math.abs(t) + math.abs(s) + 0.00001
-  -- We compare the value of each input to the total sum
-  local t_share, s_share = math.abs(t) / ts_sum, math.abs(s) / ts_sum
-  -- We create the assigned amount of steering and throttle by multiplying again the shares by the inputs
-  -- We do that to take the input signal into account, and also to
-  -- reduce the output a bit so we dont send the full signal to the motors all the time,
-  -- as if it would happen if only using the proportion of the sum
-  t_share, s_share = t * t_share, s * s_share
-  -- The right and left motors added PWM allocation
-  local pwm_aloc_l = (t_share + s_share) * pwm_range
-  local pwm_aloc_r = (t_share - s_share) * pwm_range
-  return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
+  if not self:isFinite(pwm_range) or pwm_range <= 0 then
+    return 0, 0
+  end
+  local left, right = self:allocateRightAndLeft(t, s)
+  local function rounded(value)
+    local magnitude = math.floor(math.abs(value * pwm_range) + 0.5)
+    return value < 0 and -magnitude or magnitude
+  end
+  return rounded(left), rounded(right)
+end
+
+-- Positive steering makes the left side faster: right turn, also in reverse.
+-- Match AP_MotorsUGV saturation priorities and forward/reverse thrust limits.
+-- Defaults retain fair mixing for symmetric motors.
+function funcs:allocateRightAndLeft(t, s, mix, asymmetry)
+  if not self:isFinite(t) or not self:isFinite(s) then
+    return 0, 0
+  end
+  t = self:mapMaxMin(t, -1, 1)
+  s = self:mapMaxMin(s, -1, 1)
+  mix = self:isFinite(mix) and self:mapMaxMin(mix, 0, 1) or 0.5
+  asymmetry = self:isFinite(asymmetry) and math.max(asymmetry, 1) or 1
+  local lower = -1 / asymmetry
+  local best = (1 + lower) / 2
+  local steering_range = t < best and (math.max(t, 0) - lower) or (1 - best)
+  s = self:mapMaxMin(s, -steering_range, steering_range)
+  t = self:mapMaxMin(t, lower, 1)
+  local saturation = math.max(t + math.abs(s), (t - math.abs(s)) / lower)
+  if saturation > 1 then
+    local fair = 1 / saturation
+    if mix >= 0.5 then
+      s = s * (fair + (1 - fair) * (2 * mix - 1))
+      t = t >= best and (1 - math.abs(s)) or (math.abs(s) + lower)
+    else
+      t = t * (fair + (1 - fair) * (1 - 2 * mix))
+      local direction = s > 0 and 1 or -1
+      s = (t >= best and (1 - t) or (t - lower)) * direction
+    end
+  end
+  local left, right = t + s, t - s
+  if left < 0 then left = left * asymmetry end
+  if right < 0 then right = right * asymmetry end
+  return self:mapMaxMin(left, -1, 1), self:mapMaxMin(right, -1, 1)
+end
+
+-- Match AP_MotorsUGV::get_scaled_throttle, keeping zero exactly neutral.
+function funcs:scaleMotorOutput(value, minimum_percent, expo)
+  if not self:isFinite(value) or value == 0 then return 0 end
+  local direction = value < 0 and -1 or 1
+  local minimum = self:isFinite(minimum_percent) and self:mapMaxMin(minimum_percent / 100, 0, 1) or 0
+  local magnitude = minimum + math.min(math.abs(value), 1) * (1 - minimum)
+  if self:isFinite(expo) and expo ~= 0 and math.abs(expo) <= 1 then
+    magnitude = ((expo - 1) + math.sqrt(math.max(0, (1 - expo)^2 + 4 * expo * magnitude))) / (2 * expo)
+  end
+  return direction * magnitude
+end
+
+-- Map zero to this channel's trim, using independent forward/reverse spans.
+-- Raw PWM overrides bypass SERVOx_REVERSED; apply reversal exactly once.
+function funcs:normalizedToPwm(value, minimum, trim, maximum, reversed)
+  if not self:isFinite(minimum) or not self:isFinite(trim) or not self:isFinite(maximum)
+      or not (0 <= minimum and minimum < trim and trim < maximum and maximum <= 65535) then
+    return nil
+  end
+  if not self:isFinite(value) then
+    value = 0
+  end
+  value = self:mapMaxMin(value, -1, 1)
+  if reversed then
+    value = -value
+  end
+  local span = value >= 0 and (maximum - trim) or (trim - minimum)
+  return math.floor(self:mapMaxMin(trim + value * span, minimum, maximum) + 0.5)
 end
 
 return funcs

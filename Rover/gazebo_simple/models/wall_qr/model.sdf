@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="wall_qr">
+    <static>true</static>
+    <link name="panel">
+      <!-- Local XY plane: local X -> world -Y, local Y -> world +Z,
+           normal -> world -X, QR upright when seen by the rover. -->
+      <visual name="qr">
+        <pose>0 0 0 1.57079632679 0 -1.57079632679</pose>
+        <cast_shadows>false</cast_shadows>
+        <geometry><plane><normal>0 0 1</normal><size>1.8 1.8</size></plane></geometry>
+        <material><script>
+          <uri>model://wall_qr/materials/scripts</uri>
+          <uri>model://wall_qr/materials/textures</uri>
+          <name>Rover/WallQR</name>
+        </script></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

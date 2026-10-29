@@ -1,0 +1,5 @@
+# Python 3.8. NumPy/pymavlink already available on this workstation.
+numpy>=1.20,<1.25
+pymavlink>=2.4.40
+# Optional plots (CSV/JSON/HTML work without it):
+matplotlib>=3.5,<3.8

@@ -1,384 +1,119 @@
---@param control_output integer - CONTROLE MODE 4
---| '1' # Roll
---| '2' # Pitch
---| '3' # Throttle
---| '4' # Yaw
---| '5' # Lateral
---| '6' # MainSail
---| '7' # WingSail
---| '8' # Walking_Height
---@return number|nil
--- External modules
+-- Alocacao diferencial: aplica aos motores os comandos do controlador ArduRover.
+-- O FAST-LIO permanece em lidar_odometry.lua e nao interfere na atuacao.
 package.path = package.path .. ';./scripts/modules/?.lua'
-local PID = require("pid")
-local funcs = require("functions")
--------------------------------------------------------------------------------
-------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
--------------------------------------------------------------------------------
--- Channel control variables
-local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
-local CONTROL_OUTPUT_YAW = 4
-local MAX_CHANNEL_OUTPUT = 1950
-local MIN_CHANNEL_OUTPUT = 1050
-local PWM_RANGE = 450
--- Vehicle type control
-local VEHICLE_TYPE = param:get('SCR_USER5')
--- TRIM values
-local PWM_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
-local RC1_TRIM_VALUE = param:get('RC1_TRIM')
-local RC3_TRIM_VALUE = param:get('RC3_TRIM')
--- Signal smoothing logic
-local last_manual_throttle = 0
-local throttle_accel_rate_thresh = 0.5
-local throttle_accel_rate = 0.5
-local last_manual_steering = 0
-local steering_accel_rate_thresh = 0.6
-local steering_accel_rate = 0.6
--- Yaw alignment logic
-local UPDATE_PERIOD_MS = 200
-local UPDATE_DT = UPDATE_PERIOD_MS / 1000.0
-local YAW_THRESH_RAD = math.rad(10)
-local YAW_DEADBAND = 0.02
-local YAW_ALIGN_TIMEOUT_MS = 15000
-local YAW_ALIGN_MAX_STEPS = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
--- Params: p_gain, i_gain, d_gain, i_max, i_min, pid_max, pid_min
-local yaw_pid = PID:new(0.5, 0.25, 0.2, 5, -5, 0.99, -0.99)
-local yaw_target_deg = nil
-local yaw_target_rad = nil
-local yaw_align_steps = 0
+local funcs = require('functions')
+local THROTTLE_CONTROL_OUTPUT_CHANNEL, CONTROL_OUTPUT_YAW = 3, 4
+local UPDATE_PERIOD_MS, OUTPUT_TIMEOUT_MS = 20, 100
+local MAV_SEVERITY = {ERROR=3, WARNING=4}
+local motor_outputs, outputs_overridden, outputs_loaded = {}, false, false
+local vehicle_type_warning = false
+local allocation_param, allocation_bound = Parameter(), false
 
-local last_nav_idx = nil
-
--- Parâmetro para ativar/desativar a lógica de controle personalizada em AUTO
-local act_obs_avoid_param = Parameter()
-act_obs_avoid_param:init('BATT_SOC_ACTOBSAVD')
-
--- Severity for logging in GCS
-MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
--- Rover driving modes
-DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
--- Mission states dictionary
-MISSION_STATE = { IDLE = 0, RUNNING = 1, FINISHED = 2 }
-
--- Controle de impressão de param4
-local last_logged_wp_index = -1
-local last_inverted_check_idx = -1
-
--------------------------------------------------------------------------------
----------------------------- DEBUGGING LOGGING --------------------------------
--------------------------------------------------------------------------------
-local function logCurrentWpParam4()
-  local idx = mission:get_current_nav_index()
-  if not idx then
-    return
-  end
-  if idx == last_logged_wp_index then
-    return
-  end
-  local item = mission:get_item(idx)
-  if not item then
-    return
-  end
-
-  local cmd = item:command()
-  -- 16 = MAV_CMD_NAV_WAYPOINT
-  if cmd == 16 then
-    local p4 = item:z() or 0
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("WP %d (NAV_WAYPOINT) param4 = %.3f", idx, p4)
-    )
-    last_logged_wp_index = idx
+local function releaseControlAllocation()
+  if outputs_overridden then
+    for _, output in ipairs(motor_outputs) do
+      -- timeout=0 hands the channel back to the native motor driver.
+      SRV_Channels:set_output_pwm_chan_timeout(output.channel, output.trim, 0)
+    end
+    outputs_overridden = false
   end
 end
 
--------------------------------------------------------------------------------
-------------------------- LOW LEVEL ACTION FUNCTIONS --------------------------
--------------------------------------------------------------------------------
---[[
-Control allocation
-This function is responsible for the PWM signal allocation of the vehicle.
-It receives the throttle (t) and steering (s) values and calculates the PWM values for the motors.
-The function also takes into account the trim values for the PWM outputs.
--- @param t number - Throttle command from 0 (or more) to 1.0
--- @param s number - Steering command from -1.0 to 1.0
---]]
+local function loadMotorOutputs()
+  releaseControlAllocation()
+  outputs_loaded = false
+  local pwm_type = param:get('MOT_PWM_TYPE')
+  if pwm_type ~= nil and pwm_type ~= 0 then
+    gcs:send_text(MAV_SEVERITY.ERROR, 'Allocation: requires normal bidirectional PWM (MOT_PWM_TYPE=0)')
+    return false
+  end
+  if (param:get('WRC_ENABLE') or 0) ~= 0 then
+    gcs:send_text(MAV_SEVERITY.ERROR, 'Allocation: wheel-rate controller requires native outputs')
+    return false
+  end
+  local configured = {}
+  local have_left, have_right = false, false
+  for servo = 1, 32 do
+    local prefix = string.format('SERVO%d_', servo)
+    local fn = param:get(prefix .. 'FUNCTION')
+    if fn == 73 or fn == 74 then
+      local output = {
+        channel = servo - 1, left = fn == 73,
+        minimum = param:get(prefix .. 'MIN'), trim = param:get(prefix .. 'TRIM'),
+        maximum = param:get(prefix .. 'MAX'), reversed = param:get(prefix .. 'REVERSED') == 1
+      }
+      if not funcs:normalizedToPwm(0, output.minimum, output.trim, output.maximum, false) then
+        gcs:send_text(MAV_SEVERITY.ERROR, 'Allocation: invalid limits for ' .. prefix)
+        return false
+      end
+      configured[#configured + 1] = output
+      have_left = have_left or output.left
+      have_right = have_right or not output.left
+    end
+  end
+  motor_outputs = configured
+  outputs_loaded = have_left and have_right
+  return outputs_loaded
+end
+
 local function applyControlAllocation(t, s)
-  -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
-  -- MOTOR SCHEMATIC IN ROVER FRAME
-  -- 1 - 0     ^
-  --   |       | Rover forward direction
-  -- 2 - 3
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
-  -- Limiting the output values to the PWM ranges
-  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  -- Setting the PWM outputs based on the control allocation directions
-  -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
-  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
+  local left, right = funcs:allocateRightAndLeft(t, s,
+    param:get('MOT_STR_THR_MIX'), param:get('MOT_THST_ASYM'))
+  local minimum, expo = param:get('MOT_THR_MIN'), param:get('MOT_THST_EXPO')
+  left = funcs:scaleMotorOutput(left, minimum, expo)
+  right = funcs:scaleMotorOutput(right, minimum, expo)
+  for _, output in ipairs(motor_outputs) do
+    local command = output.left and left or right
+    local pwm = funcs:normalizedToPwm(command, output.minimum, output.trim, output.maximum, output.reversed)
+    SRV_Channels:set_output_pwm_chan_timeout(output.channel, pwm, OUTPUT_TIMEOUT_MS)
+  end
+  outputs_overridden = true
 end
 
--------------------------------------------------------------------------------
---------------------- YAW CONTROL VIA MAV_CMD_NAV_WAYPOINT --------------------
--------------------------------------------------------------------------------
---[[
-Check if a waypoint was reached and trigger yaw control if param4 is valid
--- @return bool - true if yaw control was triggered
---]]
-local function triggerYawControlOnReachedWaypoint()
-  local idx = mission:get_current_nav_index()
-  if not idx then
-    return false
-  end
-
-  -- Initialize the index tracker
-  if last_nav_idx == nil then
-    last_nav_idx = idx
-    return false
-  end
-
-  -- When the nav index changes, the previous waypoint was reached
-  if idx ~= last_nav_idx then
-    local reached_idx = last_nav_idx
-    last_nav_idx = idx
-    local item = mission:get_item(reached_idx)
-    if not item then
-      return false
-    end
-
-    -- Only handle NAV_WAYPOINT (16) with valid param4 (yaw)
-    if item:command() ~= 16 then
-      return false
-    end
-    local p4 = item:z()
-    if p4 == nil or funcs:isNan(p4) then
-      return false
-    end
-
-    -- param4 is yaw angle in degrees
-    yaw_target_deg = funcs:mapTo360(p4)
-    yaw_target_rad = math.rad(yaw_target_deg)
-    -- Reset PID state and start alignment
-    yaw_pid:resetInternalState()
-    yaw_align_steps = 0
-    -- Stop the vehicle and take over yaw using STEERING mode
-    applyControlAllocation(0, 0)
-    vehicle:set_mode(DRIVING_MODES.STEERING)
-
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("Yaw align start (WP yaw=%.1f deg)", yaw_target_deg)
-    )
-    return true
-  end
-  return false
+local function applyAutopilotControl()
+  -- The autopilot has already applied RCMAP, RC reversal, trim and deadzone.
+  -- Keep signed commands, including stop, reverse and active braking.
+  applyControlAllocation(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL),
+    vehicle:get_control_output(CONTROL_OUTPUT_YAW))
 end
 
-local function resetMissionYawState()
-  yaw_target_deg = nil
-  yaw_target_rad = nil
-  yaw_align_steps = 0
-  last_nav_idx = nil
-  last_logged_wp_index = -1
-  yaw_pid:resetInternalState()
-end
-
--------------------------------------------------------------------------------
---------------------- INVERTED FLIGHT COMMAND CHECK ---------------------------
--------------------------------------------------------------------------------
---[[
-Check if the current mission command is MAV_CMD_DO_INVERTED_FLIGHT (210)
-and print a message to the GCS.
---]]
-local function checkForInvertedFlightCommand()
-  local idx = mission:get_current_nav_index()
-  if not idx then
-    return
-  end
-
-  -- Avoid repeating the check for the same index
-  if idx == last_inverted_check_idx then
-    return
-  end
-
-  local item = mission:get_item(idx)
-  if not item then
-    return
-  end
-
-  -- 210 = MAV_CMD_DO_INVERTED_FLIGHT
-  if item:command() == 210 then
-    local p1 = item:param1() -- Inverted (0=Normal, 1=Inverted)
-    gcs:send_text(
-      MAV_SEVERITY.WARNING,
-      string.format("WP %d: MAV_CMD_DO_INVERTED_FLIGHT detected! Param1=%.1f", idx, p1)
-    )
-    last_inverted_check_idx = idx
-  elseif item:command() ~= 16 then
-    -- if it is not nav waypoint we assume we just check once
-    last_inverted_check_idx = idx
-  end
-  -- Note: If it is a NAV command (like Waypoint), we might want to check constantly
-  -- but usually DO commands are instantaneous.
-  -- For safety, we only log once per index to avoid spam.
-end
-
--------------------------------------------------------------------------------
-------------------------- HIGH LEVEL CONTROL FUNCTIONS ------------------------
--------------------------------------------------------------------------------
---[[
-Control the actions while not armed
---]]
-local function notArmed()
-  SRV_Channels:set_output_pwm_chan_timeout(0, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(1, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(2, PWM_TRIM_VALUE, 3000)
-  SRV_Channels:set_output_pwm_chan_timeout(3, PWM_TRIM_VALUE, 3000)
-end
-
---[[
-Perform vehicle control in Manual mode
---]]
-local function applyPWMManualMode()
-  local rc3_pwm = rc:get_pwm(3)
-  local rc1_pwm = rc:get_pwm(1)
-
-  -- Compares the diff from the last manual signals to the maximum rate we are accepting
-  -- Make the actual command be a rate from the last to the required command if necessary
-  local raw_steering = (rc1_pwm - RC1_TRIM_VALUE) / 450
-  local steering = funcs:applyAbsSmoothing(raw_steering, last_manual_steering, steering_accel_rate_thresh,
-    steering_accel_rate)
-  last_manual_steering = steering
-  local raw_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
-  local throttle = funcs:applyAbsSmoothing(raw_throttle, last_manual_throttle, throttle_accel_rate_thresh,
-    throttle_accel_rate)
-  last_manual_throttle = throttle
-
-  applyControlAllocation(throttle, steering)
-end
-
---[[
-Perform vehicle control in Steering mode
---]]
-local function applyPWMSteeringMode()
-  -- If the pilot or failsafe switched modes, stop pursuing yaw alignment
-  if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
-    yaw_pid:resetInternalState()
-    return
-  end
-
-  -- Timeout safety
-  yaw_align_steps = yaw_align_steps + 1
-  if yaw_align_steps > YAW_ALIGN_MAX_STEPS then
-    gcs:send_text(MAV_SEVERITY.WARNING, "Yaw align TIMEOUT -> back to AUTO")
-    applyControlAllocation(0, 0)
-    yaw_pid:resetInternalState()
-    vehicle:set_mode(DRIVING_MODES.AUTO)
-    return
-  end
-
-  -- Current yaw from AHRS (rad) and error to target
-  local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
-
-  -- Check if we reached the target yaw
-  if math.abs(err) <= YAW_THRESH_RAD then
-    applyControlAllocation(0, 0)
-    yaw_pid:resetInternalState()
-    gcs:send_text(
-      MAV_SEVERITY.INFO,
-      string.format("Yaw aligned (target %.1f deg) -> AUTO", yaw_target_deg)
-    )
-    -- Set HOLD mode so the vehicle stops before going back to AUTO
-    vehicle:set_mode(DRIVING_MODES.HOLD)
-    return
-  end
-
-  -- Rotate in place with pid output
-  local pid_out = yaw_pid:compute(err, UPDATE_DT)
-  if math.abs(pid_out) < YAW_DEADBAND then
-    pid_out = 0
-  end
-  applyControlAllocation(0, pid_out)
-end
-
--------------------------------------------------------------------------------
--------------------------------- MAIN LOOP ------------------------------------
--------------------------------------------------------------------------------
+-- HOLD e desarmamento mantem a autoridade do controlador nativo.
+-- Nao altera modo, missao, rumo, obstaculos ou a referencia do controlador.
 local function update()
-  -- Safety check for vehicle type
-  if not (VEHICLE_TYPE == 2) then
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format("Not ROVER, exiting LUA script."))
-    return
+  if param:get('SCR_USER5') ~= 2 then
+    releaseControlAllocation()
+    if not vehicle_type_warning then
+      gcs:send_text(MAV_SEVERITY.WARNING, 'Allocation inactive: waiting for SCR_USER5=2')
+      vehicle_type_warning = true
+    end
+    return update, 1000
   end
-  -- Getting SCR_USER params to PID values
-  local p, i, d = param:get('SCR_USER2') / 1000, param:get('SCR_USER3') / 1000, param:get('SCR_USER4') / 1000
-  yaw_pid:setGains(p, i, d)
-
-  -- Run not armed routine to guarantee trim values
+  vehicle_type_warning = false
   if not arming:is_armed() then
-    resetMissionYawState()
-    notArmed()
-    return update, 2000
-  end
-
-  if vehicle:get_mode() == DRIVING_MODES.MANUAL then
-    applyPWMManualMode()
-    return update, 200
-  elseif vehicle:get_mode() == DRIVING_MODES.STEERING then
-    -- We use steering mode for yaw alignment
-    applyPWMSteeringMode()
-    return update, 200
-  elseif vehicle:get_mode() == DRIVING_MODES.HOLD then
-    -- Make the vehicle stop
-    applyControlAllocation(0, 0)
-    return update, 200
-  elseif vehicle:get_mode() == DRIVING_MODES.AUTO then
-    -- Só aplica lógica customizada em AUTO se BATT_SOC_ACTOBSAVD == 1.
-    -- Caso contrário, deixa o Rover usar o controle/mixagem padrão.
-    local act_obs_avoid = act_obs_avoid_param:get() or 0
-    if act_obs_avoid ~= 1 then
-      resetMissionYawState()
-      return update, 200
-    end
-
-    local idx = mission:get_current_nav_index()
-
-    -- Detect mission restart / rewind: current index went backwards
-    if idx and last_nav_idx and idx < last_nav_idx then
-      gcs:send_text(MAV_SEVERITY.INFO, "Mission restart detected -> resetting yaw state")
-      resetMissionYawState()
-    end
-
-    -- Temporary logging param4 of current waypoint for debugging
-    logCurrentWpParam4()
-
-    -- Controls end of mission
-    local mission_state = mission:state()
-    if mission_state == MISSION_STATE.FINISHED then
-      applyControlAllocation(0, 0)
-      vehicle:set_mode(DRIVING_MODES.MANUAL)
-      return update, 200
-    end
-
-    -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
-    if triggerYawControlOnReachedWaypoint() then
-      return update, 200
-    end
-
-    -- Check for Inverted Flight Command (210)
-    -- checkForInvertedFlightCommand()
-
-    -- Acquiring throttle and steering from internal control output
-    local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
-    throttle = funcs:mapMaxMin(throttle, 0.1, 1.0)
-    local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-    applyControlAllocation(throttle, steering)
+    releaseControlAllocation()
+    loadMotorOutputs()
     return update, 200
   end
+  if SRV_Channels:get_emergency_stop() then
+    releaseControlAllocation()
+    return update, UPDATE_PERIOD_MS
+  end
+  if not allocation_bound then
+    allocation_bound = allocation_param:init('BATT_SOC_ALLOC')
+  end
+  if not allocation_bound or allocation_param:get() ~= 1 then
+    releaseControlAllocation()
+    return update, UPDATE_PERIOD_MS
+  end
+  if vehicle:get_mode() == 4 then -- HOLD: preserve native braking
+    releaseControlAllocation()
+    return update, UPDATE_PERIOD_MS
+  end
+  if not outputs_loaded and not loadMotorOutputs() then
+    return update, 1000
+  end
+  applyAutopilotControl()
+  return update, UPDATE_PERIOD_MS
 end
 
-return update, 3000 -- run immediately before starting to reschedule
--------------------------------------------------------------------------------
+return update, 3000

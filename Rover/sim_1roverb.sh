@@ -1,10 +1,20 @@
 #!/bin/bash
 
 # Terminal para Robô 1
-gnome-terminal -- bash -c "sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 1  --instance 0 -f rover-skid --out=udp:127.0.0.1:14551 --out=udp:127.0.0.1:14571 --out=udp:192.168.0.131:14551  --sysid=1 --add-param-file nrover.param; exec bash"
+gnome-terminal -- bash -c "python3.8 ../Tools/autotest/sim_vehicle.py  sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 1  --instance 0 -f rover-skid --out=udp:127.0.0.1:14551 --out=udp:127.0.0.1:14571 --add-param-file nrover.param; exec bash"
 
 # Terminal para Robô 2
 # gnome-terminal -- bash -c "sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 2 --instance 1 -f rover-skid --out=udp:127.0.0.1:14552 --out=udp:127.0.0.1:14572 --out=udp:192.168.0.131:14552 --sysid=2 --add-param-file nrover.param; exec bash"
+
+
+## 14550 - envio de dados para o qgroundcontrol
+gnome-terminal -- bash -c "mavproxy.py \
+  --master=udp:127.0.0.1:14571 \
+  --out=udp:192.168.0.131:14550 \
+  --console \
+  --map \
+  --cmd='map grid; map follow'; exec bash"
+
 
 # # Terminal para o MAVProxy
 # gnome-terminal -- bash -c "mavproxy.py \
@@ -27,14 +37,7 @@ gnome-terminal -- bash -c "sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 1 
 #   --cmd='map grid; map follow'; exec bash"
 
 
-## 14550 - envio de dados para o qgroundcontrol
-gnome-terminal -- bash -c "mavproxy.py \
-  --master=udp:127.0.0.1:14571 \
-  --master=udp:127.0.0.1:14572 \
-  --out=udp:192.168.0.131:14550 \
-  --console \
-  --map \
-  --cmd='map grid; map follow'; exec bash"
+
 
 
 

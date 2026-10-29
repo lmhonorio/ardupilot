@@ -1,0 +1,16 @@
+material Rover/WallQR
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      cull_hardware none
+      texture_unit
+      {
+        texture qr.png
+        filtering none
+      }
+    }
+  }
+}
