@@ -43,6 +43,8 @@ local YAW_RATE_THRESH_RAD_S = math.rad(2)
 local YAW_SETTLE_STEPS = 3 -- require 600 ms continuously within angle and rate limits
 local YAW_DEADBAND = 0.02
 local YAW_ALIGN_TIMEOUT_MS = 15000
+local YAW_ALIGN_LOG_INTERVAL_MS = 1000
+local last_yaw_align_log_ms = 0
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
@@ -296,7 +298,15 @@ local function applyPWMSteeringMode()
   end
 
   -- Current yaw from AHRS (rad) and error to target
-  local err = funcs:yawErrorRad(ahrs:get_yaw(), yaw_target_rad)
+  local current_yaw_rad = ahrs:get_yaw()
+  local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
+  local now_ms = millis():toint()
+  if now_ms - last_yaw_align_log_ms >= YAW_ALIGN_LOG_INTERVAL_MS then
+    last_yaw_align_log_ms = now_ms
+    gcs:send_text(MAV_SEVERITY.INFO, string.format(
+      "YawAlign target=%.1f current=%.1f error=%.1f",
+      math.deg(yaw_target_rad), math.deg(current_yaw_rad), math.deg(err)))
+  end
 
   -- Require both heading and yaw rate to settle before stopping. This avoids
   -- switching to HOLD while the rover is still rotating through the target.
