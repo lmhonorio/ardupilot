@@ -19,13 +19,25 @@ local Autotune = require("autotune")
 -- Channel control variables
 local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local CONTROL_OUTPUT_YAW = 4
-local MAX_CHANNEL_OUTPUT = 1950
-local MIN_CHANNEL_OUTPUT = 1050
-local PWM_RANGE = 450
+local THROTTLE_PARAM_TABLE_KEY = 17
+local THROTTLE_PARAM_TABLE_PREFIX = 'THRO_'
+assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1), 'could not add Lua throttle parameter table')
+--[[
+  // @Param: THRO_MAX_LUA
+  // @DisplayName: Lua maximum motor output
+  // @Description: Maximum motor PWM range as a percentage of the 1000-2000 us range around the 1500 us trim
+  // @Units: %
+  // @Range: 0 100
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 1, 'MAX_LUA', 90), 'could not add THRO_MAX_LUA parameter')
+local throttle_max_lua_param = Parameter()
+assert(throttle_max_lua_param:init('THRO_MAX_LUA'), 'could not bind THRO_MAX_LUA parameter')
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
-local PWM_TRIM_VALUE = tonumber(param:get('SERVO1_TRIM')) or 0
+local PWM_TRIM_VALUE = 1500
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
 -- Signal smoothing logic
@@ -132,9 +144,13 @@ local function applyControlAllocation(t, s)
   -- 2 - 3
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
-  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, PWM_RANGE)
-  local pwm_l = funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
-  local pwm_r = funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, MIN_CHANNEL_OUTPUT, MAX_CHANNEL_OUTPUT)
+  local throttle_limit_pct = math.max(0, math.min(100, throttle_max_lua_param:get()))
+  local pwm_range = 5 * throttle_limit_pct
+  local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
+  local pwm_min = PWM_TRIM_VALUE - pwm_range
+  local pwm_max = PWM_TRIM_VALUE + pwm_range
+  local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
+  local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
