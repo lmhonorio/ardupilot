@@ -27,7 +27,18 @@ fi
 shift
 PY38="$("${PYTHON38:-python3.8}" -c 'import sys; assert sys.version_info[:2] == (3, 8); print(sys.executable)')"
 RUN_DIR="$ROVER_DIR/gazebo_simple/run/ros_argo_lua"
-"$PY38" "$ROVER_DIR/python/simulation/prepare_ros_argo_lua.py" "$ROVER_DIR" "$RUN_DIR"
+AVOIDANCE=0
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == --avoidance ]]; then AVOIDANCE=1; else ARGS+=("$arg"); fi
+done
+set -- "${ARGS[@]}"
+if (( AVOIDANCE )); then
+  RUN_DIR="$ROVER_DIR/gazebo_simple/run/ros_argo_avoid"
+  "$PY38" "$ROVER_DIR/python/simulation/prepare_ros_argo_lua.py" "$ROVER_DIR" "$RUN_DIR" --avoidance
+else
+  "$PY38" "$ROVER_DIR/python/simulation/prepare_ros_argo_lua.py" "$ROVER_DIR" "$RUN_DIR"
+fi
 if [[ "${1:-}" == --prepare-only ]]; then exit 0; fi
 if ss -H -ltn 'sport = :5760' | grep -q .; then
   echo 'Ja existe um SITL na porta 5760. Encerre-o no terminal anterior antes de iniciar este perfil Lua.' >&2
@@ -49,7 +60,7 @@ echo "Use apenas apos encerrar o SITL anterior. O mundo ROS deve estar aberto."
 exec "$PY38" "$ROVER_DIR/../Tools/autotest/sim_vehicle.py" -v Rover \
   -I 0 --sysid=1 -L ARGO -f rover-skid --model gazebo-rover \
   --use-dir "$RUN_DIR" --add-param-file "$RUN_DIR/defaults.parm" --no-extra-ports \
-  --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14555 --out=udp:127.0.0.1:14556 \
+  --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14555 --out=udp:127.0.0.1:14556 --out=udp:127.0.0.1:14557 \
   --out=udp:192.168.0.131:14550 --out=udp:192.168.0.131:14551 \
   --mavproxy-args='--cmd="set mavfwd true; rc 1 1500; rc 3 1500"' "$@"
 
@@ -60,7 +71,7 @@ exec "$PY38" "$ROVER_DIR/../Tools/autotest/sim_vehicle.py" -v Rover \
 #   --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:14561 \
 #   --out=udp:192.168.0.131:14550 --out=udp:192.168.0.131:14561 ; exec bash"
 
-#gnome-terminal -- bash -c "sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 2 --instance 1 -f rover-skid --out=udp:127.0.0.1:14552 --out=udp:127.0.0.1:14572 --out=udp:192.168.0.131:14552 --sysid=2 --add-param-file nrover.param; exec bash"
+#gnome-terminal -- bash -c "sim_vehicle.py -L SEParnaiba -S 5 -v Rover --sysid 2 --instance 1 -f rover-skid --out=udp:127.0.0.1:14552 --out=udp:127.0.0.1:14572 --out=udp:192.168.0.131:14552 --sysid=2 --add-param-file nroverobst.param; exec bash"
 
 # # Terminal para o MAVProxy sim_vehicle.py -D 
 #--out=udpout:127.0.0.1:14550 --out=udpout:127.0.0.1:14551 --out=udpout:127.0.0.1:14552 --out=udp:192.168.0.131:14551 
@@ -111,10 +122,10 @@ exec "$PY38" "$ROVER_DIR/../Tools/autotest/sim_vehicle.py" -v Rover \
 #   --exec bash"
 
 # # Robô 1 (porta interna: 14551)
-# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --sysid 1 --instance 0 -f rover-skid --out=udp:127.0.0.1:14551 --add-param-file nrover.param
+# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --sysid 1 --instance 0 -f rover-skid --out=udp:127.0.0.1:14551 --add-param-file nroverobst.param
 
 # # Robô 2 (porta interna: 14552)
-# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --sysid 2 --instance 1 -f rover-skid --out=udp:127.0.0.1:14552 --add-param-file nrover.param
+# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --sysid 2 --instance 1 -f rover-skid --out=udp:127.0.0.1:14552 --add-param-file nroverobst.param
 
 # mavproxy.py --master=udp:127.0.0.1:14551 \
 #             --out=udp:192.168.0.131:14551 \
@@ -123,9 +134,9 @@ exec "$PY38" "$ROVER_DIR/../Tools/autotest/sim_vehicle.py" -v Rover \
 #             --console \
 #             --map
 # # Robô 1 (porta interna: 14551)
-# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --instance 0 -f rover-skid --out=udp:192.168.0.131:14550--console --map --add-param-file nrover.param
+# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --instance 0 -f rover-skid --out=udp:192.168.0.131:14550--console --map --add-param-file nroverobst.param
 
 # # Robô 2 (porta interna: 14552)
-# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --instance 1 -f rover-skid --out=udp:192.168.0.131:14551 --console --map --add-param-file nrover.param
+# sim_vehicle.py -L SEParnaiba -S 5 --mcast -v Rover --instance 1 -f rover-skid --out=udp:192.168.0.131:14551 --console --map --add-param-file nroverobst.param
 
 

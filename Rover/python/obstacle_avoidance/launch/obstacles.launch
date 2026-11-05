@@ -1,0 +1,5 @@
+<launch>
+  <arg name="config" default="$(find olhe_obstacle_avoidance)/config.yaml"/>
+  <node pkg="olhe_obstacle_avoidance" type="processor.py" name="olhe_obstacle_processor" output="screen" args="--config $(arg config)"/>
+  <node pkg="olhe_obstacle_avoidance" type="mavlink_bridge.py" name="olhe_obstacle_mavlink_bridge" output="screen" args="--config $(arg config)"/>
+</launch>

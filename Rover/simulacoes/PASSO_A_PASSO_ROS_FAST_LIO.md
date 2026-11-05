@@ -4,6 +4,83 @@ Este roteiro usa a instalação existente neste computador: ROS Noetic, Gazebo, 
 
 O roteiro descreve a instalação já preparada em `/home/grin`; não é uma instalação do Ubuntu ou do ROS em um computador novo. Não é necessário iniciar `roscore` separadamente: o `roslaunch` inicia o ROS master quando necessário.
 
+Para observar uma missão existente e entrar no contêiner, consulte [Espera automática de docking](docking/README%20DOCKING.md#espera-automática-para-docking-em-guided). A sequência completa ainda precisa ser validada em movimento.
+
+Para iniciar cada serviço manualmente, em seu próprio terminal, com ou sem desvio, consulte o [tutorial de serviços separados](TUTORIAIS_SERVICOS_SEPARADOS.md).
+
+## Inicialização completa em janelas separadas
+
+Depois de ligar o computador e entrar na sessão gráfica, abra um terminal com **Ctrl+Alt+T** e execute:
+
+```bash
+cd ~/ardupilot/Rover
+./iniciar_simulacao_completa.sh
+```
+
+O lançador abre o Gazebo e aguarda os tópicos do MID360 e da IMU; em seguida abre ArduRover/MAVProxy, FAST-LIO, percepção de obstáculos, mapa 2D, câmera e RViz. Também abre o QGroundControl, ou usa a janela já aberta. Os terminais mostram mensagens e erros de cada componente; acompanhe-os até a inicialização terminar. O rover não é armado e nenhuma missão é iniciada automaticamente.
+
+O lançador exige as dependências já instaladas e o binário SITL compilado, conforme a seção 1 abaixo. Ele se recusa a iniciar se já houver Gazebo, SITL ou `sim_vehicle.py` em execução; encerre a simulação anterior no terminal dela e execute o comando novamente. Se uma etapa expirar, confira a respectiva janela e encerre manualmente os componentes que já foram abertos.
+
+Para abrir menos janelas, combine as opções conforme necessário:
+
+```bash
+./iniciar_simulacao_completa.sh --sem-camera --sem-mapa --sem-rviz --sem-qgc
+```
+
+No terminal do FAST-LIO, verifique se `nuvens`, `imu`, `poses` e `enviadas` aumentam. Na janela **Percepção de obstáculos**, procure mensagens da ponte. Você também pode consultar em outro terminal:
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rostopic echo /olhe/obstacles/status
+```
+
+Em outro terminal, consulte `rostopic echo /olhe/obstacles/bridge_status`. `ENVIADO` indica envio ao MAVProxy; `COBERTURA_PARCIAL` indica setores sem retorno. O módulo utiliza a saída UDP **14557** do MAVProxy, enquanto o QGroundControl usa 14550, o MAVROS 14555 e o FAST-LIO 14556.
+
+**Desvio experimental habilitado:** o lançador inicia um perfil SITL separado com BendyRuler (`OA_TYPE=1`, `PRX1_TYPE=2`). A ponte envia setores observados, mas setores sem retorno permanecem desconhecidos e o ArduPilot os ignora. Não há parada automática validada por perda de percepção, e ainda não foi comprovada uma missão com desvio. Supervisione os testes no Gazebo. Veja o [manual e os resultados](obstacle_avoidance/README.md).
+
+Para encerrar, pressione **Ctrl+C** na janela de percepção, depois nas janelas do FAST-LIO, mapa e câmera, depois no SITL/MAVProxy e por último no Gazebo. Feche RViz e QGroundControl pelas próprias janelas. A janela de percepção encerra somente o módulo que ela iniciou. Também é possível encerrá-lo com `./start_obstacle_avoidance.sh --stop` em `~/ardupilot/Rover`.
+
+As seções seguintes mostram como iniciar e diagnosticar os componentes manualmente. Não as execute em paralelo com o lançador completo.
+
+### Alternativa: iniciar com `sim_1_gzrover.sh`
+
+Primeiro inicie o mundo ROS conforme a seção 2. Em outro terminal:
+
+```bash
+cd ~/ardupilot/Rover
+./sim_1_gzrover.sh
+```
+
+Esse lançador usa diretamente `Rover/nroverobst.param` e a EEPROM do diretório `Rover/`, abre o SITL/MAVProxy e, quando encontra o tópico do MID360, abre a janela **Percepção de obstáculos MID360**. Se a ponte já estiver ativa, reutiliza-a. O FAST-LIO, o mapa e a câmera ainda devem ser abertos separadamente conforme as seções seguintes.
+
+Para escolher outro arquivo, use `./sim_1_gzrover.sh --add-param-file nrover_sem_desvio.param`. Para executar o SITL no terminal atual e iniciar a ponte separadamente, acrescente `--foreground`. Confira sempre os valores gravados conforme o tutorial de serviços separados; sem `--foreground`, a janela de percepção continua sendo iniciada automaticamente mesmo ao escolher o arquivo sem desvio.
+
+Valores já gravados na EEPROM podem prevalecer sobre o arquivo de parâmetros. No console do MAVProxy, confirme `param show BATT_SOC_ALLOC`, `param show WP_SPEED`, `param show OA_TYPE` e `param show PRX1_TYPE`. A alocação Lua depende de `BATT_SOC_ALLOC=1`; este lançador não altera esse parâmetro automaticamente. A missão anterior permanece na EEPROM existente.
+
+O perfil `nroverobst.param` usa `AVOID_ENABLE=1`: a cerca permanece como
+entrada do desvio simples, enquanto a proximidade é tratada pelo BendyRuler.
+Com `AVOID_ENABLE=3` e margem de 2 m, observou-se que o desvio simples podia
+manter velocidade e giro em zero. Ao alterar parâmetros já gravados, confira
+também `param show AVOID_ENABLE` e `param show OA_TYPE` no MAVProxy.
+
+Se aparecer `PreArm: PRX1: No Data`, confira a janela de percepção e, em outro
+terminal com o ambiente ROS configurado, execute:
+
+```bash
+rostopic echo /olhe/obstacles/bridge_status
+```
+
+`SEM_MAVPROXY` indica falta de mensagens do MAVProxy na porta 14557;
+`SCAN_DESATUALIZADO` indica falta de nuvens recentes; `ENVIADO` indica que
+a ponte está enviando dados, mas não comprova a capacidade de desvio. No
+console do MAVProxy, confira `set mavfwd` e habilite o encaminhamento com
+`set mavfwd true` se necessário. Não desabilite a verificação PreArm para
+ocultar uma falha de percepção.
+
+O lançador testa se os dois nós respondem antes de reutilizá-los; um nome
+antigo ainda listado pelo ROS não é suficiente para considerar a ponte ativa.
+
 ## 1. Ligar o computador e abrir um terminal
 
 Entre na sessão gráfica do Ubuntu. Abra um terminal com **Ctrl+Alt+T**. Se houver Conda ativo, não é necessário removê-lo: os comandos de leitura ROS indicam explicitamente `/usr/bin/python3.8`. Não inicie outro Gazebo ou SITL para o mesmo rover ao mesmo tempo.
@@ -46,7 +123,8 @@ porta, com vão interno de 1 m de largura, 1 m de altura e 1 m de comprimento.
 Seu centro está em `x=5, y=-2` metros no referencial do Gazebo. A entrada
 fica em `x=4,5`, voltada para o lado de X menor; aproxime-se alinhado com
 `y=-2`, olhando na direção de X crescente. O QR na parede interna do fundo
-contém `ROVER_DOCKING_STATION_01`. O modelo tem colisões nas paredes, no
+contém `ROVER_DOCKING_STATION_01` e é o único QR no mundo `gravel_plane`.
+O modelo tem colisões nas paredes, no
 teto e no piso, e não executa docking automaticamente. Antes de entrar,
 confira se as dimensões do rover e seus sensores permitem a passagem.
 
@@ -57,10 +135,10 @@ Abra outro terminal. Execute:
 ```bash
 cd ~/ardupilot/Rover
 PYTHON38=/home/grin/.pyenv/versions/3.8.10/bin/python3.8 \
-  ./sim_gz1rover.sh --foreground --no-rebuild
+  ./sim_gz1rover.sh --foreground --no-rebuild --avoidance
 ```
 
-Aguarde o SITL e o prompt do MAVProxy iniciarem. Este comando usa a instalação Python 3.8 com MAVProxy, prepara os scripts Lua e os parâmetros da simulação ROS, e encaminha MAVLink para o QGroundControl e para o FAST-LIO. `--no-rebuild` pressupõe que o binário SITL já esteja compilado. Se estiver ausente, repita sem `--no-rebuild` para compilá-lo.
+Aguarde o SITL e o prompt do MAVProxy iniciarem. Este comando usa a instalação Python 3.8 com MAVProxy, prepara os scripts Lua e os parâmetros da simulação ROS, e encaminha MAVLink para o QGroundControl, FAST-LIO e percepção de obstáculos. `--no-rebuild` pressupõe que o binário SITL já esteja compilado. Se estiver ausente, repita sem `--no-rebuild` para compilá-lo.
 
 Se aparecer aviso de SITL na porta 5760, encerre o SITL anterior no terminal em que foi iniciado e repita. Deixe este terminal aberto. Não é necessário armar para verificar os sensores e a estimativa de posição.
 
@@ -83,6 +161,20 @@ nuvens=50 imu=500 poses=40 enviadas=40 descartadas=0 pose_FRD=[...]
 ```
 
 Os números variam. `nuvens` e `imu` devem aumentar; depois `poses` e `enviadas` também. No terminal do MAVProxy, procure `FAST-LIO: Lua pose available`. Se os valores de `enviadas` continuarem em zero, verifique se o Terminal 2 está ativo. Se aparecer `FAST-LIO: Lua pose stale`, a pose deixou de chegar ao Lua e deve ser verificada antes de utilizá-la.
+
+
+### Conferir a configuração de desvio
+
+No terminal do MAVProxy digite:
+
+```text
+param show OA_TYPE
+param show PRX1_TYPE
+param show OA_BR_LOOKAHEAD
+param show OA_MARGIN_MAX
+```
+
+Os valores esperados são 1, 2, 5 e 1. O perfil fica em `gazebo_simple/run/ros_argo_avoid/`, com EEPROM separada do perfil sem desvio. Os parâmetros iniciais são aplicados a uma EEPROM nova; se tiverem sido alterados nessa EEPROM, configure-os no MAVProxy e reinicie o SITL, pois `OA_TYPE` e `PRX1_TYPE` exigem reinicialização. `ENVIADO` no tópico da ponte não prova que o rover desviará nem confirma a segurança do caminho.
 
 ## 5. Acompanhar no QGroundControl
 
@@ -159,6 +251,10 @@ end
 ```
 
 A função retorna `nil` se não houver pose recente; o padrão considera dados com mais de 500 ms antigos. As posições estão em metros no referencial local FRD, com X para frente, Y para a direita e Z para baixo, definidos pela orientação inicial. A sessão muda quando a ponte reinicia; a origem também pode mudar. O código não implementa docking, não usa esses dados como posição do EKF e não garante precisão. Para mais detalhes consulte o [manual FAST-LIO e Lua](python/slam/fast_lio/README.pt-BR.md).
+
+Para a etapa experimental de entrada visual no contêiner após a aproximação,
+consulte o [manual de docking em GUIDED](docking/README%20DOCKING.md). Ela usa o QR e
+um programa Python separado; veja o resultado e os limites do ensaio no manual.
 
 ## 10. Encerrar tudo
 

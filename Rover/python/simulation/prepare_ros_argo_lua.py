@@ -27,11 +27,13 @@ def read_parameters(path):
     return values
 
 
-def prepare(rover, run):
+def prepare(rover, run, avoidance=False, legacy_profile=False):
     rover, run = Path(rover), Path(run)
     selected = read_parameters(rover / 'gazebo_simple/ros_argo_lua.parm')
-    values = read_parameters(rover / 'newrovergazebo.params')
+    values = read_parameters(rover / ('nroverobst.param' if legacy_profile else 'newrovergazebo.params'))
     values.update(selected)
+    if avoidance:
+        values.update(read_parameters(rover / 'python/obstacle_avoidance/bendyruler_sim.parm'))
     (run / 'scripts/modules').mkdir(parents=True, exist_ok=True)
     for name in ('system-start.lua', 'rover-controlallocation.lua', 'lidar_odometry.lua',
                  'modules/functions.lua', 'modules/pid.lua'):
@@ -62,4 +64,7 @@ return configure, 1500
 
 
 if __name__ == '__main__':
-    prepare(*sys.argv[1:])
+    args = sys.argv[1:]
+    if len(args) < 2 or any(a not in ('--avoidance', '--legacy-profile') for a in args[2:]):
+        raise SystemExit('Uso: prepare_ros_argo_lua.py ROVER RUN [--avoidance] [--legacy-profile]')
+    prepare(args[0], args[1], '--avoidance' in args[2:], '--legacy-profile' in args[2:])

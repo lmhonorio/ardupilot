@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<package format="2"><name>olhe_obstacle_avoidance</name><version>0.1.0</version><description>ROS Noetic MID360 obstacle sector bridge</description><maintainer email="grin@localhost">OLH-E</maintainer><license>MIT</license><exec_depend>rospy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>visualization_msgs</exec_depend></package>
