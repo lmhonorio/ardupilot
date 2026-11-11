@@ -1,13 +1,12 @@
 # Autotuning do Rover
 
-Este guia reúne a explicação teórica e prática dos dois autotunings implementados nesta branch. As instruções refletem o código atual em `Rover/scripts`; a seleção de tuning é feita por `SCR_USER1`, não por `SCR_USER6`.
+Este guia reúne a explicação teórica e prática dos três métodos de autotuning implementados nesta branch. O parâmetro `SCR_USER1` seleciona o método.
 
-| Método | Controlador ajustado | Resultado salvo em |
+| Método | Controlador ajustado | Resultado |
 |---|---|---|
 | Rover QuickTune | Controladores nativos de taxa de giro e velocidade do ArduPilot | `ATC_*`, `CRUISE_SPEED`, `CRUISE_THROTTLE` |
 | Autotune de yaw por relé | PI Lua que alinha o rover parado depois de um waypoint | `SCR_USER2` (P), `SCR_USER3` (I) |
-
-Os dois métodos são independentes. QuickTune não ajusta o PI de alinhamento de yaw; o autotune de yaw não ajusta `ATC_STR_RAT_*` nem `ATC_SPEED_*`.
+| Autotune por relé em Circle | Controlador nativo de taxa de giro do ArduPilot | `ATC_STR_RAT_P` e `ATC_STR_RAT_I`, com gravação automática via `RTUN_AUTO_SAVE` |
 
 ## 1. Antes de instalar ou testar
 
@@ -18,6 +17,7 @@ rover-controlallocation.lua
 rover-quicktune.lua
 system-start.lua
 modules/autotune.lua
+modules/circle-tune.lua
 modules/functions.lua
 modules/pid.lua
 ```
@@ -36,7 +36,8 @@ Confira que os arquivos instalados são desta branch. A documentação antiga us
 |---:|---|---|
 | 0 | Operação normal; yaw autotune inativo | Lê a posição da função de scripting RC definida por `RTUN_RC_FUNC` |
 | 1 | Apenas informa que QuickTune foi selecionado; segue controle normal | Inicia QuickTune automaticamente enquanto armado, em qualquer modo |
-| 2 | Executa o autotune de yaw enquanto armado, em qualquer modo | Deixa de usar seleção automática; consulta a chave RC |
+| 2 | Executa o autotune de yaw enquanto armado, em qualquer modo | Consulta a chave RC |
+| 3 | Executa o ensaio por relé quando o rover está armado em `CIRCLE` e a curva estabiliza | Suspende o QuickTune e reverte ajustes que ainda estavam pendentes |
 
 O script de yaw cria `YAWT_MAX_ANG` (padrão 45°), `YAWT_MAX_OUT` (padrão 20%) e `YAWT_GAIN_MULT` (padrão 1). A amplitude efetiva do relé é `YAWT_MAX_OUT / 100`, limitada a 5–45%. `YAWT_GAIN_MULT` multiplica P e I usados pelo PI de orientação; por exemplo, fator 10 aplica P=10 e I=5 se os ganhos base forem P=1 e I=0,5. Os ganhos base, sem multiplicador, continuam salvos em `SCR_USER2/3`.
 
@@ -80,7 +81,7 @@ Os filtros `FLTT` e `FLTD` são frequências em Hz e o QuickTune os define como 
 
 1. Faça o ensaio em área plana, ampla e livre de pessoas e obstáculos. O modo CIRCLE precisa de espaço para o círculo e para o erro de navegação; por exemplo, raio 4 m com margem de 4 m pede aproximadamente 16 × 16 m livres.
 2. Configure `CIRC_RADIUS` para um valor compatível com o rover e com a área disponível. O padrão do firmware é 20 m; um raio menor, como 4 m, só deve ser usado se o rover conseguir fazer essa curva sem patinar ou sair do controle.
-3. Configure `CIRC_SPEED` para a velocidade desejada do ensaio. Zero usa a velocidade padrão de navegação (`CRUISE_SPEED`/configuração do Rover).
+3. Configure `CIRC_SPEED` para a velocidade desejada do ensaio. Zero usa `WP_SPEED`. Como ponto de partida, use uma velocidade de até cerca de metade da máxima e um raio de pelo menos duas vezes o raio de giro do rover. O Circle lê essas configurações ao entrar no modo.
 4. Verifique previamente a base de velocidade, bateria, sentido dos motores, GPS/AHRS e parada de emergência. A mistura PWM customizada do `rover-controlallocation.lua` faz parte da planta que o QuickTune observa.
 
 ### Execução conforme o código atual
@@ -90,10 +91,18 @@ Os filtros `FLTT` e `FLTD` são frequências em Hz e o QuickTune os define como 
 3. Arme e selecione `CIRCLE` para o ensaio previsto. **O código não exige CIRCLE:** `SCR_USER1=1` inicia QuickTune assim que armado, qualquer que seja o modo. Não selecione `SCR_USER1=1` em campo sem já estar no modo e na área de teste pretendidos.
 4. Mantenha sticks de direção e throttle neutros. Uma entrada detectada pausa a coleta por quatro segundos após o último movimento.
 5. Monitore mensagens no GCS. QuickTune não gera o movimento; o rover deve estar efetivamente se movendo e virando para haver amostras válidas.
-6. Para abortar e restaurar os ganhos temporários, desarme ou coloque o seletor RC do QuickTune na posição baixa. **Mudar de CIRCLE para outro modo não é, por si só, uma condição de abort implementada.**
+6. Para abortar e restaurar os ganhos temporários, desarme. Se estiver usando a chave RC, a posição baixa também reverte os ganhos pendentes. Mudar de modo, por si só, permite que o QuickTune continue.
 7. Ao terminar as etapas selecionadas, os resultados são salvos após `RTUN_AUTO_SAVE` segundos (padrão 5). Se `RTUN_AUTO_SAVE=0`, use uma chave RC configurada para a função `RTUN_RC_FUNC`: posição 1 executa e posição 2 salva. Ao usar `SCR_USER1=1` automático, o script não apresenta uma forma RC de salvar; mantenha o auto save habilitado.
 
-O script QuickTune roda a 40 Hz para medir e atualizar os parâmetros. O alocador de motores continua escrevendo saídas a 5 Hz nos modos normais, então os ganhos obtidos precisam ser validados com o rover e sua mistura reais. Não assuma que a frequência do QuickTune seja a frequência de atualização PWM.
+O script QuickTune amostra e atualiza parâmetros a 40 Hz. O alocador Lua também atualiza suas saídas em `CIRCLE` a 40 Hz. Em modos como `AUTO` e `ACRO`, o alocador roda a 5 Hz.
+
+### Operação do QuickTune pela chave RC
+
+Com `SCR_USER1=0`, configure uma função de scripting em um canal RC. Por exemplo, use `RC6_OPTION=300` e `RTUN_RC_FUNC=300`. Se a função 300 estiver em uso, escolha outra, como 302, nos dois parâmetros.
+
+- **Baixa** cancela o ensaio e restaura os ganhos pendentes. Os ganhos já gravados permanecem salvos.
+- **Intermediária** inicia ou retoma o ensaio. Uma chave de duas posições pode usar baixa e intermediária com `RTUN_AUTO_SAVE` habilitado.
+- **Alta** pausa a coleta e grava os valores pendentes naquele momento, mesmo que o ensaio ainda esteja em andamento. Use uma chave de três posições se quiser salvar manualmente com `RTUN_AUTO_SAVE=0`.
 
 ### Mensagens e validação
 
@@ -110,6 +119,8 @@ RTun: tuning gains saved
 ```
 
 O QuickTune pode avisar que direção, taxa de giro, throttle ou velocidade estão baixos. Para taxa de giro, o código exige comando de direção ≥ 0,10 e taxa de giro > 10°/s, e coleta pelo menos dez segundos e o equivalente a duas voltas. Para velocidade, exige throttle ≥ 0,20, velocidade válida maior que `RTUN_SPEED_MIN` (padrão 0,5 m/s) e dez segundos de dados.
+
+Se as mensagens indicarem que o comando ou a resposta estão abaixo do mínimo, reveja a velocidade e o raio do Circle. O Mission Planner permite mudar a velocidade durante o teste com **Change Speed**. Se o rover tiver dificuldade para entrar no círculo ou acompanhá-lo mesmo com um raio adequado, revise a malha de posição. O guia do QuickTune cita `PSC_VEL_P=20` como exemplo para veículos muito lentos, abaixo de 0,4 m/s.
 
 Após salvar, compare os parâmetros antes/depois e valide uma missão em `AUTO`. Examine nos logs a taxa de giro desejada e medida, e velocidade desejada e medida. Refaça o tuning se mudar a alocação de motores, pneus, piso, carga ou condições que mudem significativamente a resposta.
 
@@ -140,13 +151,13 @@ Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `S
 ### Execução
 
 1. Escolha uma área plana, livre ao redor do rover, com margem para girar. Faça primeiro no SITL e depois em ambiente de teste controlado.
-2. Confirme que `SCR_USER1` não está em 1 e que o rover não está seguindo uma missão.
+2. Confirme que o rover está parado e fora de missão.
 3. Com o rover parado, selecione `HOLD`, arme e então coloque `SCR_USER1=2`. Como a implementação não exige HOLD, faça isso somente quando puder aceitar que o script tome os motores.
 4. Observe o rover: ele deve alternar giros ao redor do yaw inicial. Se o erro crescer continuamente, o sentido de controle ou a estimativa de yaw pode estar incorreto; interrompa o ensaio.
 5. Sucesso salva P base em `SCR_USER2`, I base em `SCR_USER3`, aplica o multiplicador e inicia a sequência automática de headings. O seletor volta a `SCR_USER1=0`. Falha zera a saída, mas não salva ganhos nem retorna automaticamente o seletor a zero.
-6. Para abortar durante execução, altere `SCR_USER1` para 0/1 ou desarme. O código não detecta saída de HOLD como cancelamento.
+6. Para abortar durante execução, altere `SCR_USER1` para 0 ou desarme. O código não detecta saída de HOLD como cancelamento.
 
-Mensagens incluem `YawTune: started`, progresso de erro/taxa/saída, `Ku`, `Pu`, amplitude, ganhos base/efetivos e o heading de cada etapa. Em falha, podem aparecer `inconsistent cycles`, `Pu out of range`, `amplitude below hysteresis`, `oscillation too large` ou `timeout`.
+Mensagens incluem `YawTune: started`, progresso de erro/taxa/saída, `Ku`, `Pu`, amplitude, ganhos base/efetivos e o heading de cada etapa. Em falha, podem aparecer `inconsistent cycles`, `Pu out of range`, `response amplitude too small for relay hysteresis`, `oscillation too large` ou `timeout`.
 
 ### Uso dos ganhos em missão
 
@@ -158,7 +169,7 @@ Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign targe
 
 | Parâmetro | Significado |
 |---|---|
-| `SCR_USER1` | Seletor compartilhado nesta branch: 0 = operação normal; 1 = QuickTune automático enquanto armado; 2 = autotune de yaw enquanto armado. |
+| `SCR_USER1` | Seletor compartilhado nesta branch: 0 = operação normal; 1 = QuickTune automático enquanto armado; 2 = autotune de yaw enquanto armado; 3 = autotune de taxa de giro enquanto armado em Circle. |
 | `SCR_USER2` | P do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
 | `SCR_USER3` | I do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
 | `YAWT_MAX_ANG` | Limite do erro angular do experimento; acima dele o autotune aborta. Padrão: 45°. |
@@ -167,7 +178,28 @@ Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign targe
 
 `SCR_USER2/3` não são parâmetros `ATC_*`. Eles só alimentam o `steering_steady_pid` usado para alinhamento após waypoint; não ajustam a navegação normal em `AUTO`.
 
-## 5. Parâmetros `RTUN_*` do QuickTune
+## 5. Autotune da taxa de giro por relé em Circle
+
+Este método roda em Lua com as APIs já disponíveis no firmware desta branch. Ele ajusta `ATC_STR_RAT_P` e `ATC_STR_RAT_I`, os mesmos ganhos de direção que o QuickTune pode ajustar.
+
+1. Atualize `rover-controlallocation.lua`, `rover-quicktune.lua`, `modules/autotune.lua` e `modules/circle-tune.lua` no cartão SD. Anote os ganhos P e I atuais antes do ensaio.
+2. Configure `CIRC_RADIUS` e `CIRC_SPEED`, selecione `CIRCLE` e arme com `SCR_USER1=3`. Deixe a saída dos motores habilitada e os comandos RC em neutro.
+3. Após a mensagem `CircleTune: waiting for stable Circle`, o alocador repassa os comandos nativos. O script espera três segundos de curva estável, com velocidade longitudinal de pelo menos 0,3 m/s, taxa de giro de pelo menos 3°/s em magnitude e desvio radial dentro do limite. A espera termina após 60 segundos se o ponto de operação não estabilizar.
+4. Quando aparecer `CircleTune: relay started`, o Lua alterna a direção em torno do comando médio medido. Com base de 30% e amplitude de 5 pontos percentuais, aplica 25% e 35%. O rover segue para a frente e tende a alternar entre curvas um pouco mais fechadas e mais abertas. O Circle continua regulando o throttle. O mixer pode fazer a velocidade variar junto com a direção.
+5. Ao aceitar os ciclos, o script aplica P/I em RAM e volta a repassar a saída de direção do PID nativo. O GCS informa os ganhos, `Ku` e `Pu`. Mantenha o rover armado em Circle durante `RTUN_AUTO_SAVE` segundos (padrão 5). Depois da espera, o script grava os dois ganhos e salva `SCR_USER1=0`. Com `RTUN_AUTO_SAVE=0`, os ganhos ficam em RAM e podem ser gravados pelo GCS.
+
+O relé comuta pela diferença entre a taxa de giro média e a medida, com histerese de 1°/s. Ele usa a regra PI da seção de yaw, agora com o erro em rad/s. Descarta dois ciclos e mede quatro. A validação exige período entre 0,5 e 20 s, amplitude acima de duas vezes a histerese e consistência de amplitude e período entre ciclos. O ensaio aceita erro de taxa de até 12°/s e tem timeout de 60 s a partir do início do relé.
+
+| Parâmetro | Padrão | Função |
+|---|---:|---|
+| `CTUN_RELAY` | 5 | Amplitude do relé em pontos percentuais do comando normalizado de direção. Aceita 1 a 20. |
+| `CTUN_RAD_ERR` | 2 m | Desvio radial máximo em relação à borda do círculo. Aceita valores positivos. |
+
+Para interromper o ensaio, mude o seletor, saia de Circle ou desarme. O Lua também interrompe a coleta se detectar parada de emergência, perda da medição, intervenção pelo RC, excesso de desvio radial ou variação de velocidade, atraso na amostragem ou ciclos inválidos. O PID nativo continua calculando a direção em segundo plano. Se esse comando se afastar mais de 15 pontos percentuais da base, o Lua encerra o relé e volta a usar o comando nativo. Se o ensaio for interrompido durante a espera pela gravação automática, o script restaura os ganhos anteriores. Para tentar novamente após um aborto, desarme ou tire o seletor de 3.
+
+O log `CRTU` registra a referência e a taxa de giro medida em rad/s, a velocidade em m/s, o desvio radial em metros, throttle, direção, PWM esquerdo e direito e o número do ciclo. A lógica foi verificada com sinais simulados em Lua. A resposta em SITL e no rover físico ainda precisa ser validada.
+
+## 6. Parâmetros `RTUN_*` do QuickTune
 
 O script cria estes parâmetros no primeiro boot em que carrega:
 
@@ -182,21 +214,22 @@ O script cria estes parâmetros no primeiro boot em que carrega:
 | `RTUN_SPD_P_RATIO` | 1,0 | Proporção usada para P de velocidade; 0 preserva P atual |
 | `RTUN_SPD_I_RATIO` | 1,0 | Proporção usada para I de velocidade; 0 preserva I atual |
 | `RTUN_AUTO_FILTER` | 1 | Ajusta `ATC_STR_RAT_FLTT/FLTD` a partir de `INS_GYRO_FILTER` |
-| `RTUN_AUTO_SAVE` | 5 s | Autosave após conclusão; 0 exige posição de salvar da chave RC |
-| `RTUN_RC_FUNC` | 300 | Função de scripting da chave RC para executar/salvar quando `SCR_USER1` não é 1 |
+| `RTUN_AUTO_SAVE` | 5 s | Espera para gravação automática no QuickTune e no relé em Circle. Zero desabilita a gravação automática. |
+| `RTUN_RC_FUNC` | 300 | Função de scripting da chave RC para executar ou salvar nos seletores 0 e 2 |
 | `RTUN_SPEED_MIN` | 0,5 m/s | Velocidade mínima para amostras de speed tuning |
 
-## 6. Arquivos e testes
+## 7. Arquivos e testes
 
 Arquivos necessários no cartão para estes recursos:
 
 - `scripts/rover-controlallocation.lua`
 - `scripts/rover-quicktune.lua`
 - `scripts/modules/autotune.lua`
+- `scripts/modules/circle-tune.lua`
 - `scripts/modules/functions.lua`
 - `scripts/modules/pid.lua`
 
-O QuickTune cria os parâmetros `RTUN_*` descritos na seção 5. `system-start.lua` só é necessário para os parâmetros customizados da aplicação de barco; o alocador Rover desta branch não depende de `BATT_SOC_SYSSTART`.
+O QuickTune cria os parâmetros `RTUN_*` descritos na seção 6. `system-start.lua` só é necessário para os parâmetros customizados da aplicação de barco; o alocador Rover desta branch não depende de `BATT_SOC_SYSSTART`.
 
 Os testes auxiliares em `Rover/tests/` simulam APIs Lua e podem ajudar a verificar a lógica local, mas não substituem SITL nem validação física. O alocador e a mistura PWM devem ser verificados com o arranjo de motores real.
 

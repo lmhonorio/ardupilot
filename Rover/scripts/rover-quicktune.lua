@@ -538,8 +538,8 @@ gcs:send_text(MAV_SEVERITY.INFO, string.format(
 local last_warning = get_time()
 function update()
 
-  -- exit immediately if not enabled
-  if RTUN_ENABLE:get() <= 0 then
+  local selector = param:get('SCR_USER1')
+  if RTUN_ENABLE:get() <= 0 and selector ~= 3 then
     return
   end
 
@@ -549,7 +549,10 @@ function update()
 
   -- SCR_USER1=1 starts QuickTune on arming, independent of driving mode.
   local sw_pos
-  if param:get('SCR_USER1') == 1 then
+  if selector == 3 then
+    -- Release pending QuickTune gains before the Circle relay measures the baseline.
+    sw_pos = 0
+  elseif selector == 1 then
     sw_pos = arming:is_armed() and 1 or 0
   else
     sw_pos = rc:get_aux_cached(RTUN_RC_FUNC:get())

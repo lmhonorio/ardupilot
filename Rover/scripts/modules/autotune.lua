@@ -32,6 +32,7 @@ local DEFAULTS = {
   timeout_s = 60,             -- abort if not finished in time
   min_period_s = 0.4,         -- sanity limits for Pu
   max_period_s = 20,
+  min_amp_ratio = 1,          -- minimum response amplitude relative to hysteresis
   max_spread = 0.25,          -- max relative deviation of Pu/amp between cycles
   kp_div = 3.2,               -- Tyreus-Luyben: Kp = Ku / 3.2
   ti_mul = 2.2,               -- Tyreus-Luyben: Ti = 2.2 * Pu
@@ -92,8 +93,8 @@ function Autotune:finish()
   if Pu < self.min_period_s or Pu > self.max_period_s then
     return self:fail(string.format("Pu out of range (%.2fs)", Pu))
   end
-  if a <= self.hyst_rad then
-    return self:fail("amplitude below hysteresis, increase relay")
+  if a <= self.min_amp_ratio * self.hyst_rad then
+    return self:fail("response amplitude too small for relay hysteresis")
   end
   local Ku = 4 * self.relay / (math.pi * math.sqrt(a * a - self.hyst_rad * self.hyst_rad))
   local Kp = Ku / self.kp_div
@@ -105,7 +106,7 @@ end
 
 --[[
 Run one step of the relay experiment
--- @param err number - yaw error (target - current) in rad, wrapped to [-pi, pi)
+-- @param err number - tracking error (target - measured), in the same units as the hysteresis
 -- @param dt number - time since the last step in s
 -- @return number, string - steering command and status
 --]]

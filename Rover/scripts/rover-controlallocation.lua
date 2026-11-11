@@ -13,6 +13,7 @@ package.path = package.path .. ';/scripts/modules/?.lua'
 local PID = require("pid")
 local funcs = require("functions")
 local Autotune = require("autotune")
+local CircleTune = require("circle-tune")
 -------------------------------------------------------------------------------
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
@@ -74,11 +75,11 @@ local radio_type = 0
 --   0 = normal operation
 --   1 = Pixhawk PID tune (Rover QuickTune) - starts while armed
 --   2 = yaw PI autotune (relay)            - starts while armed
--- After a successful tune the selector returns to 0 automatically.
--- Yaw autotune is selected only through SCR_USER1.
--- Results are saved to SCR_USER2 (P) and SCR_USER3 (I).
+--   3 = Circle steering-rate PI (relay)    - starts while armed in Circle
+-- Yaw autotune saves SCR_USER2 (P) and SCR_USER3 (I).
 local TUNE_SELECT_PARAM = 'SCR_USER1'
-local TUNE_MODE = { NORMAL = 0, PIXHAWK = 1, YAW = 2 }
+local TUNE_MODE = { NORMAL = 0, PIXHAWK = 1, YAW = 2, CIRCLE = 3 }
+local circle_tune = CircleTune:new()
 local AUTOTUNE_PERIOD_MS = UPDATE_PERIOD_MS
 
 -- Yaw autotune parameters
@@ -156,7 +157,8 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param t number - Throttle command from -1.0 to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
-local function applyControlAllocation(t, s)
+local function applyControlAllocation(t, s, timeout_ms)
+  timeout_ms = timeout_ms or 300
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
   -- 1 - 0     ^
@@ -171,10 +173,11 @@ local function applyControlAllocation(t, s)
   local pwm_max = PWM_TRIM_VALUE + pwm_range
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
-  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, 300)
-  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, 300)
+  SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, timeout_ms)
+  SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, timeout_ms)
+  SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, timeout_ms)
+  SRV_Channels:set_output_pwm_chan_timeout(3, pwm_r, timeout_ms)
+  return pwm_l, pwm_r
 end
 
 -------------------------------------------------------------------------------
@@ -466,10 +469,10 @@ end
 Pass the ArduRover internal controllers' outputs straight to the allocation
 (used by CIRCLE/ACRO/RTL, e.g. during Rover QuickTune)
 --]]
-local function applyPWMInternalControl()
+local function applyPWMInternalControl(timeout_ms)
   local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-  applyControlAllocation(throttle, steering)
+  applyControlAllocation(throttle, steering, timeout_ms)
 end
 
 --[[
@@ -565,6 +568,7 @@ local function update()
     last_nav_idx = nil
     autotune:reset()
     autotune_done = false
+    circle_tune:reset("disarmed")
     notArmed()
     return update, 2000
   end
@@ -592,9 +596,26 @@ local function update()
     autotune:reset()
     autotune_done = false
   elseif selector == TUNE_MODE.YAW then
+    circle_tune:reset("selector changed")
     runYawAutotune()
     if autotune.status == "fail" or autotune_done then applyControlAllocation(0, 0) end
     return update, AUTOTUNE_PERIOD_MS
+  end
+  if selector ~= TUNE_MODE.CIRCLE then
+    circle_tune:reset("selector changed")
+  elseif vehicle_mode == DRIVING_MODES.CIRCLE then
+    local throttle = vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)
+    local native_steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
+    local steering, allow_output = circle_tune:update(throttle, native_steering, throttle_max_lua_param:get())
+    if allow_output then
+      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60)
+      if steering then
+        circle_tune:log_sample(throttle, steering, pwm_l, pwm_r)
+      end
+    end
+    return update, CircleTune.PERIOD_MS
+  else
+    circle_tune:cancel("left Circle")
   end
   if vehicle_mode == DRIVING_MODES.MANUAL then
     applyPWMManualMode()
@@ -609,8 +630,11 @@ local function update()
   elseif vehicle_mode == DRIVING_MODES.SIMPLE then
     applyPWMInternalControl()
     return update, 200
-  elseif vehicle_mode == DRIVING_MODES.CIRCLE or vehicle_mode == DRIVING_MODES.ACRO
-      or vehicle_mode == DRIVING_MODES.RTL then
+  elseif vehicle_mode == DRIVING_MODES.CIRCLE then
+    -- Keep the same actuator update period used to identify the steering loop.
+    applyPWMInternalControl(60)
+    return update, CircleTune.PERIOD_MS
+  elseif vehicle_mode == DRIVING_MODES.ACRO or vehicle_mode == DRIVING_MODES.RTL then
     applyPWMInternalControl()
     return update, 200
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
