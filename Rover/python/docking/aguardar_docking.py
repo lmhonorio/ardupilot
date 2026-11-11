@@ -1,6 +1,5 @@
 """Espera GUIDED e proximidade da estacao do cenario SEParnaiba (SITL)."""
 import math
-import json
 import os
 from pathlib import Path
 import signal
@@ -8,7 +7,15 @@ import subprocess
 import sys
 import time
 
+# Direct execution must load Jazzy and the project's Python environment before
+# importing pymavlink. Imports from entrar_container keep using monitorar below.
+if __name__ == '__main__':
+    launcher = Path(__file__).resolve().parents[2] / 'ros2' / 'service.sh'
+    os.execv('/bin/bash', ['bash', str(launcher), 'docking-qr', *sys.argv[1:]])
+
 os.environ['MAVLINK20']='1'
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.docking_stations import load_stations, select_station, nearest_station
 from pymavlink import mavutil
 
 # Centro (x=5 m, y=-2 m) do container no gravel_plane, a partir de SEParnaiba.
@@ -42,7 +49,7 @@ def trigger_state(latest, seen, now, blocked, stations=None):
         return False, None, 'aguardando GPS 3D'
     if not stations:
         return False, None, 'sem estacoes cadastradas'
-    station=min(stations,key=lambda s:distance_m(pos.lat/1e7,pos.lon/1e7,s['latitude'],s['longitude']))
+    station=nearest_station(stations,pos.lat/1e7,pos.lon/1e7)
     distance=distance_m(pos.lat/1e7,pos.lon/1e7,station['latitude'],station['longitude'])
     if distance>=MAX_DISTANCE:
         return False, distance, 'fora dos 8 m'
@@ -50,25 +57,12 @@ def trigger_state(latest, seen, now, blocked, stations=None):
 
 
 
-def load_stations(path):
-    data=json.loads(Path(path).read_text())
-    stations=data.get('estacoes')
-    if not isinstance(stations,list) or not stations:
-        raise ValueError('Cadastre ao menos uma estacao em '+str(path))
-    for station in stations:
-        lat=float(station['latitude']); lon=float(station['longitude'])
-        offset=float(station['distancia_alvo_parede_m'])
-        if not (math.isfinite(lat) and -90<=lat<=90 and math.isfinite(lon) and -180<=lon<=180
-                and math.isfinite(offset) and 0<offset<5 and station['qr'] and station['nome']):
-            raise ValueError('Cadastro de estacao invalido')
-        station.update(latitude=lat,longitude=lon,distancia_alvo_parede_m=offset)
-    return stations
-
-
 def monitorar(args):
     """Observa apenas o SITL; uma tentativa por entrada em GUIDED."""
     signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
     stations=load_stations(args.estacoes)
+    if getattr(args,'estacao',None):
+        stations=[select_station(stations,args.estacao)]
     blocked=False
     print('Aguardando GUIDED e menos de 8 m do centro do container (GPS SEParnaiba).',flush=True)
     print('Mantenha o rover parado ao ativar GUIDED; o QR sera procurado.',flush=True)
@@ -120,10 +114,14 @@ def monitorar(args):
                 continue
             # Libera a porta UDP antes do controlador visual abrir sua conexao.
             cmd=[sys.executable,str(Path(__file__).with_name('entrar_container.py')),
-                 '--uma-vez','--apenas-guided','--mavproxy',args.mavproxy,'--sysid',str(args.sysid),
+                 '--uma-vez','--apenas-guided','--namespace',args.namespace,'--mavproxy',args.mavproxy,'--sysid',str(args.sysid),
+                 '--estacoes',str(args.estacoes),'--estacao',reason['nome'],
                  '--velocidade',str(args.velocidade),'--timeout',str(args.timeout),
                  '--qr',reason['qr'],'--offset-parede',str(reason['distancia_alvo_parede_m']),
                  '--latitude-estacao',str(reason['latitude']),'--longitude-estacao',str(reason['longitude'])]
+            heading=getattr(args,'rumo_estacao',None)
+            if heading is None:heading=reason.get('rumo_entrada_graus')
+            if heading is not None:cmd.extend(['--rumo-estacao',str(heading)])
             try:
                 child=subprocess.Popen(cmd)
             except OSError as exc:

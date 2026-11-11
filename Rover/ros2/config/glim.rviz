@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: glim_map
+    Frame Rate: 20
+    Background Color: 35; 35; 35
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grade
+      Enabled: true
+      Plane: XY
+      Cell Size: 1
+    - Class: rviz_default_plugins/PointCloud2
+      Name: GLIM mapa global corrigido
+      Enabled: true
+      Topic:
+        Value: /glim_ros/map
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 3
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz_default_plugins/PointCloud2
+      Name: GLIM varredura atual
+      Enabled: true
+      Topic:
+        Value: /glim_ros/points
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 4
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 255; 220; 60
+    - Class: rviz_default_plugins/Pose
+      Name: GLIM pose corrigida
+      Enabled: true
+      Topic:
+        Value: /glim_ros/pose
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Shape: Axes
+    - Class: rviz_default_plugins/TF
+      Name: Referenciais GLIM
+      Enabled: false
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 15
+      Pitch: 0.65
+      Yaw: 0.6
+      Focal Point: {X: 0, Y: 0, Z: 0}
+Window Geometry:
+  Width: 1280
+  Height: 800

@@ -1,0 +1,22 @@
+# Somente ganhos de navegacao; carregar pelo MAVProxy com rover desarmado.
+# Validacao: simulacoes/AJUSTE_NAVEGACAO_20261105.md
+# Nao altera missao, sensores, desvio ou habilitacao da alocacao Lua.
+ATC_STR_RAT_FF      0.400000
+ATC_STR_RAT_I       0.050000
+ATC_STR_RAT_P       0.400000
+PSC_POS_P           0.600000
+ATC_SPEED_I         1.000000
+ATC_STOP_SPEED      0.050000
+WP_SPEED            1.500000
+PSC_VEL_P           2.000000
+WP_PIVOT_RATE       30.000000
+WP_PIVOT_DELAY      2.000000
+WP_RADIUS           0.300000
+WP_PIVOT_ANGLE      60.000000
+ATC_STR_RAT_D       0.000000
+ATC_STR_RAT_FLTE    10.000000
+ATC_STR_ANG_P       1.000000
+ATC_STR_RAT_MAX     60.000000
+ATC_SPEED_P         0.200000
+PSC_VEL_I           0.000000
+PSC_VEL_D           0.000000

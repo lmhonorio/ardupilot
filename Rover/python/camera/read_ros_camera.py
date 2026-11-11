@@ -1,5 +1,8 @@
 #!/usr/bin/python3
-"""View the ROS Argo rover cameras using ROS Noetic and Python 3.8."""
+"""View the ROS Argo rover cameras using ROS 2 Jazzy and Python 3.12."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -39,24 +42,18 @@ def main(argv=None):
     args = arguments(argv)
     try:
         import cv2
-        import rospy
+        from common import ros2_runtime as ros
         from cv_bridge import CvBridge, CvBridgeError
         from sensor_msgs.msg import Image
     except ImportError as exc:
-        print('Dependencia indisponivel: %s\nCarregue o ROS e execute com /usr/bin/python3.8.' % exc,
+        print('Dependencia indisponivel: %s\nCarregue o ROS e execute com /usr/bin/python3.' % exc,
               file=sys.stderr)
         return 1
 
-    try:
-        rospy.get_master().getPid()
-    except Exception as exc:
-        print('ROS master indisponivel. Inicie o roslaunch primeiro: %s' % exc,
-              file=sys.stderr)
-        return 1
-    rospy.init_node('rover_camera_reader', anonymous=True)
+    ros.init_node('rover_camera_reader', anonymous=True)
     if args.list:
-        topics = [(name, kind) for name, kind in rospy.get_published_topics('/')
-                  if kind == 'sensor_msgs/Image']
+        topics = [(name, kind) for name, kind in ros.get_published_topics('/')
+                  if kind == 'sensor_msgs/msg/Image']
         for name, _ in sorted(topics):
             print(name)
         if not topics:
@@ -73,7 +70,7 @@ def main(argv=None):
         try:
             frame = bridge.imgmsg_to_cv2(message, desired_encoding='bgr8').copy()
         except CvBridgeError as exc:
-            rospy.logwarn_throttle(5, 'Falha ao converter imagem: %s', exc)
+            ros.logwarn_throttle(5, 'Falha ao converter imagem: %s', exc)
             return
         with lock:
             latest.update(frame=frame, received=time.monotonic(),
@@ -81,7 +78,7 @@ def main(argv=None):
                           encoding=message.encoding)
 
     # Keep only the latest image; enough receive buffer for 1920x1080 RGB.
-    subscriber = rospy.Subscriber(topic, Image, receive, queue_size=1, buff_size=32 * 1024 * 1024)
+    subscriber = ros.Subscriber(topic, Image, receive, queue_size=1, buff_size=32 * 1024 * 1024)
     show = not args.headless and args.snapshot is None
     window = 'Camera do rover — Q/ESC: sair | S: salvar'
     print('Lendo %s' % topic, flush=True)
@@ -101,7 +98,7 @@ def main(argv=None):
         if show:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window, 960, 540)
-        while not rospy.is_shutdown():
+        while not ros.is_shutdown():
             with lock:
                 frame, count = latest['frame'], latest['count']
                 received, frame_id, encoding = latest['received'], latest['frame_id'], latest['encoding']
@@ -148,7 +145,7 @@ def main(argv=None):
         subscriber.unregister()
         if show:
             cv2.destroyAllWindows()
-        rospy.signal_shutdown('Leitor de camera encerrado')
+        ros.signal_shutdown('Leitor de camera encerrado')
     return result
 
 

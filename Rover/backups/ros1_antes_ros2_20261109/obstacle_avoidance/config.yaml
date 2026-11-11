@@ -1,0 +1,22 @@
+processing:
+  rate_hz: 10
+  sectors: 72
+  angle_increment_deg: 5
+  min_distance_m: 0.5
+  max_distance_m: 25.0
+  voxel_size_m: 0.10 # reserved: minima must not be averaged away
+  temporal_window_s: 0.30 # tempo ROS maximo de uma nuvem
+  wall_timeout_s: 0.50 # detecta perda de dados mesmo com o relogio ROS pausado
+  lidar_offset_m: [-0.003, 0.0, 0.434]
+  min_height_base_m: -0.08
+  max_height_base_m: 0.9
+  self_half_length_m: 0.30
+  self_half_width_m: 0.26
+  cloud_topic: /rover_argo_N1/Instance1/livox/lidar
+  scan_topic: /olhe/obstacles/scan
+  frame_id: base_link
+mavlink:
+  endpoint: udpin:127.0.0.1:14557
+  source_system: 246
+  source_component: 198
+  min_observed_sectors: 1 # experimental SITL: setores desconhecidos continuam 65535

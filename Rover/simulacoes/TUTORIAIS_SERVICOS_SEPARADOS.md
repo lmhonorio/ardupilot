@@ -1,132 +1,82 @@
-# Simulação ROS: um serviço por terminal
+# Serviços separados — ROS 2 Jazzy / Gazebo Harmonic
 
-Este roteiro usa ROS Noetic, Gazebo Classic, o mundo `gravel_plane`, o ArduRover, MAVProxy e Python 3.8 instalados neste computador. Mantenha cada terminal aberto e inicie os serviços na ordem. Não execute este roteiro ao mesmo tempo que `iniciar_simulacao_completa.sh` ou outro SITL/Gazebo.
+Para o ciclo integrado de missão, entrada por LiDAR com QR opcional, recarga
+simulada e saída antes de AUTO, siga o
+[tutorial do Mission Manager](mission_manager/TUTORIAL.md). Veja também a
+[arquitetura](mission_manager/ARQUITETURA.md) e os [testes](mission_manager/TESTES.md).
 
-Escolha **com desvio** ou **sem desvio** no Terminal 2. O primeiro arquivo é `nroverobst.param`; o segundo é `nrover_sem_desvio.param`, com os mesmos parâmetros de controle e `OA_TYPE=0`, `PRX1_TYPE=0`, `AVOID_ENABLE=0`. Desligar `AVOID_ENABLE` também desliga o uso da cerca pelo desvio simples. Sem desvio o rover pode colidir com os obstáculos.
+O fluxo atualizado está em [ROS2_JAZZY.md](ROS2_JAZZY.md): instalação e compilação, cada serviço em um terminal, perfis com/sem desvio, FAST-LIO, GLIM, mapas, câmera e docking.
 
-Os arquivos passados com `--add-param-file` fornecem valores iniciais; os parâmetros gravados anteriormente na EEPROM `Rover/eeprom.bin` podem prevalecer. Os dois comandos abaixo usam a **mesma EEPROM e missão** e não apagam nenhuma delas. Confira os valores no MAVProxy conforme o Terminal 2, inclusive ao trocar de perfil.
-
-## Terminal 1 — Gazebo, mundo e sensores
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-roslaunch rover_argo_gazebo multi_rover_argo.launch \
-  N:=1 world_name:=gravel_plane start_x:=0 start_y:=0 z:=0 \
-  mid360_enabled:=true insta360_enabled:=true \
-  samsung_s23_ultra_cam_enabled:=true hokuyo_enabled:=true
-```
-
-Aguarde o mundo e o rover aparecerem. Este comando inicia o ROS master se necessário. O contêiner fica em `(5,-2)` m; sua abertura fica em `x=4,5 m`.
-
-## Terminal 2 — ArduRover, Lua e MAVProxy
-
-Em **outro** terminal, escolha um comando:
-
-**Com desvio:**
+Instale e compile uma vez antes de seguir os comandos. O estado dos testes está registrado no guia principal. Não misture os comandos anteriores `source /opt/ros/noetic`/`roslaunch` com o novo ambiente.
 
 ```bash
 cd ~/ardupilot/Rover
+sudo bash ros2/install_ros2.sh
+./ros2/build.sh
+```
+
+Depois da compilação, um comando em cada terminal:
+
+```bash
+./ros2/service.sh gazebo
 ./sim_1_gzrover.sh --foreground --add-param-file nroverobst.param
+./ros2/service.sh mavros
+./ros2/service.sh obstaculos
+./ros2/service.sh fastlio
+./ros2/service.sh mapa
+./ros2/service.sh camera
+./ros2/service.sh rviz
 ```
 
-**Sem desvio:**
+Sem desvio, troque o arquivo por `nrover_sem_desvio.param` e omita o serviço `obstaculos`. Os comandos listados acima não devem ser colados juntos em um único terminal: cada serviço permanece em execução.
+
+Os perfis `nroverobst.param`, `nrover_sem_desvio.param` e `navegacao_gazebo.param`
+usam `WP_SPEED = 1.5` para a velocidade nominal de missão, em m/s. Curvas,
+aproximação dos waypoints e obstáculos podem reduzir a velocidade efetiva.
+As velocidades comandadas pelas rotinas de docking continuam próprias dessas rotinas.
+
+As câmeras Samsung e Insta360 usam **640 × 360 a 30 FPS**, com o mesmo campo de visão. A **Insta360 fica desligada por padrão**, também ao usar `iniciar_simulacao_completa.sh`. Para habilitá-la, inicie o Gazebo com `./ros2/service.sh gazebo insta360_enabled:=true`.
+
+A resolução foi reduzida no sensor simulado, não apenas na janela: são nove vezes menos pixels por imagem. Reinicie a simulação para aplicar as mudanças; abrir novamente só o leitor de câmera ou o RViz não altera um mundo já carregado. O docking usa a calibração publicada em `camera_info`, mas o QR pode ser detectável a uma distância menor com essa resolução.
+
+## Docking em outro terminal
+
+O procedimento completo, incluindo ativação pelo MAVProxy e troca do monitor
+de entrada pela rotina de saída, está no
+[tutorial de entrada e saída do docking](docking/TUTORIAL_ENTRADA_SAIDA_ROS2.md).
+
+As estações e seus eixos de entrada ficam em [estacoes_recarga.txt](../estacoes_recarga.txt).
+Veja [como cadastrar os pontos a 4 m e 2 m e o QR](docking/CADASTRO_ESTACOES.md).
+
+Com os serviços acima ativos, verifique os sensores antes de iniciar o controlador:
 
 ```bash
 cd ~/ardupilot/Rover
-./sim_1_gzrover.sh --foreground --add-param-file nrover_sem_desvio.param
+./ros2/service.sh docking-qr --diagnostico
 ```
 
-`--foreground` mantém SITL e MAVProxy neste terminal e não abre a ponte de obstáculos automaticamente. O script usa o Python 3.8 da instalação pyenv, a posição `SEParnaiba`, a EEPROM e os scripts Lua do diretório `Rover`. Sem `--foreground`, o script abre outra janela e tenta iniciar a percepção automaticamente; sem `--add-param-file`, usa `nroverobst.param`. Um caminho absoluto para outro arquivo também é aceito.
+Depois, mantenha o monitor aberto com `./ros2/service.sh docking-qr`. Ele observa
+a telemetria e inicia a entrada quando o rover estiver armado, em GUIDED e a
+menos de 8 m de uma estação cadastrada. Não cria missão. Para a alternativa
+LiDAR, com FAST-LIO e mapa ativos, use primeiro
+`./ros2/service.sh docking-lidar --diagnostico` e depois
+`./ros2/service.sh docking-lidar`. Execute apenas um controlador de docking.
 
-Os perfis de simulação usam `WP_SPEED=0.4`, `WP_RADIUS=0.3`, `WP_PIVOT_ANGLE=60`, `ATC_STR_RAT_MAX=60` e `MOT_STR_THR_MIX=0.7` como ponto inicial de teste para a trajetória. Não são valores otimizados. A alocação Lua utiliza `MOT_STR_THR_MIX` para dar prioridade à direção quando os motores saturam; o seguimento da trajetória é feito pelo ArduRover. A EEPROM existente pode manter os valores anteriores; no MAVProxy, com o rover parado, confira e, se necessário, configure individualmente com `param set`. Isso modifica os valores persistentes do SITL.
-
-Aguarde o prompt `MAV>` e confira os parâmetros neste próprio console:
-
-```text
-param show OA_TYPE
-param show PRX1_TYPE
-param show AVOID_ENABLE
-param show BATT_SOC_ALLOC
-```
-
-| Perfil | OA_TYPE | PRX1_TYPE | AVOID_ENABLE |
-| --- | ---: | ---: | ---: |
-| Com desvio | 1 | 2 | 1 |
-| Sem desvio | 0 | 0 | 0 |
-
-Se os valores não coincidirem, ajuste-os no prompt MAVProxy **com o rover desarmado** usando `param set NOME VALOR`, para cada parâmetro divergente. Encerre esse SITL com Ctrl+C, reinicie o mesmo comando do Terminal 2 e confira novamente. `OA_TYPE` e `PRX1_TYPE` exigem reinicialização. Não use `-w`: apagaria a EEPROM e parâmetros/missão armazenados. A alocação Lua depende de `BATT_SOC_ALLOC=1`; confirme também as mensagens de inicialização do script Lua.
-
-## Terminal 3 — percepção de obstáculos, somente com desvio
-
-Após o Terminal 2 estar pronto, abra outro terminal:
+Na entrada por QR, o limite padrão de aproximação é **0,25 m/s**, com limite
+de **0,18 m/s na entrada** e redução progressiva junto ao centro. O controlador
+alinha o rover ao eixo da estação, acompanha o QR com o pan/tilt e confirma a
+pose após parar antes de desarmar. Para reduzir esses limites, por exemplo:
 
 ```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-cd ~/ardupilot/Rover
-/usr/bin/python3.8 python/obstacle_avoidance/manager.py
+./ros2/service.sh docking-qr --velocidade 0.15
 ```
 
-O processo mantém o processamento do MID360 e a ponte MAVLink ativos neste terminal. Não inicie também `start_obstacle_avoidance.sh` ou outra cópia do módulo. No perfil sem desvio, não execute este terminal; o LiDAR continua disponível para FAST-LIO e mapa.
+Ao atualizar os arquivos, encerre o monitor anterior com Ctrl+C e abra-o
+novamente para carregar o código novo.
 
-Para verificar o envio, use um terminal adicional:
+A revisão foi validada em seis entradas completas no Harmonic. Veja as
+[trajetórias, erros medidos e limites dos ensaios](docking/VALIDACAO_ALINHAMENTO_VELOCIDADE_ROS2.md).
 
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-rostopic echo /olhe/obstacles/bridge_status
-```
-
-`ENVIADO` confirma o envio à porta 14557 do MAVProxy; não comprova que o desvio funcione em todas as situações. `SEM_MAVPROXY` ou `SCAN_DESATUALIZADO` indicam falha de conexão ou de dados. Em `PreArm: PRX1: No Data`, verifique a percepção, o MID360 e `set mavfwd` no MAVProxy. A percepção é experimental e a parada por perda de dados não foi validada.
-
-## Terminal 4 — FAST-LIO
-
-Com Gazebo e MAVProxy ativos, mantenha o rover parado e execute em outro terminal:
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-cd ~/ardupilot/Rover
-/usr/bin/python3.8 python/slam/fast_lio/run_fast_lio.py
-```
-
-Confira que `nuvens`, `imu`, `poses` e `enviadas` aumentam. O FAST-LIO encaminha a pose ao Lua pela porta 14556; não substitui automaticamente a posição do EKF. Se necessário, confira `rostopic hz /rover_argo_N1/Instance1/livox/imu` e `rostopic echo -n 1 /fast_lio/odometry` em outro terminal com os dois `source` acima.
-
-## Terminal 5 — mapa 2D, opcional
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-cd ~/ardupilot/Rover
-/usr/bin/python3.8 python/slam/slam_mid360_2d.py
-```
-
-O Hector Mapping usa o MID360 para gerar um mapa 2D próprio. Na janela, `S` salva e `Q` salva e encerra; o mapa e o referencial são independentes dos do FAST-LIO.
-
-## Terminal 6 — câmera, opcional
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-cd ~/ardupilot/Rover
-/usr/bin/python3.8 python/camera/read_ros_camera.py
-```
-
-Para sair do contêiner em ré e girar 180°, consulte [Saída do contêiner](docking/README%20DOCKING.md#saída-do-contêiner-de-ré).
-
-## Terminal 7 — RViz, opcional
-
-```bash
-source /opt/ros/noetic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-rviz
-```
-
-Configure o referencial e os tópicos adequados ao mapa ou à nuvem que deseja observar. Abra o QGroundControl pelo menu ou atalho habitual; o MAVProxy envia telemetria para UDP local 14550.
-
-## Missão e encerramento
-
-Depois de conferir GPS, EKF e PreArm, o QGroundControl pode ser usado para acompanhar e enviar missões. Inicie a [espera automática](docking/README%20DOCKING.md#espera-automática-para-docking-em-guided) em outro terminal. Ela observa GUIDED e a distância inferior a 8 m da estação, sem depender de missão ou waypoint. Para a missão de volta própria, consulte a [volta e entrada automática](docking/README%20DOCKING.md#volta-e-entrada-automática-no-contêiner); não execute ambos na mesma porta. A sequência completa de volta e entrada ainda não foi validada em movimento.
-
-Para encerrar, pressione Ctrl+C no terminal de percepção, FAST-LIO, mapa e câmera; depois no Terminal 2 e por último no Terminal 1. Feche RViz e QGroundControl pelas próprias janelas. Caso o console do MAVProxy não encerre com Ctrl+C, digite `exit` nele e aguarde o SITL terminar.
+Comandos de saída, observação do QR, configuração dos tópicos e solução de
+problemas estão em [Docking no ROS 2](<docking/README DOCKING.md#executar-os-scripts-no-ros-2>).
+Os atalhos já selecionam o Python 3.12 do ambiente Jazzy; não use Python 3.8.

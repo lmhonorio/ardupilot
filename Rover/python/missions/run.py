@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """Circle + circumscribed square, measured and tuned through MAVProxy UDP."""
 import argparse
 import csv

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """Regenerate the wall texture using the OpenCV already installed in Python 3.8."""
 import argparse
 from pathlib import Path

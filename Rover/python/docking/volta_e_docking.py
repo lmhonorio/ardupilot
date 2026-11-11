@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """Simulacao: missao AUTO de volta e posterior entrada visual GUIDED."""
 import argparse
 from datetime import datetime
@@ -14,6 +14,8 @@ from pymavlink import mavutil
 
 PYTHON_DIR=Path(__file__).resolve().parents[1]
 ROVER=PYTHON_DIR.parent
+sys.path.insert(0,str(PYTHON_DIR))
+from common.docking_stations import DEFAULT_STATIONS, load_stations, select_station
 sys.path.insert(0,str(PYTHON_DIR/'missions'))
 from mavproxy_link import Link, json_safe
 
@@ -36,8 +38,14 @@ def main():
     p.add_argument('--mavproxy',default='udpin:127.0.0.1:14551')
     p.add_argument('--sysid',type=int,default=1)
     p.add_argument('--timeout',type=float,default=300)
+    p.add_argument('--namespace',default='/rover_argo_N1/Instance1',help='Namespace ROS 2 da camera e juntas')
+    p.add_argument('--estacoes',default=str(DEFAULT_STATIONS))
     a=p.parse_args()
     if not a.mavproxy.startswith('udpin:127.0.0.1:') or not 1<=a.sysid<=255 or a.timeout<=0: p.error('Endpoint local, sysid e timeout invalidos')
+    # This predefined mission approaches this station specifically. Validate
+    # its registration before any mission upload, even with multiple stations.
+    try:station=select_station(load_stations(a.estacoes),'container_gravel_plane')
+    except (OSError,ValueError) as exc:p.error(str(exc))
     root=PYTHON_DIR/'run/docking'/('volta_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     root.mkdir(parents=True,exist_ok=True)
     items=read_wpl(ROVER/'simulacoes/docking/volta_docking.waypoints')
@@ -84,7 +92,8 @@ def main():
         link.close();closed=True
         print('Iniciando entrada visual GUIDED...',flush=True)
         result=subprocess.call([sys.executable,str(PYTHON_DIR/'docking/entrar_container.py'),
-                                '--uma-vez','--sysid',str(a.sysid),'--mavproxy',a.mavproxy])
+                                '--estacoes',a.estacoes,'--estacao',station['nome'],
+                                '--uma-vez','--namespace',a.namespace,'--sysid',str(a.sysid),'--mavproxy',a.mavproxy])
         if result: raise RuntimeError('Entrada visual interrompida; veja log acima')
         print('Sequencia AUTO e entrada visual concluida.',flush=True)
         return 0

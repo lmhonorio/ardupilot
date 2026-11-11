@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
-ROVER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "${PYTHON38:-python3.8}" "$ROVER_DIR/python/missions/run.py" "$@"
+set -e
+DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/ros2/setup.bash"
+exec "$DIR/ros2/venv/bin/python" "$DIR/python/missions/run.py" "$@"

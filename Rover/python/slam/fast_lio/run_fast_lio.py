@@ -16,9 +16,9 @@ import time
 import numpy as np
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PYTHON_DIR))
-sys.path.insert(0, '/home/grin/scanner_ws/devel/lib/python3/dist-packages')
 from common.ros_cloud import cloud_xyz, subscribe_cloud
-from install_fast_lio import BINARY as FAST_LIO_BINARY
+from common.cloud3d import corrected_mid360, checked_pose
+FAST_LIO_BINARY = PYTHON_DIR.parent / 'ros2/install/lib/fast_lio/fastlio_mapping'
 
 PACKET = struct.Struct('<4sIIQ7fB')
 DATA_TYPE, SOURCE_SYSID, SOURCE_COMPID = 201, 245, 197
@@ -65,18 +65,14 @@ def main():
         parser.error('Use udpin:IP:PORTA de MAVProxy, duration >= 0 e max-lag > 0')
     backend = FAST_LIO_BINARY
     if not backend.is_file():
-        print('FAST-LIO2 nao encontrado. Execute python/slam/fast_lio/install_fast_lio.py', file=sys.stderr); return 1
-    import rospy, rosnode, rosparam
+        print('FAST-LIO2 nao encontrado. Execute ./ros2/build.sh', file=sys.stderr); return 1
+    from common import ros2_runtime as ros
+    import yaml
     from nav_msgs.msg import Odometry
-    from sensor_msgs.msg import Imu
-    from livox_ros_driver.msg import CustomMsg, CustomPoint
-    try:
-        rospy.get_master().getPid()
-    except Exception as exc:
-        print('Inicie o roslaunch primeiro:', exc, file=sys.stderr); return 1
-    rospy.init_node('fast_lio_companion', anonymous=True)
-    if '/fast_lio/laserMapping' in rosnode.get_node_names():
-        print('FAST-LIO ja esta rodando em /fast_lio', file=sys.stderr); return 1
+    from sensor_msgs.msg import Imu, PointCloud2
+    from sensor_msgs_py import point_cloud2
+    from livox_ros_driver2.msg import CustomMsg, CustomPoint
+    ros.init_node('fast_lio_companion', anonymous=True)
     ns = '/' + args.namespace.strip('/')
     cloud_topic = args.cloud_topic or ns + '/livox/lidar'
     imu_topic = args.imu_topic or ns + '/livox/imu'
@@ -84,20 +80,31 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     params = {
         'common': {'lid_topic': '/fast_lio/lidar', 'imu_topic': imu_topic, 'time_sync_en': False},
-        'preprocess': {'lidar_type': 1, 'scan_line': 1, 'blind': .35, 'time_scale': .001},
+        'preprocess': {'lidar_type': 1, 'scan_line': 1, 'blind': .35, 'timestamp_unit': 3, 'scan_rate': 10},
         'mapping': {'acc_cov': .1, 'gyr_cov': .1, 'b_acc_cov': .0001, 'b_gyr_cov': .0001,
                     'det_range': 50., 'extrinsic_est_en': False, 'extrinsic_T': [0., 0., 0.],
                     'extrinsic_R': [1., 0., 0., 0., 1., 0., 0., 0., 1.]},
         'publish': {'path_en': True, 'scan_publish_en': True,
-                    'dense_publish_en': False, 'scan_bodyframe_pub_en': False,
+                    'dense_publish_en': True, 'scan_bodyframe_pub_en': True,
                     'scan_effect_pub_en': False},
         'feature_extract_enable': False, 'point_filter_num': 1, 'max_iteration': 3,
-        'filter_size_surf': .15, 'filter_size_map': .15, 'cube_side_length': 200.,
+        'filter_size_surf': .05, 'filter_size_map': .05, 'cube_side_length': 200.,
         'ivox_grid_resolution': .25, 'ivox_nearby_type': 18, 'esti_plane_threshold': .1,
         'runtime_pos_log_enable': False, 'path_save_en': False,
         'pcd_save': {'pcd_save_en': False, 'interval': -1}}
-    rosparam.upload_params('/fast_lio', params)
-    cloud_pub = rospy.Publisher('/fast_lio/lidar', CustomMsg, queue_size=1)
+    params['use_sim_time'] = True
+    (output/'params.yaml').write_text(yaml.safe_dump({'/**': {'ros__parameters': params}}))
+    cloud_pub = ros.Publisher('/fast_lio/lidar', CustomMsg, queue_size=1)
+    points_pub = ros.Publisher('/mid360/points3d', PointCloud2, queue_size=1)
+    import tf2_ros
+    from geometry_msgs.msg import TransformStamped
+    static_tf=tf2_ros.StaticTransformBroadcaster(ros.node())
+    transform=TransformStamped()
+    transform.header.stamp=ros.now()
+    transform.header.frame_id='body';transform.child_frame_id='base_link'
+    transform.transform.translation.x=.003;transform.transform.translation.z=-.434
+    transform.transform.rotation.w=1.
+    static_tf.sendTransform(transform)  # IMU and ray origins are co-located in this model
     lock = threading.RLock()
     state = {'clouds': 0, 'imu': 0, 'poses': 0, 'sent': 0, 'dropped': 0,
              'last_stamp': 0., 'first_rotation': None, 'session': secrets.randbits(32),
@@ -112,15 +119,16 @@ def main():
     def receive_cloud(msg):
         try:
             xyz = cloud_xyz(msg)
-            distance = np.linalg.norm(xyz, axis=1)
-            xyz = xyz[(distance >= .35) & (distance <= 50)]
-            now_ns = msg.header.stamp.to_nsec()
+            ranges = np.linalg.norm(xyz, axis=1)
+            xyz = xyz[(ranges > .35) & (ranges < 50.)]
+            now_ns = ros.nanoseconds(msg.header.stamp)
             if len(xyz) < 10 or now_ns <= OFFSET_NS:
                 return
+            points_pub.publish(point_cloud2.create_cloud_xyz32(msg.header,xyz.tolist()))
             out = CustomMsg()
             # Gazebo evaluates the entire batch at the message timestamp.
             # Represent every return at that same instant, without invented scan timing.
-            out.header.stamp = rospy.Time.from_sec((now_ns - OFFSET_NS) / 1e9)
+            out.header.stamp = ros.stamp_from_seconds((now_ns - OFFSET_NS) / 1e9)
             out.header.frame_id = msg.header.frame_id
             out.timebase = now_ns - OFFSET_NS
             out.point_num = len(xyz)
@@ -130,7 +138,7 @@ def main():
             with lock:
                 state['clouds'] += 1
         except (ValueError, TypeError, OverflowError) as exc:
-            rospy.logwarn_throttle(5, 'MID360 invalido: %s', exc)
+            ros.logwarn_throttle(5, 'MID360 invalido: %s', exc)
 
     def receive_imu(msg):
         with lock:
@@ -138,8 +146,8 @@ def main():
 
     def receive_pose(msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
-        stamp = msg.header.stamp.to_sec()
-        lag = (rospy.Time.now() - msg.header.stamp).to_sec()
+        stamp = ros.seconds(msg.header.stamp)
+        lag = ros.age(msg.header.stamp)
         with lock:
             if state['last_stamp'] and stamp < state['last_stamp']:
                 state['clock_error'] = True
@@ -148,9 +156,10 @@ def main():
                 state['dropped'] += 1
                 return
             try:
+                checked_pose(msg)
                 packet, state['first_rotation'] = pose_payload(
                     [p.x, p.y, p.z], [q.w, q.x, q.y, q.z], state['first_rotation'],
-                    msg.header.stamp.to_nsec() // 1000, state['session'], state['poses'] + 1)
+                    ros.nanoseconds(msg.header.stamp) // 1000, state['session'], state['poses'] + 1)
             except ValueError:
                 state['dropped'] += 1
                 return
@@ -162,26 +171,25 @@ def main():
                 mav.mav.data64_send(DATA_TYPE, len(packet), list(packet.ljust(64, b'\0')))
                 state['sent'] += 1
 
-    subscribers = [rospy.Subscriber(imu_topic, Imu, receive_imu, queue_size=50),
-                   rospy.Subscriber('/fast_lio/odometry', Odometry, receive_pose, queue_size=2)]
+    subscribers = [ros.Subscriber(imu_topic, Imu, receive_imu, queue_size=50),
+                   ros.Subscriber('/fast_lio/odometry', Odometry, receive_pose, queue_size=2)]
     env = os.environ.copy()
-    env['ROS_NAMESPACE'] = '/fast_lio'
-    env['LD_LIBRARY_PATH'] = '/home/grin/scanner_ws/devel/lib:' + env.get('LD_LIBRARY_PATH', '')
-    command = [str(backend), '__name:=laserMapping', '/Odometry:=/fast_lio/odometry',
-               '/path:=/fast_lio/path', '/cloud_registered:=/fast_lio/cloud_registered',
-               '/cloud_registered_body:=/fast_lio/cloud_registered_body',
-               '/cloud_registered_effect_world:=/fast_lio/cloud_effect']
+    command = [str(backend), '--ros-args', '--params-file', str(output/'params.yaml'),
+               '-r', '__node:=laserMapping', '-r', '/Odometry:=/fast_lio/odometry',
+               '-r', '/path:=/fast_lio/path', '-r', '/cloud_registered:=/fast_lio/cloud_registered',
+               '-r', '/cloud_registered_body:=/fast_lio/cloud_registered_body',
+               '-r', '/cloud_registered_effect_world:=/fast_lio/cloud_effect']
     log = (output/'fast_lio.log').open('w')
     proc = None
     result = 0
     try:
         proc = subprocess.Popen(command, env=env, cwd=str(output), stdout=log, stderr=subprocess.STDOUT)
-        subscribers.append(subscribe_cloud(rospy, cloud_topic, receive_cloud, 30))
+        subscribers.append(subscribe_cloud(ros, cloud_topic, receive_cloud, 30))
         print('MID360:', cloud_topic, '| IMU:', imu_topic, flush=True)
         print('Odometria: /fast_lio/odometry | Lua via MAVProxy:', args.mavproxy, flush=True)
         print('Mantenha o rover parado durante a inicializacao da IMU. Log:', output, flush=True)
         start, report_at = time.monotonic(), 0
-        while not rospy.is_shutdown():
+        while not ros.is_shutdown():
             now = time.monotonic()
             if proc.poll() is not None:
                 raise RuntimeError('FAST-LIO encerrou; confira %s' % (output/'fast_lio.log'))
@@ -221,7 +229,7 @@ def main():
             saved = {k: v for k, v in state.items() if k != 'first_rotation'}
         import json
         (output/'status.json').write_text(json.dumps(saved, indent=2))
-        rospy.signal_shutdown('FAST-LIO encerrado')
+        ros.signal_shutdown('FAST-LIO encerrado')
     return result
 
 

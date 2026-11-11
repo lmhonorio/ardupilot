@@ -433,6 +433,9 @@ public:
     // FS GCS timeout trigger time
     AP_Float fs_gcs_timeout;
 
+    // Companion docking interlock. Persist until confirmed outside the station.
+    AP_Int8 dock_lock;
+
     class ModeCircle mode_circle;
 };
 

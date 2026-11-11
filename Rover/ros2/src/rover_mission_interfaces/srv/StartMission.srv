@@ -1,0 +1,6 @@
+# Absolute path on the computer running mission_manager. QGC WPL 110 or .plan.
+string mission_file
+---
+# Acceptance into the queue, not completion of upload or physical operation.
+bool success
+string message

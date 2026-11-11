@@ -1,0 +1,15 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: true
+    mode: mapping
+    odom_frame: camera_init
+    map_frame: map_2d
+    base_frame: base_link
+    scan_topic: /rover_slam/scan
+    resolution: 0.05
+    max_laser_range: 30.0
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    transform_publish_period: 0.05
+    map_update_interval: 2.0
+    do_loop_closing: true

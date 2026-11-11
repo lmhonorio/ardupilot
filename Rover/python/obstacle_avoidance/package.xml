@@ -1,2 +1,7 @@
 <?xml version="1.0"?>
-<package format="2"><name>olhe_obstacle_avoidance</name><version>0.1.0</version><description>ROS Noetic MID360 obstacle sector bridge</description><maintainer email="grin@localhost">OLH-E</maintainer><license>MIT</license><exec_depend>rospy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>visualization_msgs</exec_depend></package>
+<package format="3">
+  <name>rover_obstacle_avoidance</name><version>2.0.0</version>
+  <description>ROS 2 MID360 perception and MAVProxy proximity bridge, run by Rover/ros2/service.sh.</description>
+  <maintainer email="grin@localhost.local">Rover simulation</maintainer><license>GPL-3.0-or-later</license>
+  <exec_depend>rclpy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>sensor_msgs_py</exec_depend>
+</package>

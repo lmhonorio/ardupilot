@@ -1,0 +1,10 @@
+deps/
+build/
+install/
+log/
+venv/
+assets/
+generated/
+run/
+core
+core.*

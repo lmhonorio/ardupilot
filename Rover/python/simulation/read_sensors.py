@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """Read the Classic camera and 3D ray sensor with NumPy/OpenCV, without ROS."""
 import argparse
 import json

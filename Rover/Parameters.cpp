@@ -692,6 +692,13 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @Path: mode_circle.cpp
     AP_SUBGROUPINFO(mode_circle, "CIRC", 57, ParametersG2, ModeCircle),
 
+    // @Param: DOCK_LOCK
+    // @DisplayName: Docking AUTO interlock
+    // @Description: Companion-managed interlock. Nonzero rejects AUTO and stops an already running AUTO mission. Clear only after confirming the entire rover is outside the docking station. Does not bypass arming or failsafe checks.
+    // @Values: 0:Outside station,1:Docking or inside station
+    // @User: Advanced
+    AP_GROUPINFO("DOCK_LOCK", 58, ParametersG2, dock_lock, 0),
+
     AP_GROUPEND
 };
 

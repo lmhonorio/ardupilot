@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """SITL: recua 2 m usando o QR e gira 180 graus pelo MAVProxy."""
 import argparse
 from datetime import datetime
@@ -8,15 +8,16 @@ import os
 from pathlib import Path
 import signal
 import sys
-import threading
 import time
 
 import cv2
-import rospy
-from cv_bridge import CvBridge
-from sensor_msgs.msg import Image, CameraInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import ros2_runtime as ros
+from common.qr_detector import QRDetector
+from common.docking_camera import DockingCamera, add_camera_arguments, diagnose
+from common.docking_stations import DEFAULT_STATIONS
 from std_msgs.msg import Float64
-from gazebo_msgs.srv import GetJointProperties
 
 from aguardar_docking import load_stations
 from controle_saida import validar_inicio, recuo, Giro180, alinhamento
@@ -52,45 +53,36 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--mavproxy',default='udpin:127.0.0.1:14551')
     p.add_argument('--sysid',type=int,default=1)
-    p.add_argument('--estacoes',default=str(Path(__file__).with_name('estacoes.json')))
+    p.add_argument('--estacoes',default=str(DEFAULT_STATIONS),help='Cadastro TXT compartilhado com a entrada')
     p.add_argument('--estacao',default='container_gravel_plane')
     p.add_argument('--velocidade',type=float,default=.08)
     p.add_argument('--timeout',type=float,default=180)
+    add_camera_arguments(p)
     a=p.parse_args()
+    if a.diagnostico:
+        return diagnose(a.namespace)
     if not a.mavproxy.startswith('udpin:127.0.0.1:') or not 1<=a.sysid<=255 or not 0<a.velocidade<=.12 or not 0<a.timeout<=600:
         p.error('Use UDP local, sysid valido, velocidade ate 0,12 m/s e timeout ate 600 s')
     matches=[s for s in load_stations(a.estacoes) if s['nome']==a.estacao]
     if len(matches)!=1: p.error('Estacao ausente ou duplicada no cadastro')
     station=matches[0]
-    rospy.init_node('saida_visual_docking')
-    ns='/rover_argo_N1/Instance1/camera'
-    bridge=CvBridge(); detector=cv2.QRCodeDetector(); lock=threading.Lock()
-    state={'frame':None,'info':None,'wall':0.,'stamp':None}
-    def image_cb(msg):
-        try: frame=bridge.imgmsg_to_cv2(msg,'bgr8')
-        except Exception as e: rospy.logwarn_throttle(3,'Camera: %s',e);return
-        with lock:state.update(frame=frame,wall=time.monotonic(),stamp=msg.header.stamp)
-    def info_cb(msg):
-        with lock:state['info']=msg
-    subs=[rospy.Subscriber(ns+'/image_raw',Image,image_cb,queue_size=1,buff_size=32*1024*1024),
-          rospy.Subscriber(ns+'/camera_info',CameraInfo,info_cb,queue_size=1)]
-    pan=rospy.Publisher(ns+'/pan_cmd',Float64,queue_size=1)
-    tilt=rospy.Publisher(ns+'/tilt_cmd',Float64,queue_size=1)
+    ros.init_node('saida_visual_docking')
+    camera=DockingCamera(a.namespace)
+    joints=ros.JointFeedback(camera.namespace+'/joint_states')
+    ns=camera.namespace+'/camera'
+    detector=QRDetector()
+    pan=ros.Publisher(ns+'/pan_cmd',Float64,queue_size=1)
+    tilt=ros.Publisher(ns+'/tilt_cmd',Float64,queue_size=1)
     def joint(name):
-        v=rospy.ServiceProxy('/gazebo/get_joint_properties',GetJointProperties)('rover_argo_N1::'+name)
-        if not v.success or not v.position:raise RuntimeError('Sem posicao das juntas da camera')
-        return v.position[0]
+        return joints.position(name)
     def pose():
-        with lock:frame,info,stamp,wall=state['frame'],state['info'],state['stamp'],state['wall']
-        if frame is None or info is None or stamp is None or time.monotonic()-wall>.7:
-            raise RuntimeError('Camera ou CameraInfo indisponivel/desatualizada')
-        age=(rospy.Time.now()-stamp).to_sec()
-        if age<-.05 or age>.5:raise RuntimeError('Timestamp da camera desatualizado')
+        frame,info,stamp=camera.snapshot()
         actual_pan=joint('pt_support_s23_pan_joint'); actual_tilt=joint('pt_support_s23_tilt_joint')
         if abs(actual_pan)>.06 or not -.65<=actual_tilt<=.05:raise RuntimeError('Camera fora da calibracao')
         text,corners,_=detector.detectAndDecode(frame)
-        if text!=station['qr'] or corners is None:raise RuntimeError('QR cadastrado nao esta visivel')
-        return solve(corners,info.K,info.D,tilt_rad=actual_tilt,
+        if text!=station['qr'] or corners is None:
+            raise RuntimeError(('Codigo lido nao cadastrado: '+text) if text else detector.status)
+        return solve(corners,info.k,info.d,tilt_rad=actual_tilt,
                      wall_offset=station['distancia_alvo_parede_m'])
     root=Path(__file__).resolve().parents[1]/'run/docking'/('saida_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     root.mkdir(parents=True,exist_ok=True)
@@ -108,7 +100,7 @@ def main():
             0,mavutil.mavlink.MAVLINK_MSG_ID_SIMSTATE,500000,0,0,0,0,0)
         link.wait(['SIMSTATE','SIM_STATE'],timeout=10)
         aguardar_parada(link)
-        rospy.wait_for_service('/gazebo/get_joint_properties',timeout=5)
+        joints.wait(timeout=5)
         until=time.monotonic()+8
         while time.monotonic()<until:
             pan.publish(0.);tilt.publish(-.5);link.recv(.05)
@@ -118,7 +110,7 @@ def main():
         until=camera_ready+8
         while True:
             try:
-                with lock:image_wall=state['wall']
+                with camera.lock:image_wall=camera.wall
                 if image_wall<=camera_ready:raise RuntimeError('Aguardando imagem apos mover camera')
                 initial_pose=pose();break
             except (RuntimeError, ValueError, cv2.error):
@@ -136,7 +128,7 @@ def main():
         engaged=True;link.mode('GUIDED')
         print('GUIDED: recuando 2 m alinhado ao QR.',flush=True)
         until=time.monotonic()+a.timeout;last_report=0
-        while time.monotonic()<until and not rospy.is_shutdown():
+        while time.monotonic()<until and not ros.is_shutdown():
             end=time.monotonic()+.05
             while time.monotonic()<end:link.recv(.002)
             h=link.latest.get('HEARTBEAT')
@@ -166,7 +158,7 @@ def main():
         print('Recuo confirmado: %.2f m; iniciando giro de 180 graus.'%distance,flush=True)
         att=link.wait('ATTITUDE',timeout=5);turn=Giro180(att.yaw)
         link.mode('GUIDED');until=time.monotonic()+a.timeout; stable=None
-        while time.monotonic()<until and not rospy.is_shutdown():
+        while time.monotonic()<until and not ros.is_shutdown():
             msg=link.recv(.1);now=time.monotonic()
             h=link.latest.get('HEARTBEAT');att=link.latest.get('ATTITUDE')
             if h and now-link.last_seen.get('HEARTBEAT',0)<2 and h.custom_mode!=15:
@@ -198,8 +190,12 @@ def main():
             for name,value in saved.items():
                 try:link.param(name,value);print('Restaurado %s=%s'%(name,value),flush=True)
                 except Exception as e:print('Falha restaurando %s: %s; consulte %s'%(name,e,root/'parametros_anteriores.json'),flush=True)
-        for sub in subs:sub.unregister()
+        camera.close();joints.close()
         link.log.close();link.conn.close()
     return 0 if complete else 1
 
-if __name__=='__main__':sys.exit(main())
+if __name__=='__main__':
+    try:
+        sys.exit(main())
+    finally:
+        ros.signal_shutdown('docking encerrado')

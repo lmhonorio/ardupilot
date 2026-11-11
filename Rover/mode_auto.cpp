@@ -4,6 +4,10 @@
 
 bool ModeAuto::_enter()
 {
+    if (g2.dock_lock != 0) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Docking: AUTO locked; request guided exit");
+        return false;
+    }
     // fail to enter auto if no mission commands
     if (mission.num_commands() <= 1) {
         gcs().send_text(MAV_SEVERITY_NOTICE, "No Mission. Can't set AUTO.");
@@ -44,6 +48,12 @@ void ModeAuto::_exit()
 
 void ModeAuto::update()
 {
+    // Also cover the interlock being asserted while AUTO is already active.
+    if (g2.dock_lock != 0) {
+        mission.stop();
+        stop_vehicle();
+        return;
+    }
     // check if mission exists (due to being cleared while disarmed in AUTO,
     // if no mission, then stop...needs mode change out of AUTO, mission load,
     // and change back to AUTO to run a mission at this point

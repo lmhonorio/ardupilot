@@ -70,11 +70,14 @@ class Ativacao(unittest.TestCase):
             def close(self): self.closed=True
         first=FakeConn(messages); second=FakeConn([])
         child=types.SimpleNamespace(wait=lambda:0)
-        args=types.SimpleNamespace(mavproxy='udpin:127.0.0.1:14699',sysid=1,velocidade=.08,timeout=90,estacoes='fake.json')
+        args=types.SimpleNamespace(mavproxy='udpin:127.0.0.1:14699',sysid=1,velocidade=.08,timeout=90,estacoes='fake.txt',namespace='/rover_test/Instance2')
         def spawn(cmd):
             self.assertTrue(first.closed)
             self.assertIn('--apenas-guided',cmd)
             self.assertIn('--uma-vez',cmd)
+            self.assertEqual(cmd[cmd.index('--namespace')+1],args.namespace)
+            self.assertEqual(cmd[cmd.index('--estacoes')+1],args.estacoes)
+            self.assertEqual(cmd[cmd.index('--estacao')+1],'teste')
             self.assertEqual(cmd[cmd.index('--latitude-estacao')+1],str(DOCK_LAT))
             self.assertEqual(cmd[cmd.index('--longitude-estacao')+1],str(DOCK_LON))
             return child

@@ -5,7 +5,8 @@
       "latitude": -3.123167966,
       "longitude": -41.764450017,
       "qr": "ROVER_DOCKING_STATION_01",
-      "distancia_alvo_parede_m": 0.5335
+      "rumo_entrada_graus": 90.0,
+      "distancia_alvo_parede_m": 0.499
     }
   ]
 }

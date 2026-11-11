@@ -1,0 +1,6 @@
+{
+  "estacoes": [
+    {"nome": "container_gravel_plane", "latitude": -3.123167966,
+     "longitude": -41.764450017, "azimute_entrada_graus": 90.0}
+  ]
+}

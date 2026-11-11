@@ -1,5 +1,8 @@
 #!/usr/bin/python3
 """Read and display the simulated MID360 ROS cloud; never commands the rover."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import argparse
 import json
 from pathlib import Path
@@ -32,16 +35,11 @@ def main():
         parser.error('--snapshot deve terminar em .npz')
     if args.save and args.save.suffix.lower() != '.png':
         parser.error('--save deve terminar em .png')
-    import rospy
-    try:
-        rospy.get_master().getPid()
-    except Exception as exc:
-        print('Inicie o roslaunch primeiro:', exc, file=sys.stderr)
-        return 1
-    rospy.init_node('rover_lidar_reader', anonymous=True)
+    from common import ros2_runtime as ros
+    ros.init_node('rover_lidar_reader', anonymous=True)
     if args.list:
-        for topic, kind in rospy.get_published_topics('/'):
-            if kind in ('sensor_msgs/PointCloud', 'sensor_msgs/PointCloud2'):
+        for topic, kind in ros.get_published_topics('/'):
+            if kind in ('sensor_msgs/msg/PointCloud', 'sensor_msgs/msg/PointCloud2'):
                 print(topic, kind)
         return 0
     topic = args.topic or '/' + args.namespace.strip('/') + '/livox/lidar'
@@ -54,12 +52,12 @@ def main():
             distances = np.linalg.norm(xyz, axis=1)
             xyz = xyz[(distances >= args.min_range) & (distances <= args.max_range)]
         except (ValueError, TypeError) as exc:
-            rospy.logwarn_throttle(5, 'Nuvem invalida: %s', exc)
+            ros.logwarn_throttle(5, 'Nuvem invalida: %s', exc)
             return
         if not len(xyz):
             return
-        metadata = {'frame_id': message.header.frame_id, 'sec': message.header.stamp.secs,
-                    'nsec': message.header.stamp.nsecs, 'topic': topic, 'type': message._type,
+        metadata = {'frame_id': message.header.frame_id, 'sec': message.header.stamp.sec,
+                    'nsec': message.header.stamp.nanosec, 'topic': topic, 'type': type(message).__name__,
                     'min_range': args.min_range, 'max_range': args.max_range}
         with lock:
             latest.update(xyz=xyz, count=latest['count'] + 1, time=time.monotonic(), metadata=metadata)
@@ -68,7 +66,7 @@ def main():
     plt = fig = None
     print('Lendo', topic, flush=True)
     try:
-        subscriber = subscribe_cloud(rospy, topic, receive, args.timeout)
+        subscriber = subscribe_cloud(ros, topic, receive, args.timeout)
         if (not args.headless and not args.snapshot) or args.save:
             import matplotlib
             if args.save:
@@ -80,7 +78,7 @@ def main():
             ax = fig.add_subplot(111, projection='3d')
         last_drawn = -1
         report_at = 0
-        while not rospy.is_shutdown():
+        while not ros.is_shutdown():
             with lock:
                 xyz, count, received, meta = latest['xyz'], latest['count'], latest['time'], latest['metadata']
             now = time.monotonic()
@@ -134,7 +132,7 @@ def main():
             subscriber.unregister()
         if plt is not None:
             plt.close('all')
-        rospy.signal_shutdown('Leitor LiDAR encerrado')
+        ros.signal_shutdown('Leitor LiDAR encerrado')
 
 
 if __name__ == '__main__':

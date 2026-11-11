@@ -1,4 +1,4 @@
-#!/usr/bin/python3.8
+#!/usr/bin/env python3
 """Own only these two ROS nodes and terminate both if either exits."""
 import os, signal, subprocess, sys, time
 from pathlib import Path

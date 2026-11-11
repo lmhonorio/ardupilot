@@ -52,6 +52,9 @@ class Link:
         msg = self.conn.recv_match(blocking=True, timeout=timeout)
         if msg is None or msg.get_type() == 'BAD_DATA' or msg.get_srcSystem() != self.sysid:
             return None
+        component_filter = getattr(self, 'component_filter', None)
+        if component_filter is not None and msg.get_srcComponent() != component_filter:
+            return None
         kind = msg.get_type()
         self.latest[kind] = msg
         self.last_seen[kind] = time.monotonic()

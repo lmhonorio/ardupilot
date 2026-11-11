@@ -6,28 +6,29 @@ import numpy as np
 
 
 def cloud_xyz(message):
-    if message._type == 'sensor_msgs/PointCloud':
+    kind = getattr(message, '_type', type(message).__name__).split('/')[-1]
+    if kind == 'PointCloud':
         xyz = np.array([(p.x, p.y, p.z) for p in message.points], dtype=np.float32).reshape(-1, 3)
-    elif message._type == 'sensor_msgs/PointCloud2':
-        from sensor_msgs import point_cloud2
-        xyz = np.array(list(point_cloud2.read_points(
-            message, field_names=('x', 'y', 'z'), skip_nans=True)), dtype=np.float32).reshape(-1, 3)
+    elif kind == 'PointCloud2':
+        from sensor_msgs_py import point_cloud2
+        xyz = point_cloud2.read_points_numpy(
+            message, field_names=('x', 'y', 'z'), skip_nans=True).reshape(-1, 3)
     else:
-        raise ValueError('Expected PointCloud or PointCloud2, got %s' % message._type)
+        raise ValueError('Expected PointCloud or PointCloud2, got %s' % kind)
     return xyz[np.isfinite(xyz).all(axis=1) & (np.linalg.norm(xyz, axis=1) > 0.001)]
 
 
-def subscribe_cloud(rospy, topic, callback, timeout=30):
+def subscribe_cloud(ros, topic, callback, timeout=30):
     """Discover the message type before subscribing, without guessing its format."""
     from sensor_msgs.msg import PointCloud, PointCloud2
-    types = {'sensor_msgs/PointCloud': PointCloud, 'sensor_msgs/PointCloud2': PointCloud2}
+    types = {'sensor_msgs/msg/PointCloud': PointCloud, 'sensor_msgs/msg/PointCloud2': PointCloud2}
     deadline = time.monotonic() + timeout if timeout else math.inf
-    while not rospy.is_shutdown():
-        published = dict(rospy.get_published_topics('/'))
+    while not ros.is_shutdown():
+        published = dict(ros.get_published_topics('/'))
         if topic in published:
             if published[topic] not in types:
                 raise ValueError('%s has unsupported type %s' % (topic, published[topic]))
-            return rospy.Subscriber(topic, types[published[topic]], callback,
+            return ros.Subscriber(topic, types[published[topic]], callback,
                                     queue_size=1, buff_size=32 * 1024 * 1024)
         if time.monotonic() >= deadline:
             raise TimeoutError('Topico LiDAR nao anunciado: %s; habilite mid360_enabled:=true' % topic)

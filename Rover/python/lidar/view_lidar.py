@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.8
+#!/usr/bin/env python3
 """View the XYZ cloud already saved by read_sensors.py; no vehicle commands."""
 import argparse
 import json

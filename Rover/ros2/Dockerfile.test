@@ -1,0 +1,15 @@
+# Isolated validation only; does not install ROS on the host.
+FROM ros:jazzy-ros-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-jazzy-ros-gz ros-jazzy-sensor-msgs-py ros-jazzy-cv-bridge \
+    ros-jazzy-message-filters ros-jazzy-xacro ros-jazzy-robot-state-publisher \
+    ros-jazzy-pcl-ros ros-jazzy-pcl-conversions ros-jazzy-tf-transformations \
+    python3-numpy python3-opencv python3-scipy python3-venv python3-pip python3-dev \
+    python3-colcon-common-extensions libpcl-dev libopencv-dev rapidjson-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev git cmake build-essential \
+    libgl1-mesa-dri libegl1 mesa-utils && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://koide3.github.io/ppa/ubuntu2404/KEY.gpg | gpg --dearmor -o /usr/share/keyrings/rover-glim.gpg && \
+    echo 'deb [signed-by=/usr/share/keyrings/rover-glim.gpg] https://koide3.github.io/ppa/ubuntu2404 ./' > /etc/apt/sources.list.d/rover-glim.list && \
+    apt-get update && apt-get install -y --no-install-recommends ros-jazzy-glim-ros ros-jazzy-slam-toolbox ros-jazzy-rviz2 ros-jazzy-mavros geographiclib-tools && \
+    rm -rf /var/lib/apt/lists/*
+RUN geographiclib-get-geoids egm96-5

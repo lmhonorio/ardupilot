@@ -1,0 +1,12 @@
+# Preserve ABI compatibility with Ubuntu/Jazzy cv_bridge and numpy extensions.
+numpy==1.26.4
+opencv-python==4.10.0.84
+matplotlib==3.9.4
+pymavlink==2.4.50
+MAVProxy==1.8.75
+pexpect==4.9.0
+future==1.0.0
+empy==3.3.4
+xacro==2.1.1
+
+pycollada==0.9.2

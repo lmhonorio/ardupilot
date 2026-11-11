@@ -1,0 +1,6 @@
+# Perfil experimental exclusivo da simulacao ROS Argo.
+# OA_TYPE e PRX1_TYPE requerem reiniciar o SITL.
+OA_TYPE 1
+PRX1_TYPE 2
+OA_BR_LOOKAHEAD 5
+OA_MARGIN_MAX 1

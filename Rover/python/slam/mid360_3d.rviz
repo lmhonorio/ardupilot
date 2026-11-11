@@ -1,0 +1,59 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: camera_init
+    Frame Rate: 20
+    Background Color: 35; 35; 35
+  Displays:
+    - Class: rviz/Grid
+      Name: Grade
+      Enabled: true
+      Plane: XY
+      Cell Size: 1
+    - Class: rviz/PointCloud2
+      Name: Mapa 3D acumulado
+      Enabled: true
+      Topic: /rover_slam_3d/map
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Position Transformer: XYZ
+    - Class: rviz/PointCloud2
+      Name: MID360 XYZ corrigido
+      Enabled: false
+      Topic: /mid360/points3d
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: AxisColor
+      Axis: Z
+      Position Transformer: XYZ
+    - Class: rviz/PointCloud2
+      Name: Geometria local do docking
+      Enabled: true
+      Topic: /rover_slam_3d/local_cloud
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 255; 210; 50
+      Position Transformer: XYZ
+    - Class: rviz/Path
+      Name: Trajetoria FAST-LIO
+      Enabled: true
+      Topic: /fast_lio/path
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 12
+      Pitch: 0.65
+      Yaw: 0.6
+      Focal Point: {X: 0, Y: 0, Z: 0}
+Window Geometry:
+  Width: 1280
+  Height: 800

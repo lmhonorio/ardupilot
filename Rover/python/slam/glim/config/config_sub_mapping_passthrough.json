@@ -1,0 +1,14 @@
+{
+  "sub_mapping": {
+    "so_name": "libsub_mapping_passthrough.so",
+    "keyframe_update_interval_rot": 0.15,
+    "keyframe_update_interval_trans": 0.15,
+    "max_num_keyframes": 15,
+    "max_num_voxels": -1,
+    "adaptive_max_num_voxels": 2.5,
+    "submap_voxel_resolution": 0.2,
+    "min_dist_in_voxel": 0.05,
+    "max_num_points_in_voxel": 100,
+    "submap_target_num_points": 20000
+  }
+}
