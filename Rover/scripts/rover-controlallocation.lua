@@ -9,11 +9,12 @@
 --| '8' # Walking_Height
 --@return number|nil
 -- External modules
-package.path = package.path .. ';/scripts/modules/?.lua'
+package.path = package.path .. ';./scripts/?.lua;./scripts/modules/?.lua;/scripts/modules/?.lua'
 local PID = require("pid")
 local funcs = require("functions")
 local Autotune = require("autotune")
 local CircleTune = require("circle-tune")
+local CAN_DRIVER = require("can")
 -------------------------------------------------------------------------------
 ------------------------- GLOBAL SCOPE DEFINITIONS ----------------------------
 -------------------------------------------------------------------------------
@@ -245,6 +246,11 @@ local function applyControlAllocation(t, s, timeout_ms)
   local pwm_max = PWM_TRIM_VALUE + pwm_range
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
+  if CAN_DRIVER.output_is_can() then
+    local side_l, side_r = funcs:allocateRightAndLeftPwmShare(t, s, 1)
+    CAN_DRIVER.set_norms({ side_r, side_l, side_l, side_r })
+    return pwm_l, pwm_r
+  end
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, timeout_ms)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, timeout_ms)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, timeout_ms)
@@ -697,7 +703,10 @@ local function update()
     autotune:reset()
     autotune_done = false
     circle_tune:reset("disarmed")
-    notArmed()
+    CAN_DRIVER.clear_script_norms()
+    if not CAN_DRIVER.output_is_can() then
+      notArmed()
+    end
     return update, 2000
   end
 
@@ -780,5 +789,25 @@ end
 gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
   "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG_ERR=%.1f deg, YAWT_MAX_OUT=%.0f%%",
   VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_error_param:get(), yaw_max_out_param:get()))
-return update, 3000 -- run immediately before starting to reschedule
+local next_control_ms = millis() + uint32_t(3000)
+local next_can_ms = millis()
+
+local function scheduled_update()
+  local now = millis()
+  if (now - next_control_ms):toint() >= 0 then
+    local callback, delay = update()
+    if not callback then
+      return
+    end
+    next_control_ms = now + uint32_t(delay)
+  end
+  if (now - next_can_ms):toint() >= 0 then
+    next_can_ms = now + uint32_t(CAN_DRIVER.update())
+  end
+  now = millis()
+  local delay = math.min((next_control_ms - now):toint(), (next_can_ms - now):toint())
+  return scheduled_update, math.max(1, delay)
+end
+
+return scheduled_update, 1
 -------------------------------------------------------------------------------
