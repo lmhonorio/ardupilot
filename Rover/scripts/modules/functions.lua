@@ -102,7 +102,10 @@ Allocate the PWM signals for the right and left motors based on throttle and ste
 --]]
 function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   -- The throttle and steering absolute sum, to inspect the total signal we want to insert
-  local ts_sum = math.abs(t) + math.abs(s) + 0.00001
+  local ts_sum = math.abs(t) + math.abs(s)
+  if ts_sum == 0 then
+    return 0, 0
+  end
   -- We compare the value of each input to the total sum
   local t_share, s_share = math.abs(t) / ts_sum, math.abs(s) / ts_sum
   -- We create the assigned amount of steering and throttle by multiplying again the shares by the inputs
@@ -113,7 +116,7 @@ function funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   -- The right and left motors added PWM allocation
   local pwm_aloc_l = (t_share + s_share) * pwm_range
   local pwm_aloc_r = (t_share - s_share) * pwm_range
-  return math.floor(pwm_aloc_l), math.floor(pwm_aloc_r)
+  return pwm_aloc_l, pwm_aloc_r
 end
 
 --[[
