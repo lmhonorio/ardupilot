@@ -28,6 +28,28 @@ local function message(severity, text)
   gcs:send_text(severity, "CircleTune: " .. text)
 end
 
+-- esc_can.lua publishes ESC_STAT: bit 0 = CAN active, bit 1 = current saturated.
+-- Never set with PWM, so this check only acts on the CAN path.
+local ESC_STAT_CAN_SATURATED = 1 | 2
+local esc_stat = Parameter()
+local esc_stat_bound = false
+local esc_stat_retry_ms = 0
+
+local function esc_saturated()
+  if not esc_stat_bound then
+    local now = millis():toint()
+    if now < esc_stat_retry_ms then
+      return false
+    end
+    esc_stat_retry_ms = now + 2000
+    esc_stat_bound = esc_stat:init("ESC_STAT")
+    if not esc_stat_bound then
+      return false
+    end
+  end
+  return (math.floor(esc_stat:get() or 0) & ESC_STAT_CAN_SATURATED) == ESC_STAT_CAN_SATURATED
+end
+
 function CircleTune:new()
   assert(param:add_table(PARAM_KEY, "CTUN_", 2), "could not add CircleTune parameter table")
   assert(param:add_param(PARAM_KEY, 1, "RELAY", 5), "could not add CTUN_RELAY")
@@ -280,6 +302,10 @@ function CircleTune:update(throttle, steering, pwm_range_pct)
   -- The firmware PID keeps running while Lua replaces its output at the mixer.
   if math.abs(steering - self.steering_base) > MAX_NATIVE_STEERING_CHANGE then
     self:cancel("native steering diverged from baseline")
+    return nil, allow_output
+  end
+  if esc_saturated() then
+    self:cancel("wheel current saturated (ESC_CUR)")
     return nil, allow_output
   end
 

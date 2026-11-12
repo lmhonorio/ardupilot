@@ -1,240 +1,523 @@
-# Autotuning do Rover
+# Autotuning do Rover (CAN + PWM) — guia completo
 
-Este guia reúne a explicação teórica e prática dos três métodos de autotuning implementados nesta branch. O parâmetro `SCR_USER1` seleciona o método.
+Guia único para instalar, configurar, sintonizar e operar em **MANUAL** e **AUTO** o rover 4 motores em modelo diferencial (par esquerdo / par direito com o mesmo comando).
 
-| Método | Controlador ajustado | Resultado |
-|---|---|---|
-| Rover QuickTune | Controladores nativos de taxa de giro e velocidade do ArduPilot | `ATC_*`, `CRUISE_SPEED`, `CRUISE_THROTTLE` |
-| Autotune de yaw por relé | PI Lua que alinha o rover parado depois de um waypoint | `SCR_USER2` (P), `SCR_USER3` (I) |
-| Autotune por relé em Circle | Controlador nativo de taxa de giro do ArduPilot | `ATC_STR_RAT_P` e `ATC_STR_RAT_I`, com gravação automática via `RTUN_AUTO_SAVE` |
+Ordem obrigatória: **primeiro a malha de roda (CAN), depois os PIDs de cima**. Cada autotune bem-sucedido volta `SCR_USER1` para **0** sozinho.
 
-## 1. Antes de instalar ou testar
+---
 
-Copie para o cartão SD da Pixhawk, em `APM/scripts/`:
+## 0. Arquitetura (o que cada malha faz)
 
 ```text
-rover-controlallocation.lua
-rover-quicktune.lua
-system-start.lua
-modules/autotune.lua
-modules/circle-tune.lua
-modules/functions.lua
-modules/pid.lua
+Missão / RC / Circle
+        ↓
+Mixer Lua (throttle + steering → norm L / norm R)
+        ↓
+esc_can.lua  (ESC_MODE=0): referência de RPM por lado
+        ├─ PI de velocidade do lado          → ESC_P / ESC_I / ESC_FF
+        ├─ Correção local entre as 2 rodas   → ESC_LOC_P / ESC_LOC_I / ESC_FR*
+        └─ Split de tração se uma patina     → corta a aérea, empurra a do solo
+        ↓
+Corrente CAN → 4× C620 / M3508
 ```
 
-Habilite Lua com `SCR_ENABLE=1` e reinicie a Pixhawk após copiar ou alterar scripts. Garanta que `SCR_HEAP_SIZE` seja suficiente para todos os scripts instalados. Os `.md`, arquivos de teste e backups não precisam ir para o cartão.
+| Malha | Script | Período | Ganhos |
+|---|---|---|---|
+| Velocidade do lado + local | `esc_can.lua` | ~10 ms | `ESC_*` |
+| Taxa de giro / velocidade | ArduRover | ~50 Hz | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
+| Alinhamento de yaw (pós-WP) | `rover-controlallocation.lua` | 200 ms | CAN: `CANT_YAW_P/I` · PWM: `SCR_USER2/3` · × `YAWT_GAIN_MULT` |
 
-Confira que os arquivos instalados são desta branch. A documentação antiga usava `SCR_USER6`, mas o código atual usa `SCR_USER1` como seletor. O dump enviado anteriormente tinha `SCR_USER1=1550`, que não corresponde aos valores de seleção descritos abaixo; confira o valor atual na Pixhawk antes de armar.
+O rover é **diferencial 4WD**: as 2 rodas do mesmo lado devem ter o **mesmo RPM alvo**. `ESC_LMASK` define quem é esquerda; `ESC_REV` inverte sentido por motor.
 
-> **Atenção:** o autotune de yaw atual inicia sempre que `SCR_USER1=2` e o rover está armado, sem verificar o modo de condução. Ele assume os motores e aplica comandos alternados de direção. Use `SCR_USER1=2` somente quando o rover estiver em uma área de ensaio isolada e pronto para girar no lugar. `HOLD` é o modo pretendido para esse ensaio, mas o código não o impõe.
+---
 
-## 2. Seletor e parâmetros de yaw
+## 1. Arquivos no cartão SD
 
-`SCR_USER1` é compartilhado entre os dois scripts:
+Em `APM/scripts/`:
 
-| `SCR_USER1` | `rover-controlallocation.lua` | `rover-quicktune.lua` |
-|---:|---|---|
-| 0 | Operação normal; yaw autotune inativo | Lê a posição da função de scripting RC definida por `RTUN_RC_FUNC` |
-| 1 | Apenas informa que QuickTune foi selecionado; segue controle normal | Inicia QuickTune automaticamente enquanto armado, em qualquer modo |
-| 2 | Executa o autotune de yaw enquanto armado, em qualquer modo | Consulta a chave RC |
-| 3 | Executa o ensaio por relé quando o rover está armado em `CIRCLE` e a curva estabiliza | Suspende o QuickTune e reverte ajustes que ainda estavam pendentes |
-
-O script de yaw cria `YAWT_MAX_ANG` (padrão 45°), `YAWT_MAX_OUT` (padrão 20%) e `YAWT_GAIN_MULT` (padrão 1). A amplitude efetiva do relé é `YAWT_MAX_OUT / 100`, limitada a 5–45%. `YAWT_GAIN_MULT` multiplica P e I usados pelo PI de orientação; por exemplo, fator 10 aplica P=10 e I=5 se os ganhos base forem P=1 e I=0,5. Os ganhos base, sem multiplicador, continuam salvos em `SCR_USER2/3`.
-
-`SCR_USER2` e `SCR_USER3` guardam P e I base do PI de yaw. Se ambos forem maiores que zero quando `rover-controlallocation.lua` inicia, o script aplica `YAWT_GAIN_MULT` a esses valores, sem divisão por 1000. Se algum for zero ou negativo, o script mantém os defaults P=3,5 e I=8. Ao terminar com sucesso, o autotune grava os ganhos base e usa no PID em memória os ganhos multiplicados.
-
-## 3. QuickTune dos controladores nativos
-
-### Teoria: identificação feed-forward
-
-QuickTune é uma identificação aproximada em campo. Em vez de testar todas as combinações de ganhos, observa pares de comando e resposta do rover para estimar o feed-forward (FF), isto é, quanto comando é necessário para produzir certa resposta. Em seguida, define P e I como proporções dessa estimativa, configuradas pelos parâmetros `RTUN_*_RATIO`.
-
-Para taxa de giro, relaciona a saída de direção do controlador com a taxa angular medida pelo giroscópio Z. Para velocidade, relaciona throttle e velocidade longitudinal estimada pelo AHRS. Pneus, piso, bateria, carga, velocidade e o alocador PWM Lua fazem parte da resposta medida; os ganhos obtidos são mais representativos quando essas condições se parecem com a operação real.
-
-### O que ele ajusta
-
-Com `RTUN_AXES=3` (padrão), o script tenta ajustar direção e velocidade:
-
-- **Direção/taxa de giro:** `ATC_STR_RAT_FF`, `ATC_STR_RAT_P`, `ATC_STR_RAT_I`.
-- **Filtros de direção:** se `RTUN_AUTO_FILTER>0`, ajusta `ATC_STR_RAT_FLTT` e `ATC_STR_RAT_FLTD` para metade de `INS_GYRO_FILTER`.
-- **Velocidade:** `CRUISE_SPEED`, `CRUISE_THROTTLE`, `ATC_SPEED_P` e `ATC_SPEED_I`.
-
-O script não calcula `ATC_STR_RAT_D` nem `ATC_SPEED_D`. Os parâmetros `RTUN_STR_*_RATIO` e `RTUN_SPD_*_RATIO` definem as proporções de P/I derivadas das estimativas feed-forward. `RTUN_AXES=1` ajusta só direção; `RTUN_AXES=2` só velocidade.
-
-### Significado dos parâmetros alterados
-
-| Parâmetro | O que controla |
+| Arquivo | Obrigatório |
 |---|---|
-| `ATC_STR_RAT_FF` | Ação feed-forward de direção: antecipa a saída necessária para a taxa de giro desejada. |
-| `ATC_STR_RAT_P` | Corrige o erro entre taxa de giro desejada e medida; ganho maior torna a correção mais forte. |
-| `ATC_STR_RAT_I` | Corrige erro persistente de taxa de giro acumulando a correção ao longo do tempo. |
-| `ATC_STR_RAT_FLTT` | Filtra o alvo de taxa de giro; suaviza mudanças rápidas do comando desejado. |
-| `ATC_STR_RAT_FLTD` | Filtra o termo derivativo da malha; afeta ruído/suavidade, embora este QuickTune não ajuste o ganho D. |
-| `CRUISE_SPEED` | Velocidade de cruzeiro de referência para navegação quando outra velocidade não é especificada. |
-| `CRUISE_THROTTLE` | Estimativa base de throttle necessária para manter a velocidade de cruzeiro. |
-| `ATC_SPEED_P` | Corrige erro entre velocidade desejada e medida com resposta proporcional. |
-| `ATC_SPEED_I` | Compensa erro de velocidade persistente com correção integral. |
+| `esc_can.lua` | sim (caminho CAN) |
+| `rover-controlallocation.lua` | sim (mixer + yaw + Circle relay) |
+| `rover-quicktune.lua` | sim (QuickTune) |
+| `modules/functions.lua` | sim |
+| `modules/autotune.lua` | sim |
+| `modules/pid.lua` | sim |
+| `modules/circle-tune.lua` | sim (relé Circle) |
 
-Os filtros `FLTT` e `FLTD` são frequências em Hz e o QuickTune os define como `0,5 × INS_GYRO_FILTER` quando `RTUN_AUTO_FILTER` está habilitado. Os ganhos P/I resultantes são gravados nos parâmetros nativos ArduPilot. Eles influenciam os comandos internos que o alocador Lua transforma em PWM em `AUTO`/`CIRCLE`; não substituem a mistura final dos motores feita pelo Lua.
+**Apague** qualquer `c620_can.lua` antigo. Os `.md` **não** precisam ir para o cartão.
 
-### Preparação do teste
+Depois de copiar: `SCR_ENABLE=1`, reboot da Pixhawk.
 
-1. Faça o ensaio em área plana, ampla e livre de pessoas e obstáculos. O modo CIRCLE precisa de espaço para o círculo e para o erro de navegação; por exemplo, raio 4 m com margem de 4 m pede aproximadamente 16 × 16 m livres.
-2. Configure `CIRC_RADIUS` para um valor compatível com o rover e com a área disponível. O padrão do firmware é 20 m; um raio menor, como 4 m, só deve ser usado se o rover conseguir fazer essa curva sem patinar ou sair do controle.
-3. Configure `CIRC_SPEED` para a velocidade desejada do ensaio. Zero usa `WP_SPEED`. Como ponto de partida, use uma velocidade de até cerca de metade da máxima e um raio de pelo menos duas vezes o raio de giro do rover. O Circle lê essas configurações ao entrar no modo.
-4. Verifique previamente a base de velocidade, bateria, sentido dos motores, GPS/AHRS e parada de emergência. A mistura PWM customizada do `rover-controlallocation.lua` faz parte da planta que o QuickTune observa.
+---
 
-### Execução conforme o código atual
+## 2. Parâmetros de base (antes de qualquer tuning)
 
-1. Deixe `RTUN_ENABLE=1` e escolha `RTUN_AXES`.
-2. Ajuste `CIRC_RADIUS` e `CIRC_SPEED` antes de entrar em CIRCLE.
-3. Arme e selecione `CIRCLE` para o ensaio previsto. **O código não exige CIRCLE:** `SCR_USER1=1` inicia QuickTune assim que armado, qualquer que seja o modo. Não selecione `SCR_USER1=1` em campo sem já estar no modo e na área de teste pretendidos.
-4. Mantenha sticks de direção e throttle neutros. Uma entrada detectada pausa a coleta por quatro segundos após o último movimento.
-5. Monitore mensagens no GCS. QuickTune não gera o movimento; o rover deve estar efetivamente se movendo e virando para haver amostras válidas.
-6. Para abortar e restaurar os ganhos temporários, desarme. Se estiver usando a chave RC, a posição baixa também reverte os ganhos pendentes. Mudar de modo, por si só, permite que o QuickTune continue.
-7. Ao terminar as etapas selecionadas, os resultados são salvos após `RTUN_AUTO_SAVE` segundos (padrão 5). Se `RTUN_AUTO_SAVE=0`, use uma chave RC configurada para a função `RTUN_RC_FUNC`: posição 1 executa e posição 2 salva. Ao usar `SCR_USER1=1` automático, o script não apresenta uma forma RC de salvar; mantenha o auto save habilitado.
+Confira **desarmado**. Reinicie depois de mudar CAN / heap / VM.
 
-O script QuickTune amostra e atualiza parâmetros a 40 Hz. O alocador Lua também atualiza suas saídas em `CIRCLE` a 40 Hz. Em modos como `AUTO` e `ACRO`, o alocador roda a 5 Hz.
+### 2.1 Barramento CAN
 
-### Operação do QuickTune pela chave RC
+| Parâmetro | Valor | Nota |
+|---|---|---|
+| `CAN_D1_PROTOCOL` | **10** | Scripting. Se for 1 (DroneCAN), o Lua não vê o barramento |
+| `CAN_P1_BITRATE` | 1000000 | |
+| `CAN_P1_DRIVER` | 1 | ESCs no **CAN1** |
+| `CAN_P2_DRIVER` | **0** | Não deixe P1 e P2 no mesmo driver |
 
-Com `SCR_USER1=0`, configure uma função de scripting em um canal RC. Por exemplo, use `RC6_OPTION=300` e `RTUN_RC_FUNC=300`. Se a função 300 estiver em uso, escolha outra, como 302, nos dois parâmetros.
+ESCs no **CAN2**: `CAN_P1_DRIVER=0`, `CAN_P2_DRIVER=1`, `CAN_D1_PROTOCOL=10`.
 
-- **Baixa** cancela o ensaio e restaura os ganhos pendentes. Os ganhos já gravados permanecem salvos.
-- **Intermediária** inicia ou retoma o ensaio. Uma chave de duas posições pode usar baixa e intermediária com `RTUN_AUTO_SAVE` habilitado.
-- **Alta** pausa a coleta e grava os valores pendentes naquele momento, mesmo que o ensaio ainda esteja em andamento. Use uma chave de três posições se quiser salvar manualmente com `RTUN_AUTO_SAVE=0`.
+### 2.2 Scripting e mixer
 
-### Mensagens e validação
+| Parâmetro | Valor | Nota |
+|---|---|---|
+| `SCR_ENABLE` | 1 | |
+| `SCR_HEAP_SIZE` | **400000** (ou 500000) | reboot após mudar |
+| `SCR_VM_I_COUNT` | **100000** | com 10000 o `esc_can.lua` estoura e some |
+| `SCR_USER1` | **0** | seletor de tuning |
+| `SCR_USER2` / `SCR_USER3` | (PWM yaw P/I) | em CAN não mexer à mão |
+| `SCR_USER5` | **2** | mixer Rover Lua ativo |
+| `THRO_MAX_LUA` | 90 | limite % do throttle no mixer |
 
-Mensagens esperadas incluem:
+### 2.3 Servos / motores
+
+| Parâmetro | Valor típico | Nota |
+|---|---|---|
+| `SERVO1_FUNCTION` | 73 | ThrottleLeft |
+| `SERVO2_FUNCTION` | 74 | ThrottleRight |
+| `SERVO3_FUNCTION` | 74 | ThrottleRight |
+| `SERVO4_FUNCTION` | 73 | ThrottleLeft |
+| `MOT_SAFE_DISARM` | 0 | |
+
+### 2.4 Driver ESC (CAN) — valores iniciais
+
+| Parâmetro | Inicial | Função |
+|---|---|---|
+| `ESC_CAN` | **1** | 1=CAN, 0=PWM. **Só mude desarmado** |
+| `ESC_MODE` | **0** | PI de velocidade (obrigatório para tuning e AUTO) |
+| `ESC_RPM` | 400 | RPM da roda com comando 1.0 |
+| `ESC_GEAR` | 19.2032 | redução M3508 P19 |
+| `ESC_CUR` | 10 | limite de corrente (A) |
+| `ESC_P` / `ESC_I` / `ESC_FF` | 0.03 / 0.3 / 0 | sobrescritos pelo tuning 4 |
+| `ESC_D` | 0 | não usado |
+| `ESC_IMAX` | 10 | limite do integral do lado |
+| `ESC_REV` | ver §3 | bitmask de inversão |
+| `ESC_LMASK` | ver §3 | bitmask do lado esquerdo |
+| `ESC_OPT` | **5** | bit0=log DJIC, bit2=dessaturação |
+| `ESC_BRK` | 1 | freio até `ESC_BRKCUR` |
+| `ESC_BRKCUR` | 30 | % de `ESC_CUR` na frenagem |
+| `ESC_ACC` | 800 | limite de aceleração da referência (rpm/s) |
+| `ESC_LOC_P` | 0 | tuning 6 |
+| `ESC_LOC_I` | 0.5 | tuning 6 (0.5 já ajuda em baixa velocidade) |
+| `ESC_LOC_MAX` | 15 | % de `ESC_CUR`; tuning 5 ajusta |
+| `ESC_SLIP` | 0 nos testes; depois **60** | aviso + limiar de divergência do split |
+| `ESC_WT_RELAY` | 25 | amplitude do relé de roda (% de `ESC_CUR`) |
+| `ESC_WT_RPM` | 15 | ponto de operação (% de `ESC_RPM`) |
+| `ESC_FR1`…`ESC_FR4` | 0 | tuning 5 |
+
+**Não edite / não grave:** `ESC_CMD_L`, `ESC_CMD_R`, `ESC_CMD_SEQ`, `ESC_STAT` (só RAM).
+
+### 2.5 Hardware de referência (4 motores diferencial)
+
+Configuração validada neste projeto:
+
+| Parâmetro | Valor | Significado |
+|---|---|---|
+| `ESC_LMASK` | **9** | esquerda = ESC1 + ESC4 (bits 0+3); direita = ESC2 + ESC3 |
+| `ESC_REV` | **6** | ESC2 e ESC3 invertidos (bits 1+2) |
+
+Se o seu chassi for outro, ignore esses números e faça o passo 3 do zero.
+
+### 2.6 Yaw / Circle / QuickTune
+
+| Parâmetro | Inicial | Nota |
+|---|---|---|
+| `YAWT_MAX_ANG` | 45 | aborta yaw se erro > isso (°) |
+| `YAWT_MAX_OUT` | 20 | amplitude do relé de yaw em **PWM** (%) |
+| `YAWT_GAIN_MULT` | 1 | multiplica P/I de yaw em uso |
+| `CANT_YAW_OUT` | **10** | amplitude do relé de yaw em **CAN** (%) |
+| `CANT_YAW_P` / `CANT_YAW_I` | 0 | gravados pelo tuning 2 em CAN |
+| `RTUN_ENABLE` | 1 | QuickTune ligado |
+| `RTUN_AXES` | 3 | 1=direção, 2=velocidade, 3=ambos |
+| `RTUN_AUTO_SAVE` | 5 | segundos para gravar ao terminar |
+| `CIRC_RADIUS` | 4…20 | m; ajuste à área |
+| `CIRC_SPEED` | ~½ da máxima | m/s; 0 = usa `WP_SPEED` |
+| `CTUN_RELAY` | 5 | amplitude do relé Circle (pontos % de direção) |
+| `CTUN_RAD_ERR` | 2 | m; desvio radial máximo no Circle relay |
+
+---
+
+## 3. Seletor `SCR_USER1`
+
+| Valor | Autotune | Onde | Modo | Grava |
+|---:|---|---|---|---|
+| **0** | operação normal | — | — | — |
+| **1** | QuickTune | chão | CIRCLE recomendado | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
+| **2** | relé de yaw | chão, área livre | HOLD recomendado | PWM: `SCR_USER2/3` · CAN: `CANT_YAW_P/I` |
+| **3** | relé Circle | chão | **CIRCLE** | `ATC_STR_RAT_P/I` |
+| **4** | relé de roda (lado) | chão, ~2 m livres | **HOLD** | `ESC_FF`, `ESC_P`, `ESC_I` |
+| **5** | arranque por roda | **rodas no ar** | **HOLD** | `ESC_FR1..4`, `ESC_LOC_MAX` |
+| **6** | relé diferencial (local) | ar ou chão | **HOLD** | `ESC_LOC_P`, `ESC_LOC_I` |
+
+Com `ESC_CAN=0`, os valores **4 / 5 / 6** só avisam e não fazem nada.
+
+**Abortar:** `SCR_USER1=0` ou desarmar. Nos 4/5/6, sair de HOLD ou mexer no stick também aborta.
+
+> **Atenção:** `SCR_USER1=1` e `=2` iniciam assim que o rover está **armado**, em **qualquer** modo. Só coloque 1 ou 2 quando a área e o modo já estiverem prontos.
+
+---
+
+## 4. Conferir sentido e lados (obrigatório antes do tuning)
+
+1. Rover nos cavaletes / rodas no ar.
+2. `ESC_CAN=1`, `SCR_USER1=0`, armar em **MANUAL**.
+3. GCS: mensagens `ESC: found ESC 1..4`. Se não → §2.1 e §12.
+4. Stick **só para frente** (sem esterçar):
+
+| Sintoma | Ação |
+|---|---|
+| As 4 rodas giram para frente | OK |
+| As 4 giram para trás | `ESC_REV` = atual XOR **15** |
+| Só um lado gira para trás | XOR **6** (ESC2+3) ou XOR **9** (ESC1+4) |
+| Uma roda ao contrário | inverta só o bit (`1`, `2`, `4` ou `8`) |
+
+5. Stick só para a **direita**:
+
+| Sintoma | Ação |
+|---|---|
+| Direita mais lenta / ré, esquerda mais rápida | OK |
+| O contrário | troque lados: `ESC_LMASK` 6 ↔ **9** |
+| Acelerador gira no lugar e esterço anda reto | um lado ainda invertido → volte ao passo 4 |
+
+6. Desarme. Anote `ESC_REV` e `ESC_LMASK` finais (neste hardware: **6** e **9**).
+
+---
+
+## 5. Ordem dos autotunes
+
+A malha de roda muda a planta das de cima. Se retocar `ESC_P/I`, refaça QuickTune / Circle / Yaw.
 
 ```text
-RTun: starting ATC_STR_RAT tune
-RTun: adjusted ATC_STR_RAT_FF ...
-RTun: ATC_STR_RAT_FF tuning done
-RTun: starting ATC_SPEED tune
-RTun: ATC_SPEED_FF tuning done
-RTun: Tuning DONE
-RTun: tuning gains saved
+A. Roda (lado)          SCR_USER1 = 4   HOLD no chão     → ESC_P / ESC_I / ESC_FF
+B. Arranque             SCR_USER1 = 5   HOLD no ar       → ESC_FR1..4 / ESC_LOC_MAX
+C. Local (entre rodas)  SCR_USER1 = 6   HOLD ar ou chão  → ESC_LOC_P / ESC_LOC_I
+D. QuickTune            SCR_USER1 = 1   CIRCLE           → ATC_* / CRUISE_*
+E. Circle relay         SCR_USER1 = 3   CIRCLE           → ATC_STR_RAT_P/I
+F. Yaw relay            SCR_USER1 = 2   HOLD (gira)      → CANT_YAW_P/I  (ou SCR_USER2/3)
 ```
 
-O QuickTune pode avisar que direção, taxa de giro, throttle ou velocidade estão baixos. Para taxa de giro, o código exige comando de direção ≥ 0,10 e taxa de giro > 10°/s, e coleta pelo menos dez segundos e o equivalente a duas voltas. Para velocidade, exige throttle ≥ 0,20, velocidade válida maior que `RTUN_SPEED_MIN` (padrão 0,5 m/s) e dez segundos de dados.
+Depois: `SCR_USER1=0`, `ESC_SLIP=60`, validar MANUAL → depois AUTO.
 
-Se as mensagens indicarem que o comando ou a resposta estão abaixo do mínimo, reveja a velocidade e o raio do Circle. O Mission Planner permite mudar a velocidade durante o teste com **Change Speed**. Se o rover tiver dificuldade para entrar no círculo ou acompanhá-lo mesmo com um raio adequado, revise a malha de posição. O guia do QuickTune cita `PSC_VEL_P=20` como exemplo para veículos muito lentos, abaixo de 0,4 m/s.
+---
 
-Após salvar, compare os parâmetros antes/depois e valide uma missão em `AUTO`. Examine nos logs a taxa de giro desejada e medida, e velocidade desejada e medida. Refaça o tuning se mudar a alocação de motores, pneus, piso, carga ou condições que mudem significativamente a resposta.
+## 6. A — Relé de roda (`SCR_USER1=4`)
 
-## 4. Autotune do PI de alinhamento de yaw
+**Onde:** chão, ~2 m livres à frente e atrás.  
+**Modo:** HOLD. Sticks no centro.  
+**Pré:** passo 4 OK, `ESC_MODE=0`, `ESC_CAN=1`.
 
-### Teoria: realimentação por relé
+### Teoria
 
-O autotune usa o método de realimentação por relé, associado a Åström–Hägglund. Em lugar de um PI provisório, o script aplica uma saída discreta `+d` ou `−d` conforme o erro angular cruza os limites de uma histerese. Isso gera uma oscilação limitada em torno do rumo inicial. O período e a amplitude dessa oscilação aproximam o ganho último `Ku` e o período último `Pu` da planta composta por rover, motores, piso e estimativa de yaw. A regra PI Tyreus–Luyben converte essa estimativa em ganhos conservadores.
+Relé Åström–Hägglund na malha de velocidade do **lado**. Estima `Ku`/`Pu` e grava PI + feed-forward (`ESC_FF`, `ESC_P`, `ESC_I`). O rover anda ~1–2 m oscilando a velocidade e volta em ré.
 
-### O que o rover faz
+### Execução
 
-O procedimento aplica aceleração zero e alterna a direção entre `+d` e `−d`, enquanto mede o erro entre o yaw capturado no início e o yaw atual. O rover deve girar no lugar, alternando o sentido, dentro do limite configurado. O script descarta dois ciclos iniciais, mede quatro ciclos e estima P/I pela regra Tyreus–Luyben. O ensaio roda no mesmo período de 200 ms usado pelo PI de alinhamento.
+1. Arme em HOLD, sticks centrados.
+2. `SCR_USER1=4`.
+3. Mensagens `WheelTune:`:
+   - `started; … rpm forward then reverse`
+   - `forward: Ku … Pu …` / `reverse: …`
+   - `saved ESC_FF=… ESC_P=… ESC_I=…`
+   - `SCR_USER1 set to 0`
+4. Em MANUAL: acelerador leve → as quatro rodas respondem juntas.
 
-As fórmulas usadas são:
+**Falha:** `WheelTune: failed - …` (ganhos antigos ficam). Corrija stick/HOLD/ESC e repita.
+
+---
+
+## 7. B — Arranque por roda (`SCR_USER1=5`)
+
+**Onde:** rover **levantado**, rodas no ar. **Nunca no chão.**  
+**Modo:** HOLD. Sticks centrados.
+
+### Teoria
+
+Sobe a corrente em cada roda até ela girar (frente e ré). Grava a corrente de arranque `ESC_FR1..4` e um `ESC_LOC_MAX` suficiente para o pior desbalanceamento de atrito dentro do lado. Em operação, cada roda recebe a diferença de atrito em relação à média do lado.
+
+### Execução
+
+1. Arme em HOLD.
+2. `SCR_USER1=5`.
+3. Mensagens:
+   - `breakaway started; wheels must be in the air`
+   - `forward breakaway a b c d A` / `reverse …`
+   - `saved ESC_FR … ESC_LOC_MAX=…`
+4. Valores típicos `ESC_FR*` ~0,3–2 A. Uma roda bem acima das outras → mecânica (eixo, rolamento, freio).
+5. Desarme.
+
+---
+
+## 8. C — Relé diferencial / local (`SCR_USER1=6`)
+
+**Onde:** preferência ainda no ar; no chão também.  
+**Modo:** HOLD.  
+**Pré:** A feito; idealmente B feito. Duas rodas por lado (`ESC_LMASK` correto).
+
+### Teoria
+
+Relé na **diferença de RPM** entre as duas rodas do mesmo lado. Grava `ESC_LOC_P` e `ESC_LOC_I`, que redistribuem corrente dentro do par para equalizar velocidade.
+
+### Execução
+
+1. Arme em HOLD.
+2. `SCR_USER1=6`.
+3. Mensagens:
+   - `local relay started; forward then reverse`
+   - `local forward: Ku … Pu …` / `local reverse: …`
+   - `saved ESC_LOC_P=… ESC_LOC_I=…`
+4. MANUAL com pouquíssima velocidade: as quatro devem sair juntas.
+
+### Split de tração (operação normal, sem ensaio)
+
+Além do `ESC_LOC_*`, com `ESC_MODE=0` o driver faz:
+
+1. Se as 2 rodas do lado **divergem** (limiar ≈ `ESC_SLIP`, ou 40 rpm se `ESC_SLIP=0`), o PI do lado passa a seguir a **roda atrasada** (solo), não a média.
+2. Roda **rápida / no ar** → corrente de tração cortada (0; freio leve se passar da meta).
+3. Roda **lenta / no solo** → fica com a corrente do lado; se ainda ~parada, empurra até `ESC_CUR`.
+
+Isso evita o sintoma clássico do giro no eixo: aérea dispara, solo fica parado. Se ainda faltar torque no solo, suba `ESC_LOC_MAX` e/ou `ESC_CUR`.
+
+---
+
+## 9. D — QuickTune (`SCR_USER1=1`)
+
+**Onde:** chão, área para Circle.  
+**Modo recomendado:** CIRCLE.
+
+### Teoria
+
+Identificação feed-forward em campo: relaciona comando ↔ resposta (taxa de giro e velocidade) e deriva P/I pelas razões `RTUN_*_RATIO`.
+
+Com `RTUN_AXES=3` ajusta:
+
+- Direção: `ATC_STR_RAT_FF`, `ATC_STR_RAT_P`, `ATC_STR_RAT_I` (+ filtros se `RTUN_AUTO_FILTER>0`)
+- Velocidade: `CRUISE_SPEED`, `CRUISE_THROTTLE`, `ATC_SPEED_P`, `ATC_SPEED_I`
+
+Não calcula ganhos D.
+
+### Preparação
+
+1. Área plana e livre (ex.: raio 4 m + margem → ~16×16 m).
+2. `CIRC_RADIUS` e `CIRC_SPEED` **antes** de entrar em CIRCLE (`CIRC_SPEED=0` → `WP_SPEED`).
+3. `RTUN_ENABLE=1`, `RTUN_AXES=3`, `RTUN_AUTO_SAVE=5`.
+4. GPS/AHRS OK, bateria OK, E-stop testado.
+
+### Execução
+
+1. Entre em CIRCLE, arme, então `SCR_USER1=1`.
+2. Sticks neutros (movimento de stick pausa a coleta ~4 s).
+3. Mensagens `RTun: …` até `Tuning DONE` / `tuning gains saved`.
+4. `SCR_USER1` → 0. Desarme. Em CAN, o mixer copia `ATC_*` para `CANT_C_*` no desarme.
+
+**Mínimos internos (aprox.):** direção ≥ 0,10 e yaw rate > 10°/s; throttle ≥ 0,20 e velocidade > `RTUN_SPEED_MIN` (0,5 m/s). Se avisar “low”, aumente `CIRC_SPEED` / raio.
+
+### Chave RC (opcional, com `SCR_USER1=0`)
+
+Ex.: `RC6_OPTION=300`, `RTUN_RC_FUNC=300`:
+
+| Posição | Ação |
+|---|---|
+| Baixa | cancela e restaura ganhos pendentes |
+| Meio | inicia / retoma |
+| Alta | pausa e grava (útil com `RTUN_AUTO_SAVE=0`) |
+
+### Parâmetros `RTUN_*`
+
+| Parâmetro | Padrão | Função |
+|---|---:|---|
+| `RTUN_ENABLE` | 1 | habilita |
+| `RTUN_AXES` | 3 | 1 dir, 2 vel, 3 ambos |
+| `RTUN_STR_FFRATIO` | 0,9 | escala FF de taxa |
+| `RTUN_STR_P_RATIO` | 0,5 | P a partir do FF; 0 preserva P |
+| `RTUN_STR_I_RATIO` | 0,5 | I a partir do FF; 0 preserva I |
+| `RTUN_SPD_FFRATIO` | 1,0 | escala cruzeiro/FF velocidade |
+| `RTUN_SPD_P_RATIO` | 1,0 | P velocidade |
+| `RTUN_SPD_I_RATIO` | 1,0 | I velocidade |
+| `RTUN_AUTO_FILTER` | 1 | `FLTT/FLTD` = 0,5×`INS_GYRO_FILTER` |
+| `RTUN_AUTO_SAVE` | 5 | s para gravar (QuickTune e Circle relay) |
+| `RTUN_RC_FUNC` | 300 | função RC |
+| `RTUN_SPEED_MIN` | 0,5 | m/s mínimo para amostras de velocidade |
+
+---
+
+## 10. E — Relé em Circle (`SCR_USER1=3`)
+
+**Onde:** mesmo Circle. **Modo CIRCLE obrigatório.** Sticks neutros.
+
+### Teoria
+
+Relé em torno do comando médio de direção enquanto o Circle roda. Estima `Ku`/`Pu` da planta de taxa de giro e aplica Tyreus–Luyben em `ATC_STR_RAT_P/I` (refino após QuickTune).
+
+### Execução
+
+1. Arme em CIRCLE.
+2. `SCR_USER1=3`.
+3. `CircleTune: waiting for stable Circle` → depois `relay started`.
+4. Sucesso: aplica P/I, espera `RTUN_AUTO_SAVE` s, grava, `SCR_USER1=0`.
+5. Se saturar corrente de roda (`ESC_STAT` bit 1), cancela com aviso.
+
+Estabilidade mínima aproximada: V ≥ 0,3 m/s, |yaw rate| ≥ 3°/s, desvio radial ≤ `CTUN_RAD_ERR`. Log `CRTU` no DataFlash.
+
+Abortar: mudar seletor, sair de CIRCLE ou desarmar. Abort durante a espera de save restaura ganhos anteriores.
+
+---
+
+## 11. F — Relé de yaw (`SCR_USER1=2`)
+
+**Onde:** chão, área livre para girar no lugar.  
+**Modo recomendado:** HOLD. O rover **gira no lugar**.
+
+### Teoria
+
+Relé ±d no steering com histerese de 2° no erro de yaw. Descarta 2 ciclos, mede 4, Tyreus–Luyben:
 
 ```text
-ε = 2° (histerese)
+ε = 2°
 Ku = 4·d / (π·√(A² − ε²))
 Kp = Ku / 3,2
 Ti = 2,2·Pu
 Ki = Kp / Ti
 ```
 
-`A` é a amplitude média do erro e `Pu` é o período médio da oscilação, após descartar os ciclos iniciais. O algoritmo rejeita ciclos com variação acima de 25%, período fora de 0,4–20 s, erro maior que `YAWT_MAX_ANG`, ou experimento acima de 60 s.
+Depois valida headings 0° / 90° / 180° / 270° / 360° e entra em HOLD.
 
-Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `SCR_USER2` e `Ki` para `SCR_USER3`. O controlador é PI (`D=0`) e a saída fica limitada pelo PID Lua. Depois de um ajuste bem-sucedido, o script aplica os ganhos multiplicados por `YAWT_GAIN_MULT` e tenta orientar o rover sucessivamente para 0°, 90°, 180°, 270° e 360°/0°. Cada tentativa e conclusão é informada no GCS. Ao terminar, o rover entra em `HOLD`; se uma etapa exceder o timeout, a sequência é interrompida e o rover também entra em `HOLD`. Ganhos só são apropriados se o sentido do comando fizer o erro diminuir e a estimativa de yaw for estável; o autotune não verifica sozinho a polaridade física de cada motor.
+| Caminho | Amplitude do relé | Ganhos gravados |
+|---|---|---|
+| CAN (`ESC_CAN=1`) | `CANT_YAW_OUT` (padrão 10%) | `CANT_YAW_P`, `CANT_YAW_I` |
+| PWM (`ESC_CAN=0`) | `YAWT_MAX_OUT` (padrão 20%) | `SCR_USER2`, `SCR_USER3` |
+
+Em ambos, o uso operacional multiplica por `YAWT_GAIN_MULT`.
 
 ### Execução
 
-1. Escolha uma área plana, livre ao redor do rover, com margem para girar. Faça primeiro no SITL e depois em ambiente de teste controlado.
-2. Confirme que o rover está parado e fora de missão.
-3. Com o rover parado, selecione `HOLD`, arme e então coloque `SCR_USER1=2`. Como a implementação não exige HOLD, faça isso somente quando puder aceitar que o script tome os motores.
-4. Observe o rover: ele deve alternar giros ao redor do yaw inicial. Se o erro crescer continuamente, o sentido de controle ou a estimativa de yaw pode estar incorreto; interrompa o ensaio.
-5. Sucesso salva P base em `SCR_USER2`, I base em `SCR_USER3`, aplica o multiplicador e inicia a sequência automática de headings. O seletor volta a `SCR_USER1=0`. Falha zera a saída, mas não salva ganhos nem retorna automaticamente o seletor a zero.
-6. Para abortar durante execução, altere `SCR_USER1` para 0 ou desarme. O código não detecta saída de HOLD como cancelamento.
+1. CAN: confira `CANT_YAW_OUT=10`. PWM: `YAWT_MAX_OUT=20`.
+2. HOLD, arme, sticks centrados.
+3. `SCR_USER1=2`.
+4. Mensagens `YawTune:` (Ku, Pu, headings…).
+5. Sucesso → `SCR_USER1=0`, HOLD.
 
-Mensagens incluem `YawTune: started`, progresso de erro/taxa/saída, `Ku`, `Pu`, amplitude, ganhos base/efetivos e o heading de cada etapa. Em falha, podem aparecer `inconsistent cycles`, `Pu out of range`, `response amplitude too small for relay hysteresis`, `oscillation too large` ou `timeout`.
+Abortar: `SCR_USER1=0` ou desarmar. Se “oscillation too large”: baixe `CANT_YAW_OUT` (ex. 8) ou suba `YAWT_MAX_ANG`.
 
-### Uso dos ganhos em missão
+### Uso em missão (AUTO)
 
-O PI ajustado é usado pelo `rover-controlallocation.lua` durante a sequência de verificação após o autotune e durante o alinhamento customizado após a chegada a um waypoint. Para o waypoint, a missão avança, o Lua lê o `z` do waypoint recém-alcançado como yaw desejado, muda para `STEERING` e corrige o rumo. Cada alinhamento termina depois de permanecer 600 ms dentro de ±2° e com velocidade angular abaixo de 2°/s; então o script entra em `HOLD`. Cada etapa tem timeout de 15 s. Os ganhos não substituem `ATC_STR_RAT_*` usados pelo controlador nativo na navegação.
+Após alcançar um waypoint com yaw no `z`, o mixer:
 
-Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign target=... current=... error=...`, em graus. Se o erro aumentar em vez de diminuir sob correção, interrompa e investigue sinal da realimentação/mistura antes de ajustar ganhos.
+1. Lê o yaw desejado do WP.
+2. Muda para **STEERING** e corre o PI de yaw (CAN ou PWM conforme `ESC_CAN`).
+3. Critério de pronto: ~600 ms dentro de ±2° e |yaw rate| < 2°/s → **HOLD**.
+4. Timeout por etapa: 15 s.
 
-### Significado dos parâmetros do autotune de yaw
+Mensagem GCS ~1 Hz: `YawAlign target=… current=… error=…`.  
+Se o erro **aumentar** sob correção → polaridade / `ESC_REV` / `ESC_LMASK`, não só ganhos.
+
+Esses ganhos **não** substituem `ATC_STR_RAT_*` da navegação normal.
+
+---
+
+## 12. Depois do tuning — operação normal e AUTO
+
+| Parâmetro | Valor |
+|---|---|
+| `SCR_USER1` | **0** |
+| `ESC_CAN` | **1** |
+| `ESC_MODE` | **0** |
+| `ESC_SLIP` | **60** |
+
+Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_*` / `CANT_P_*`) e escolhe `CANT_YAW_*` ou `SCR_USER2/3`.
+
+### Checklist pré-missão AUTO
+
+```text
+[ ] SCR_USER1 = 0; ESC_CAN = 1; ESC_MODE = 0
+[ ] ESC_LMASK / ESC_REV conferidos (ex.: 9 / 6)
+[ ] Malha de roda feita (4 → 5 → 6)
+[ ] QuickTune + (opcional) Circle relay + yaw feitos
+[ ] GPS 3D fix / AHRS saudável; bateria OK
+[ ] Missão com WPs e yaw (z) onde o alinhamento for necessário
+[ ] THRO_MAX_LUA / WP_SPEED / CIRC_* coerentes com a área
+[ ] Teste curto em MANUAL: frente, ré, giro no eixo (4 rodas no solo)
+[ ] E-stop / desarmar testados
+```
+
+### O que esperar em AUTO
+
+| Fase | Comportamento |
+|---|---|
+| Entre waypoints | ArduRover manda throttle/steering → mixer → RPM L/R → PI de roda |
+| Chegada com yaw | Lua alinha em STEERING com PI de yaw CAN |
+| Patinagem 1 roda no ar | split de tração: corta aérea, empurra solo |
+| Falha ESC / feedback | `esc_can` para motores e avisa no GCS |
+
+---
+
+## 13. Checklist rápido no campo
+
+```text
+[ ] c620_can.lua apagado; scripts novos; reboot
+[ ] CAN_D1_PROTOCOL=10; só uma porta com DRIVER ≠ 0
+[ ] SCR_HEAP_SIZE ≥ 400000; SCR_VM_I_COUNT=100000
+[ ] SCR_USER5=2; SCR_USER1=0
+[ ] ESC_CAN=1; ESC_MODE=0
+[ ] Passo 4: sentido/lados OK (ESC_REV / ESC_LMASK)
+[ ] A  SCR_USER1=4  HOLD no chão          → ESC_P/I/FF
+[ ] B  SCR_USER1=5  HOLD no ar            → ESC_FR* / LOC_MAX
+[ ] C  SCR_USER1=6  HOLD (ar ou chão)     → ESC_LOC_P/I
+[ ] D  SCR_USER1=1  CIRCLE                → ATC_* / CRUISE
+[ ] E  SCR_USER1=3  CIRCLE                → ATC_STR_RAT_P/I
+[ ] F  SCR_USER1=2  HOLD (gira no lugar)  → CANT_YAW_P/I
+[ ] SCR_USER1=0; ESC_SLIP=60
+[ ] Validar MANUAL e depois missão AUTO curta
+```
+
+---
+
+## 14. Problemas comuns
+
+| Sintoma | O que olhar |
+|---|---|
+| `ESC 1 not found` / `ESC rx 0 0 0 0` | `CAN_D1_PROTOCOL=10`, porta CAN, bateria ESC, sem `c620_can.lua` |
+| `SCR_USER1=4 needs ESC_CAN=1` | `ESC_CAN` está 0 |
+| `center the sticks to start` | stick fora do trim |
+| `not enough mem` | `SCR_HEAP_SIZE=500000` + reboot; tire scripts extras |
+| Script some / não carrega | `SCR_VM_I_COUNT=100000` |
+| Uma roda só anda / aérea gira e solo para | rode B+C; suba `ESC_LOC_MAX` e `ESC_CUR`; confira `ESC_SLIP` |
+| Acelerador e esterço “trocados” | `ESC_REV` (§4) |
+| Vira para o lado errado | `ESC_LMASK` (6 ↔ 9) |
+| QuickTune “throttle/speed low” | `CIRC_SPEED` / raio / `ESC_RPM` |
+| Yaw “oscillation too large” | baixe `CANT_YAW_OUT` ou suba `YAWT_MAX_ANG` |
+| Circle relay cancela por saturação | baixe `CIRC_SPEED` / `CTUN_RELAY` ou suba `ESC_CUR` |
+| YawAlign erro cresce | polaridade / LMASK / REV antes de mexer em P/I |
+| Troca CAN↔PWM estranha nos ATC | desarme; deixe o mixer sincronizar `CANT_ACTIVE` |
+
+---
+
+## 15. Significado rápido dos parâmetros de yaw
 
 | Parâmetro | Significado |
 |---|---|
-| `SCR_USER1` | Seletor compartilhado nesta branch: 0 = operação normal; 1 = QuickTune automático enquanto armado; 2 = autotune de yaw enquanto armado; 3 = autotune de taxa de giro enquanto armado em Circle. |
-| `SCR_USER2` | P do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
-| `SCR_USER3` | I do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
-| `YAWT_MAX_ANG` | Limite do erro angular do experimento; acima dele o autotune aborta. Padrão: 45°. |
-| `YAWT_MAX_OUT` | Amplitude desejada do relé em porcentagem. Padrão: 20%, limitada internamente a 5–45%. |
-| `YAWT_GAIN_MULT` | Multiplicador dos ganhos P/I durante alinhamentos. Padrão: 1; faixa aceita: 0,1–10000. Os valores base permanecem em `SCR_USER2/3`. |
+| `SCR_USER1` | 0 normal; 1 QuickTune; 2 yaw; 3 Circle; 4/5/6 roda CAN |
+| `SCR_USER2/3` | P/I yaw no caminho **PWM** |
+| `CANT_YAW_P/I` | P/I yaw no caminho **CAN** |
+| `CANT_YAW_OUT` | amplitude do relé yaw em CAN (%) |
+| `YAWT_MAX_ANG` | aborta se \|erro\| > isso |
+| `YAWT_MAX_OUT` | amplitude do relé yaw em PWM (%) |
+| `YAWT_GAIN_MULT` | multiplica P/I em alinhamentos (0,1–10000) |
 
-`SCR_USER2/3` não são parâmetros `ATC_*`. Eles só alimentam o `steering_steady_pid` usado para alinhamento após waypoint; não ajustam a navegação normal em `AUTO`.
+---
 
-## 5. Autotune da taxa de giro por relé em Circle
+## 16. Referências
 
-Este método roda em Lua com as APIs já disponíveis no firmware desta branch. Ele ajusta `ATC_STR_RAT_P` e `ATC_STR_RAT_I`, os mesmos ganhos de direção que o QuickTune pode ajustar.
-
-1. Atualize `rover-controlallocation.lua`, `rover-quicktune.lua`, `modules/autotune.lua` e `modules/circle-tune.lua` no cartão SD. Anote os ganhos P e I atuais antes do ensaio.
-2. Configure `CIRC_RADIUS` e `CIRC_SPEED`, selecione `CIRCLE` e arme com `SCR_USER1=3`. Deixe a saída dos motores habilitada e os comandos RC em neutro.
-3. Após a mensagem `CircleTune: waiting for stable Circle`, o alocador repassa os comandos nativos. O script espera três segundos de curva estável, com velocidade longitudinal de pelo menos 0,3 m/s, taxa de giro de pelo menos 3°/s em magnitude e desvio radial dentro do limite. A espera termina após 60 segundos se o ponto de operação não estabilizar.
-4. Quando aparecer `CircleTune: relay started`, o Lua alterna a direção em torno do comando médio medido. Com base de 30% e amplitude de 5 pontos percentuais, aplica 25% e 35%. O rover segue para a frente e tende a alternar entre curvas um pouco mais fechadas e mais abertas. O Circle continua regulando o throttle. O mixer pode fazer a velocidade variar junto com a direção.
-5. Ao aceitar os ciclos, o script aplica P/I em RAM e volta a repassar a saída de direção do PID nativo. O GCS informa os ganhos, `Ku` e `Pu`. Mantenha o rover armado em Circle durante `RTUN_AUTO_SAVE` segundos (padrão 5). Depois da espera, o script grava os dois ganhos e salva `SCR_USER1=0`. Com `RTUN_AUTO_SAVE=0`, os ganhos ficam em RAM e podem ser gravados pelo GCS.
-
-O relé comuta pela diferença entre a taxa de giro média e a medida, com histerese de 1°/s. Ele usa a regra PI da seção de yaw, agora com o erro em rad/s. Descarta dois ciclos e mede quatro. A validação exige período entre 0,5 e 20 s, amplitude acima de duas vezes a histerese e consistência de amplitude e período entre ciclos. O ensaio aceita erro de taxa de até 12°/s e tem timeout de 60 s a partir do início do relé.
-
-| Parâmetro | Padrão | Função |
-|---|---:|---|
-| `CTUN_RELAY` | 5 | Amplitude do relé em pontos percentuais do comando normalizado de direção. Aceita 1 a 20. |
-| `CTUN_RAD_ERR` | 2 m | Desvio radial máximo em relação à borda do círculo. Aceita valores positivos. |
-
-Para interromper o ensaio, mude o seletor, saia de Circle ou desarme. O Lua também interrompe a coleta se detectar parada de emergência, perda da medição, intervenção pelo RC, excesso de desvio radial ou variação de velocidade, atraso na amostragem ou ciclos inválidos. O PID nativo continua calculando a direção em segundo plano. Se esse comando se afastar mais de 15 pontos percentuais da base, o Lua encerra o relé e volta a usar o comando nativo. Se o ensaio for interrompido durante a espera pela gravação automática, o script restaura os ganhos anteriores. Para tentar novamente após um aborto, desarme ou tire o seletor de 3.
-
-O log `CRTU` registra a referência e a taxa de giro medida em rad/s, a velocidade em m/s, o desvio radial em metros, throttle, direção, PWM esquerdo e direito e o número do ciclo. A lógica foi verificada com sinais simulados em Lua. A resposta em SITL e no rover físico ainda precisa ser validada.
-
-## 6. Parâmetros `RTUN_*` do QuickTune
-
-O script cria estes parâmetros no primeiro boot em que carrega:
-
-| Parâmetro | Padrão | Função |
-|---|---:|---|
-| `RTUN_ENABLE` | 1 | Habilita QuickTune |
-| `RTUN_AXES` | 3 | Bitmask: 1 direção, 2 velocidade, 3 ambas |
-| `RTUN_STR_FFRATIO` | 0,9 | Escala FF de taxa de giro |
-| `RTUN_STR_P_RATIO` | 0,5 | Proporção do FF usada para P de direção; 0 preserva o P atual |
-| `RTUN_STR_I_RATIO` | 0,5 | Proporção do FF usada para I de direção; 0 preserva o I atual |
-| `RTUN_SPD_FFRATIO` | 1,0 | Escala estimativa de cruzeiro/FF de velocidade |
-| `RTUN_SPD_P_RATIO` | 1,0 | Proporção usada para P de velocidade; 0 preserva P atual |
-| `RTUN_SPD_I_RATIO` | 1,0 | Proporção usada para I de velocidade; 0 preserva I atual |
-| `RTUN_AUTO_FILTER` | 1 | Ajusta `ATC_STR_RAT_FLTT/FLTD` a partir de `INS_GYRO_FILTER` |
-| `RTUN_AUTO_SAVE` | 5 s | Espera para gravação automática no QuickTune e no relé em Circle. Zero desabilita a gravação automática. |
-| `RTUN_RC_FUNC` | 300 | Função de scripting da chave RC para executar ou salvar nos seletores 0 e 2 |
-| `RTUN_SPEED_MIN` | 0,5 m/s | Velocidade mínima para amostras de speed tuning |
-
-## 7. Arquivos e testes
-
-Arquivos necessários no cartão para estes recursos:
-
-- `scripts/rover-controlallocation.lua`
-- `scripts/rover-quicktune.lua`
-- `scripts/modules/autotune.lua`
-- `scripts/modules/circle-tune.lua`
-- `scripts/modules/functions.lua`
-- `scripts/modules/pid.lua`
-
-O QuickTune cria os parâmetros `RTUN_*` descritos na seção 6. `system-start.lua` só é necessário para os parâmetros customizados da aplicação de barco; o alocador Rover desta branch não depende de `BATT_SOC_SYSSTART`.
-
-Os testes auxiliares em `Rover/tests/` simulam APIs Lua e podem ajudar a verificar a lógica local, mas não substituem SITL nem validação física. O alocador e a mistura PWM devem ser verificados com o arranjo de motores real.
-
-### Referências
-
+- Manual operacional resumido: `Manual-Tuning-CAN.md`
+- Arquitetura CAN / mixer: `Controle-CAN.md`
 - [Rover QuickTune — ArduPilot](https://ardupilot.org/rover/docs/quiktune.html)
 - [Rover Tuning Process](https://ardupilot.org/rover/docs/rover-tuning-process.html)
 - [Tuning Turn Rate](https://ardupilot.org/rover/docs/rover-tuning-steering-rate.html)

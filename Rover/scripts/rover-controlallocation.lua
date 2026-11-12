@@ -35,6 +35,113 @@ assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1)
 assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 1, 'MAX_LUA', 90), 'could not add THRO_MAX_LUA parameter')
 local throttle_max_lua_param = Parameter()
 assert(throttle_max_lua_param:init('THRO_MAX_LUA'), 'could not bind THRO_MAX_LUA parameter')
+
+-- CAN path (esc_can.lua). Lua scripts do not share globals, so the mixer and the
+-- driver talk through RAM-only ESC_* parameters. Everything CAN-specific in this
+-- file is behind can_selected(); with ESC_CAN = 0 the PWM path is unchanged.
+local ESC_STAT_CAN = 1
+-- Match esc_can reactivity: publish L/R as fast as scripting allows on the CAN path.
+local CAN_MIXER_PERIOD_MS = 20
+local CAN_PWM_DIVISOR = 500
+local esc_stat_param = Parameter()
+local esc_cmd_l_param = Parameter()
+local esc_cmd_r_param = Parameter()
+local esc_cmd_seq_param = Parameter()
+local esc_params_bound = false
+local esc_bind_retry_ms = 0
+local esc_cmd_seq = 0
+
+local function bindEscParams()
+  if esc_params_bound then
+    return true
+  end
+  local now = millis():toint()
+  if now < esc_bind_retry_ms then
+    return false
+  end
+  esc_bind_retry_ms = now + 2000
+  esc_params_bound = esc_stat_param:init('ESC_STAT') and esc_cmd_l_param:init('ESC_CMD_L') and
+    esc_cmd_r_param:init('ESC_CMD_R') and esc_cmd_seq_param:init('ESC_CMD_SEQ')
+  return esc_params_bound
+end
+
+local function can_selected()
+  if not bindEscParams() then
+    return false
+  end
+  return (math.floor(esc_stat_param:get() or 0) & ESC_STAT_CAN) ~= 0
+end
+
+-- Any pulse on MAIN 1..4 drops the C620 out of CAN mode, so with ESC_CAN = 1 the
+-- mixer must not write PWM even before esc_can.lua has published ESC_STAT
+local function pwm_allowed()
+  return (param:get('ESC_CAN') or 0) < 0.5
+end
+
+local function sendCanCommand(norm_l, norm_r)
+  esc_cmd_l_param:set(norm_l)
+  esc_cmd_r_param:set(norm_r)
+  esc_cmd_seq = (esc_cmd_seq + 1) % 1000000
+  esc_cmd_seq_param:set(esc_cmd_seq)
+end
+
+-- In CAN the mixer runs faster so the driver's interpolation adds little delay
+local function modePeriod(pwm_period_ms)
+  if can_selected() then
+    return math.min(pwm_period_ms, CAN_MIXER_PERIOD_MS)
+  end
+  return pwm_period_ms
+end
+
+-- CAN gain set. ATC_* and CRUISE_THROTTLE hold the set of the active path;
+-- the other path's copy lives here and is swapped in while disarmed.
+local CAN_GAINS_PARAM_TABLE_KEY = 19
+local CAN_GAIN_SWAP = {
+  { 'ATC_STR_RAT_FF', 'STRFF' },
+  { 'ATC_STR_RAT_P', 'STRP' },
+  { 'ATC_STR_RAT_I', 'STRI' },
+  { 'ATC_SPEED_P', 'SPDP' },
+  { 'ATC_SPEED_I', 'SPDI' },
+  { 'CRUISE_THROTTLE', 'CRUISE' },
+}
+assert(param:add_table(CAN_GAINS_PARAM_TABLE_KEY, 'CANT_', 5 + 2 * #CAN_GAIN_SWAP), 'could not add CANT_ parameter table')
+--[[
+  // @Param: CANT_YAW_P
+  // @DisplayName: CAN yaw alignment P
+  // @Description: Yaw alignment P used with ESC_CAN = 1 (SCR_USER2 is used with PWM). 0 keeps the default
+  // @User: Standard
+
+  // @Param: CANT_YAW_I
+  // @DisplayName: CAN yaw alignment I
+  // @Description: Yaw alignment I used with ESC_CAN = 1 (SCR_USER3 is used with PWM). 0 keeps the default
+  // @User: Standard
+
+  // @Param: CANT_YAW_OUT
+  // @DisplayName: CAN yaw autotune relay
+  // @Description: Steering relay of the yaw autotune with ESC_CAN = 1 (YAWT_MAX_OUT is used with PWM)
+  // @Units: %
+  // @Range: 5 45
+  // @User: Standard
+
+  // @Param: CANT_ACTIVE
+  // @DisplayName: Gain set loaded in ATC_*
+  // @Description: 0 = PWM set, 1 = CAN set. Managed by the script
+  // @User: Advanced
+
+  // @Param: CANT_C_VALID
+  // @DisplayName: CAN gain set initialised
+  // @Description: 0 until the CAN set has been created from the PWM set. Managed by the script
+  // @User: Advanced
+--]]
+assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 1, 'YAW_P', 0), 'could not add CANT_YAW_P parameter')
+assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 2, 'YAW_I', 0), 'could not add CANT_YAW_I parameter')
+assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 3, 'YAW_OUT', 10), 'could not add CANT_YAW_OUT parameter')
+assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 4, 'ACTIVE', 0), 'could not add CANT_ACTIVE parameter')
+assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5, 'C_VALID', 0), 'could not add CANT_C_VALID parameter')
+for n, item in ipairs(CAN_GAIN_SWAP) do
+  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + n, 'C_' .. item[2], 0), 'could not add CANT_C_' .. item[2])
+  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + #CAN_GAIN_SWAP + n, 'P_' .. item[2], 0), 'could not add CANT_P_' .. item[2])
+end
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
@@ -66,6 +173,12 @@ local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
 local yaw_align_steps = 0
 local yaw_settle_steps = 0
+-- In CAN the mixer runs every 20 ms but the yaw PI and relay keep their 200 ms step
+local YAW_TICK_TOLERANCE_MS = 10
+local yaw_last_tick_ms = 0
+local yaw_last_s_out = 0
+local yaw_tune_last_tick_ms = 0
+local yaw_tune_last_s_out = 0
 
 local last_nav_idx = nil
 
@@ -139,6 +252,81 @@ if saved_p > 0 and saved_i > 0 then
   steering_steady_pid:setGains(saved_p * gain_multiplier, saved_i * gain_multiplier, 0)
 end
 
+-- Gain set currently loaded in the yaw PI: 0 = PWM (SCR_USER2/3), 1 = CAN (CANT_YAW_P/I)
+local yaw_gain_path = 0
+local YAW_DEFAULT_P, YAW_DEFAULT_I = 3.5, 8
+
+local function yawGainNames(can)
+  if can then
+    return 'CANT_YAW_P', 'CANT_YAW_I'
+  end
+  return 'SCR_USER2', 'SCR_USER3'
+end
+
+local function loadYawGains(can)
+  local p_name, i_name = yawGainNames(can)
+  local p, i = param:get(p_name) or 0, param:get(i_name) or 0
+  if p > 0 and i > 0 then
+    local gain_multiplier = getYawGainMultiplier()
+    steering_steady_pid:setGains(p * gain_multiplier, i * gain_multiplier, 0)
+  else
+    steering_steady_pid:setGains(YAW_DEFAULT_P, YAW_DEFAULT_I, 0)
+  end
+  steering_steady_pid:resetInternalState()
+  yaw_gain_path = can and 1 or 0
+end
+
+local function setAndSaveIfChanged(name, value)
+  if value ~= nil and param:get(name) ~= value then
+    param:set_and_save(name, value)
+  end
+end
+
+--[[
+Keep ATC_* / CRUISE_THROTTLE on the gain set of the active output path.
+Only called while disarmed. With PWM only (CANT_ACTIVE = 0 and CAN never on)
+nothing is written.
+--]]
+local function syncGainSet()
+  -- Give esc_can.lua time to publish ESC_STAT after boot before deciding the path
+  if millis():toint() < 6000 then
+    return
+  end
+  local can = can_selected()
+  local want = can and 1 or 0
+  local active = param:get('CANT_ACTIVE') or 0
+  if want == active then
+    if can then
+      -- QuickTune and the Circle relay write ATC_*; keep the CAN copy current
+      for _, item in ipairs(CAN_GAIN_SWAP) do
+        setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
+      end
+    end
+  else
+    local out_prefix = (active == 1) and 'CANT_C_' or 'CANT_P_'
+    for _, item in ipairs(CAN_GAIN_SWAP) do
+      setAndSaveIfChanged(out_prefix .. item[2], param:get(item[1]))
+    end
+    if can and (param:get('CANT_C_VALID') or 0) == 0 then
+      for _, item in ipairs(CAN_GAIN_SWAP) do
+        setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
+      end
+      param:set_and_save('CANT_C_VALID', 1)
+      gcs:send_text(MAV_SEVERITY.WARNING, 'CAN gains: first CAN use, starting from the PWM gains; retune in CAN')
+    else
+      local in_prefix = can and 'CANT_C_' or 'CANT_P_'
+      for _, item in ipairs(CAN_GAIN_SWAP) do
+        setAndSaveIfChanged(item[1], param:get(in_prefix .. item[2]))
+      end
+    end
+    param:set_and_save('CANT_ACTIVE', want)
+    gcs:send_text(MAV_SEVERITY.NOTICE, string.format('Gain set: %s loaded into ATC_*', can and 'CAN' or 'PWM'))
+  end
+  if yaw_gain_path ~= want then
+    loadYawGains(can)
+  end
+end
+
 -- Severity for logging in GCS
 MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
 -- Rover driving modes
@@ -173,6 +361,15 @@ local function applyControlAllocation(t, s, timeout_ms)
   local pwm_max = PWM_TRIM_VALUE + pwm_range
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
+  if can_selected() then
+    -- Same fraction as the PWM path, positive = forward on both sides; ESC_REV sets motor direction
+    sendCanCommand(funcs:mapMaxMin(pwm_aloc_l, -pwm_range, pwm_range) / CAN_PWM_DIVISOR,
+      funcs:mapMaxMin(pwm_aloc_r, -pwm_range, pwm_range) / CAN_PWM_DIVISOR)
+    return pwm_l, pwm_r
+  end
+  if not pwm_allowed() then
+    return pwm_l, pwm_r
+  end
   SRV_Channels:set_output_pwm_chan_timeout(0, pwm_r, timeout_ms)
   SRV_Channels:set_output_pwm_chan_timeout(1, pwm_l, timeout_ms)
   SRV_Channels:set_output_pwm_chan_timeout(2, pwm_l, timeout_ms)
@@ -191,6 +388,20 @@ local function resetYawControlState()
   yaw_align_steps = 0
   yaw_settle_steps = 0
   steering_steady_pid:resetInternalState()
+  yaw_last_s_out = 0
+  yaw_last_tick_ms = 0
+end
+
+-- True when the 200 ms yaw step is due; always true in PWM, where the mixer itself runs at 200 ms
+local function yawTickDue(last_tick_ms)
+  if not can_selected() then
+    return true, last_tick_ms
+  end
+  local now = millis():toint()
+  if last_tick_ms == 0 or now - last_tick_ms >= UPDATE_PERIOD_MS - YAW_TICK_TOLERANCE_MS then
+    return true, now
+  end
+  return false, last_tick_ms
 end
 
 local function startYawVerificationSequence()
@@ -201,6 +412,8 @@ local function startYawVerificationSequence()
   yaw_settle_steps = 0
   last_yaw_align_log_ms = 0
   steering_steady_pid:resetInternalState()
+  yaw_last_s_out = 0
+  yaw_last_tick_ms = 0
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: tentando orientar: 0°, 90°, 180°')
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: depois 270° e 360°/0°')
   gcs:send_text(MAV_SEVERITY.INFO, string.format(
@@ -234,6 +447,8 @@ local function advanceYawVerificationSequence()
   yaw_settle_steps = 0
   last_yaw_align_log_ms = 0
   steering_steady_pid:resetInternalState()
+  yaw_last_s_out = 0
+  yaw_last_tick_ms = 0
   gcs:send_text(MAV_SEVERITY.INFO, string.format(
     'YawTune: tentando orientar para %d° (etapa %d/%d)',
     YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
@@ -313,6 +528,8 @@ local function triggerYawControlOnReachedWaypoint()
     steering_steady_pid:resetInternalState()
     yaw_align_steps = 0
     yaw_settle_steps = 0
+    yaw_last_s_out = 0
+    yaw_last_tick_ms = 0
     -- Stop the vehicle and take over yaw using STEERING mode
     applyControlAllocation(0, 0)
     vehicle:set_mode(DRIVING_MODES.STEERING)
@@ -328,6 +545,16 @@ end
 Control the actions while not armed
 --]]
 local function notArmed()
+  if can_selected() then
+    -- A trim pulse on MAIN 1..4 knocks the C620 off CAN; esc_can.lua holds them at 0
+    sendCanCommand(0, 0)
+    last_manual_throttle = 0
+    last_manual_steering = 0
+    return
+  end
+  if not pwm_allowed() then
+    return
+  end
   SRV_Channels:set_output_pwm_chan_timeout(0, PWM_TRIM_VALUE, 3000)
   SRV_Channels:set_output_pwm_chan_timeout(1, PWM_TRIM_VALUE, 3000)
   SRV_Channels:set_output_pwm_chan_timeout(2, PWM_TRIM_VALUE, 3000)
@@ -341,6 +568,16 @@ local function applyPWMManualMode()
   local rc3_pwm = rc:get_pwm(3)
   local rc1_pwm = rc:get_pwm(1)
   local raw_throttle = 0
+
+  if can_selected() then
+    -- CAN path is fully reactive: no Lua stick smoothing; ESC_ACC should stay 0
+    local can_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
+    if radio_type == 1 then
+      can_throttle = (rc3_pwm - RC3_TRIM_VALUE) / 450
+    end
+    applyControlAllocation(can_throttle, (rc1_pwm - RC1_TRIM_VALUE) / 450)
+    return
+  end
 
   -- Compares the diff from the last manual signals to the maximum rate we are accepting
   -- Make the actual command be a rate from the last to the required command if necessary
@@ -368,6 +605,13 @@ local function applyPWMSteeringMode()
   if vehicle:get_mode() ~= DRIVING_MODES.STEERING then
     steering_steady_pid:resetInternalState()
     yaw_settle_steps = 0
+    return
+  end
+
+  local tick_due
+  tick_due, yaw_last_tick_ms = yawTickDue(yaw_last_tick_ms)
+  if not tick_due then
+    applyControlAllocation(0, yaw_last_s_out)
     return
   end
 
@@ -430,6 +674,7 @@ local function applyPWMSteeringMode()
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
+  yaw_last_s_out = s_out
   applyControlAllocation(0, s_out)
 end
 
@@ -482,9 +727,23 @@ Switch high starts the relay test around the current yaw; switch low aborts/rear
 --]]
 local function runYawAutotune()
   if autotune_done then return false end
+  local can = can_selected()
+  if can and autotune.status ~= "idle" then
+    local tick_due
+    tick_due, yaw_tune_last_tick_ms = yawTickDue(yaw_tune_last_tick_ms)
+    if not tick_due then
+      applyControlAllocation(0, yaw_tune_last_s_out)
+      return true
+    end
+  end
   if autotune.status == "idle" then
     autotune_target_rad = ahrs:get_yaw()
-    autotune.relay = math.max(0.05, math.min(0.45, yaw_max_out_param:get() / 100))
+    local relay_pct = yaw_max_out_param:get()
+    if can then
+      relay_pct = param:get('CANT_YAW_OUT') or 10
+      yaw_tune_last_tick_ms = millis():toint()
+    end
+    autotune.relay = math.max(0.05, math.min(0.45, relay_pct / 100))
     autotune:start()
     yaw_tune_last_progress = 0
     yaw_tune_last_log_s = -1
@@ -496,6 +755,7 @@ local function runYawAutotune()
   local yaw_rate = ahrs:get_gyro():z()
   autotune.max_amp_rad = math.rad(yaw_max_angle_param:get())
   local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
+  yaw_tune_last_s_out = s_out
   applyControlAllocation(0, s_out)
   if autotune.cycle > yaw_tune_last_progress or autotune.t - yaw_tune_last_log_s >= 2 then
     yaw_tune_last_progress = autotune.cycle
@@ -510,14 +770,19 @@ local function runYawAutotune()
     local gain_multiplier = getYawGainMultiplier()
     local effective_p = r.P * gain_multiplier
     local effective_i = r.I * gain_multiplier
-    param:set_and_save('SCR_USER2', r.P)
-    param:set_and_save('SCR_USER3', r.I)
+    local p_name, i_name = yawGainNames(can)
+    param:set_and_save(p_name, r.P)
+    param:set_and_save(i_name, r.I)
     steering_steady_pid:setGains(effective_p, effective_i, 0)
     steering_steady_pid:resetInternalState()
+    yaw_gain_path = can and 1 or 0
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
       "YawTune: saved base P=%.3f I=%.3f; using P=%.3f I=%.3f (x%.2f)",
       r.P, r.I, effective_p, effective_i, gain_multiplier))
+    if can then
+      gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: CAN gains saved in CANT_YAW_P/I")
+    end
     if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
       param:set_and_save(TUNE_SELECT_PARAM, TUNE_MODE.NORMAL)
       gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER1 set to 0 (normal)")
@@ -568,7 +833,10 @@ local function update()
     last_nav_idx = nil
     autotune:reset()
     autotune_done = false
+    yaw_tune_last_tick_ms = 0
+    yaw_tune_last_s_out = 0
     circle_tune:reset("disarmed")
+    syncGainSet()
     notArmed()
     return update, 2000
   end
@@ -599,7 +867,7 @@ local function update()
     circle_tune:reset("selector changed")
     runYawAutotune()
     if autotune.status == "fail" or autotune_done then applyControlAllocation(0, 0) end
-    return update, AUTOTUNE_PERIOD_MS
+    return update, modePeriod(AUTOTUNE_PERIOD_MS)
   end
   if selector ~= TUNE_MODE.CIRCLE then
     circle_tune:reset("selector changed")
@@ -619,32 +887,32 @@ local function update()
   end
   if vehicle_mode == DRIVING_MODES.MANUAL then
     applyPWMManualMode()
-    return update, 200
+    return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.STEERING then
     -- We use steering mode for yaw alignment
     applyPWMSteeringMode()
-    return update, 200
+    return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.AUTO then
     applyPWMAutoMode()
-    return update, 200
+    return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.SIMPLE then
     applyPWMInternalControl()
-    return update, 200
+    return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.CIRCLE then
     -- Keep the same actuator update period used to identify the steering loop.
     applyPWMInternalControl(60)
     return update, CircleTune.PERIOD_MS
   elseif vehicle_mode == DRIVING_MODES.ACRO or vehicle_mode == DRIVING_MODES.RTL then
     applyPWMInternalControl()
-    return update, 200
+    return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
-    return update, 200
+    return update, modePeriod(200)
   end
   -- Unhandled mode: stop safely but keep the script alive
   applyControlAllocation(0, 0)
-  return update, 200
+  return update, modePeriod(200)
 end
 
 gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
