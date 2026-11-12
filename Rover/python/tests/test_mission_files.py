@@ -175,6 +175,28 @@ class FileStartTests(unittest.TestCase):
 
 
 class ExitFreshnessTests(unittest.TestCase):
+    def test_reverse_holds_command_between_fresh_repeated_observations(self):
+        import numpy as np
+        from mission_manager.geometry import Envelope
+        def observation(back,stamp):return dict(forward=back,right=0.,normal_yaw=0.,stamp=stamp)
+        samples=[observation(i*.1,1+i*.2) for i in range(1,31) for _ in range(2 if i<30 else 1)]
+        current=[0.]
+        def snapshot():
+            p=samples.pop(0);current[0]=p['forward'];return p,np.empty((0,3))
+        owner=NS(link=Mock(),envelope=Envelope(),station=STATION,machine=Mock(pending=True),
+                 args=NS(exit_timeout=180,sensor_recovery=10),event=Mock(),
+                 perception=NS(snapshot=snapshot))
+        m=Motion(owner);m.command=Mock();m.check=Mock();m.drain=Mock()
+        m.tune=Mock();m.allow_inside=Mock();m.stop=Mock()
+        m.pose=Mock(side_effect=[observation(0.,1.),observation(3.,7.)])
+        m.exit_observation=lambda **kw:(np.array([-current[0],0.,0.]),0.,np.empty((0,3)))
+        m.exit()
+        owner.machine.confirmed_outside.assert_called_once()
+        m.stop.assert_called_once()
+        self.assertTrue(m.command.call_args_list)
+        self.assertTrue(all(c.args[0]<0 and c.args[1]==0 for c in m.command.call_args_list),
+                        'A repeated but still-fresh pose must not insert stop pulses')
+
     def motion(self, errors):
         o=NS(args=NS(sensor_recovery=1.),event=Mock(),
              perception=NS(sensor=NS(lio=Mock(side_effect=errors)),sweep=Mock(return_value=['fresh scan'])))

@@ -18,15 +18,21 @@ from sensores import Sensores
 from geometria import pontos_3d
 
 class Perception:
-    def __init__(self, link, namespace, cloud, odom, no_qr=False):
+    def __init__(self, link, namespace, cloud, odom, no_qr=False, raw_cloud=None, geometry_process=False):
         self.link=link
         self.sensor=Sensores(cloud,odom,wall_timeout=3.)
-        self.raw_sensor=Sensores(namespace+'/livox/lidar',odom,wall_timeout=3.)
+        self.raw_sensor=Sensores(raw_cloud or namespace+'/livox/lidar',odom,wall_timeout=3.)
         self.station=None;self.lock=threading.Lock();self.done=threading.Event()
         self.lidar=None;self.qr=None;self.points=None
         self.error='Aguardando geometria';self.wall=0.;self.threads=[]
-        self.diagnostic={};self.last_dump=0.
+        self.diagnostic={};self.last_dump=0.;self.last_timing=0.
         self.camera=None;self.joints=None
+        self.executor=None
+        if geometry_process:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            # Spawn, never fork an existing ROS executor/DDS participant.
+            self.executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'))
         if not no_qr:
             import cv2
             cv2.setNumThreads(1)
@@ -54,17 +60,31 @@ class Perception:
                 stamp=ros.seconds(msg.header.stamp)
                 if stamp==last_stamp:continue
                 last_stamp=stamp
+                began=time.monotonic()
+                input_age=ros.age(msg.header.stamp) if hasattr(self.link,'owner') else None
+                fit_args={'max_points':1200}
+                if getattr(self,'executor',None) is not None:fit_args['executor']=self.executor
                 # Prefer the current scan: no SLAM accumulation latency. The
                 # registered local window is a quality-gated fallback when a
                 # single scan lacks enough independent container surfaces.
                 try:
-                    result=self.raw_sensor.pose(self.link,station,msg,max_points=1200)
+                    result=self.raw_sensor.pose(self.link,station,msg,**fit_args)
                     result['cloud_source']=self.raw_sensor.topic
+                    points=result.pop('_sweep_points',None)
                 except ValueError:
                     local=self.sensor.fresh_cloud()
-                    result=self.sensor.pose(self.link,station,local,max_points=1200)
+                    result=self.sensor.pose(self.link,station,local,**fit_args)
                     result['cloud_source']=self.sensor.topic
-                points=pontos_3d(cloud_xyz(msg),corrected=True)
+                    # A fallback fit never replaces the CURRENT protective scan.
+                    result.pop('_sweep_points',None);points=None
+                fitted=time.monotonic()
+                if points is None:points=pontos_3d(cloud_xyz(msg),corrected=True)
+                ended=time.monotonic()
+                if hasattr(self.link,'owner') and ended-self.last_timing>=5.:
+                    self.last_timing=ended
+                    self.link.owner.event(kind='lidar_timing',input_age_s=input_age,
+                        fit_wall_s=fitted-began,sweep_wall_s=ended-fitted,
+                        output_age_s=ros.seconds(ros.now())-result['stamp'])
                 with self.lock:
                     if station is self.station:
                         if self.lidar is not None and result['stamp']<=self.lidar['stamp']:
@@ -139,4 +159,5 @@ class Perception:
         for t in self.threads:t.join(timeout=3)
         self.sensor.close()
         self.raw_sensor.close()
+        if self.executor:self.executor.shutdown(wait=False,cancel_futures=True)
         if self.camera:self.camera.close();self.joints.close()

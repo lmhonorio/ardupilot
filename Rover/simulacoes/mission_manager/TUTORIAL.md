@@ -1,5 +1,11 @@
 # Tutorial — missão, docking LiDAR/QR, recarga e saída no ROS 2
 
+> Para executar os serviços de bordo na Raspberry e manter Gazebo/SITL/RViz
+> neste computador, use o [tutorial do container remoto](../companion/RASPBERRY_DOCKER.md).
+> Nesse fluxo, envie missões com `./companion/control.sh mission ARQUIVO`;
+> os caminhos passados diretamente a `start_file` são caminhos dentro do container.
+
+
 Este fluxo usa **Mission Manager**. Ele substitui o acionamento simultâneo das
 rotinas independentes `docking-qr`, `docking-lidar`, `sair-qr` e `sair-lidar`.
 Use um controlador por vez. Consulte o [relatório de testes](TESTES.md) para

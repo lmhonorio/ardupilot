@@ -1,0 +1,11 @@
+# Estacoes de recarga: uma estacao por linha, no estilo locations.txt.
+# NOME=lat_4m,lon_4m,lat_2m,lon_2m,QR,comprimento_m,largura_m,altura_m,alvo_ate_qr_m
+# GPS em graus decimais; dimensoes internas e distancias em metros.
+# P4 e P2 ficam FORA, respectivamente a 4 m e 2 m da ABERTURA.
+# Sentido de entrada: P4 -> P2 -> abertura -> centro -> QR no fundo.
+# Centro calculado a comprimento/2 para dentro da abertura. QR identifica a estacao.
+# Use ponto decimal; QR com virgulas deve ficar entre aspas duplas (CSV).
+# Linhas de comentario comecam com #; nao acrescente comentarios apos os dados.
+# Mundo gravel_plane / origem SEParnaiba: abertura (4.5,-2), centro (5,-2), rumo leste.
+# P4 equivale a (0.5,-2); P2 equivale a (2.5,-2) no mundo Gazebo.
+container_gravel_plane=-3.123167965999,-41.764490501318,-3.123167966000,-41.764472508288,ROVER_DOCKING_STATION_01,1.0,1.0,1.0,0.499

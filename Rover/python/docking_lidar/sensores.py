@@ -70,7 +70,7 @@ class Sensores:
             except ValueError as e:last=str(e)
             time.sleep(.05)
         raise ValueError(last)
-    def pose(self,link,station,msg=None,max_points=6000):
+    def pose(self,link,station,msg=None,max_points=6000,executor=None):
         now=time.monotonic();pos=link.latest.get('GLOBAL_POSITION_INT');gps=link.latest.get('GPS_RAW_INT')
         if (not pos or not gps or now-link.last_seen.get('GLOBAL_POSITION_INT',0)>3 or
             now-link.last_seen.get('GPS_RAW_INT',0)>3 or gps.fix_type<3 or pos.hdg==65535):
@@ -78,9 +78,16 @@ class Sensores:
         msg=self.fresh_cloud() if msg is None else msg
         prior=prior_estacao(pos.lat/1e7,pos.lon/1e7,pos.hdg/100.,station)
         if math.hypot(prior[0],prior[1])>=8.5:raise ValueError('Estacao fora da regiao de associacao')
-        result=estimar(cloud_xyz(msg),prior,corrected=True,
-                       dimensions=station.get('dimensoes_internas',[1.,1.,1.]),
-                       base_height=station.get('altura_base_rover',.15),max_points=max_points)
+        dimensions=station.get('dimensoes_internas',[1.,1.,1.])
+        base_height=station.get('altura_base_rover',.15)
+        if executor is None:
+            result=estimar(cloud_xyz(msg),prior,corrected=True,
+                           dimensions=dimensions,base_height=base_height,max_points=max_points)
+        else:
+            from mission_manager.geometry_worker import fit_and_sweep
+            result,points=executor.submit(fit_and_sweep,cloud_xyz(msg),prior,
+                                         dimensions,base_height,max_points).result(timeout=5.)
+            result['_sweep_points']=points
         result['stamp']=ros.seconds(msg.header.stamp)
         return result
     def lio(self):

@@ -202,6 +202,7 @@ class FakeLink:
         self.calls=[];self.items=mission();self.latest={'HEARTBEAT':NS(custom_mode=4,base_mode=0)}
         self.sysid=1;self.conn=NS(mav=NS(mission_set_current_send=lambda *a:self.calls.append(('set_current',a[-1]))))
     def download_mission(self):return copy.deepcopy(self.items)
+    def wait_navigation_ready(self):self.calls.append(('navigation_ready',))
     def mode(self,name):
         self.calls.append(('mode',name));self.latest['HEARTBEAT'].custom_mode={'HOLD':4,'GUIDED':15,'AUTO':10}[name]
     def param(self,k,v=None):self.calls.append(('param',k,v));return 0 if v is None else v
@@ -245,6 +246,13 @@ class RuntimeTests(unittest.TestCase):
         o=self.owner(False)
         with patch('mission_manager.manager.Motion',return_value=self.fake_motion(o)):o.start_pending()
         self.assertNotIn(('exit_confirmed',),o.link.calls);self.assertIn(('mode','AUTO'),o.link.calls)
+        self.assertLess(o.link.calls.index(('navigation_ready',)),o.link.calls.index(('command',400,1)))
+    def test_missing_navigation_never_arms_or_exits(self):
+        o=self.owner()
+        o.link.wait_navigation_ready=Mock(side_effect=TimeoutError('EKF not ready'))
+        with self.assertRaises(TimeoutError):o.start_pending()
+        self.assertNotIn(('mode','GUIDED'),o.link.calls)
+        self.assertNotIn(('command',400,1),o.link.calls)
     def test_exit_duration_is_not_charged_as_auto_mission_time(self):
         o=self.owner();o.battery.last=100.
         with patch('mission_manager.manager.Motion',return_value=self.fake_motion(o)), patch('mission_manager.manager.time.monotonic',return_value=123.):

@@ -132,7 +132,9 @@ class Manager:
         elif kind=='MISSION_ITEM_REACHED':self.reached=msg.seq;self.reached_at=time.monotonic()
 
     def fresh(self):
-        return all(time.monotonic()-self.link.last_seen.get(k,0)<3 for k in ('HEARTBEAT','GLOBAL_POSITION_INT','ATTITUDE','VFR_HUD','SIMSTATE'))
+        required=('HEARTBEAT','GLOBAL_POSITION_INT','ATTITUDE','VFR_HUD')
+        if getattr(self.args,'vehicle','sitl')=='sitl':required+=('SIMSTATE',)
+        return all(time.monotonic()-self.link.last_seen.get(k,0)<3 for k in required)
 
     def check_cancel(self):
         if self.cancel.is_set() and not self.ignore_cancel:raise RuntimeError('Operacao cancelada pelo operador')
@@ -217,9 +219,12 @@ class Manager:
             self.cancel.clear();self.machine.pending=False;self.pending_hash=None
             if self.perception is None:
                 self.link.param('DOCK_LOCK')
-                self.link.command(511,164,200000)
-                self.link.wait('SIMSTATE',timeout=10)
-                self.perception=Perception(self.link,self.args.namespace,self.args.cloud,self.args.odom,self.args.no_qr)
+                if getattr(self.args,'vehicle','sitl')=='sitl':
+                    self.link.command(511,164,200000)
+                    self.link.wait('SIMSTATE',timeout=10)
+                self.perception=Perception(self.link,self.args.namespace,self.args.cloud,self.args.odom,self.args.no_qr,
+                                           raw_cloud=getattr(self.args,'raw_cloud',None),
+                                           geometry_process=getattr(self.args,'geometry_process',False))
             hb=self.link.latest['HEARTBEAT']
             if hb.custom_mode not in (4,15) and hb.base_mode&128:
                 raise RuntimeError('Para reconciliar, pare o rover em HOLD')
@@ -331,6 +336,8 @@ class Manager:
         items=self.link.download_mission();validate(items)
         if fingerprint(items)!=self.pending_hash:raise RuntimeError('Missao alterada depois da solicitacao; solicite novamente')
         self.machine.move(State.PREPARE,'Missao e bateria validadas')
+        self.event(kind='navigation_wait',reason='Aguardando EKF com posicao absoluta antes de armar')
+        self.link.wait_navigation_ready()
         motion=Motion(self)
         if self.machine.inside:
             self.link.param('DOCK_LOCK',1)
@@ -381,11 +388,15 @@ class Manager:
             # A slow simulator stretches the default 1 Hz heartbeat in wall
             # time. Request bounded supervision streams instead of relaxing
             # watchdogs or treating stale telemetry as live.
-            for msg_id in (0,24,30,33,74,164,147):self.link.command(511,msg_id,100000)
-            self.link.wait('SIMSTATE',timeout=10)
+            messages=[0,24,30,33,74,147]
+            if getattr(self.args,'vehicle','sitl')=='sitl':messages.append(164)
+            for msg_id in messages:self.link.command(511,msg_id,100000)
+            if getattr(self.args,'vehicle','sitl')=='sitl':self.link.wait('SIMSTATE',timeout=10)
             # Refuse an unpatched firmware instead of claiming a reactive guard.
             self.link.param('DOCK_LOCK')
-            self.perception=Perception(self.link,self.args.namespace,self.args.cloud,self.args.odom,self.args.no_qr)
+            self.perception=Perception(self.link,self.args.namespace,self.args.cloud,self.args.odom,self.args.no_qr,
+                                       raw_cloud=getattr(self.args,'raw_cloud',None),
+                                       geometry_process=getattr(self.args,'geometry_process',False))
             end=time.monotonic()+15
             while (not self.fresh() or self.clock_sync.offset is None) and time.monotonic()<end:self.link.recv(.1)
             if not self.fresh():raise RuntimeError('Telemetria inicial incompleta')
@@ -454,9 +465,12 @@ class Manager:
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--mavproxy',default='udpin:127.0.0.1:14551');p.add_argument('--sysid',type=int,default=1)
+    p.add_argument('--vehicle',choices=('sitl','real'),default='sitl')
     p.add_argument('--estacoes',default=str(DEFAULT_STATIONS));p.add_argument('--station')
     p.add_argument('--namespace',default='/rover_argo_N1/Instance1')
     p.add_argument('--cloud',default='/rover_slam_3d/local_cloud');p.add_argument('--odom',default='/fast_lio/odometry')
+    p.add_argument('--raw-cloud',help='Nuvem atual no referencial da IMU; padrao namespace/livox/lidar')
+    p.add_argument('--geometry-process',action='store_true',help='Ajuste LiDAR em processo CPU separado; sem controle MAVLink')
     charge=p.add_mutually_exclusive_group()
     charge.add_argument('--simulate-charge',dest='simulate_charge',action='store_true',help='Padrao: recarga operacional SITL de 15 s')
     charge.add_argument('--no-simulate-charge',dest='simulate_charge',action='store_false')
@@ -470,6 +484,8 @@ def main():
     p.add_argument('--envelope');p.add_argument('--output-dir')
     p.add_argument('--recovery',default=str(Path(__file__).resolve().parents[2]/'ros2/run/mission_manager_recovery.json'))
     a=p.parse_args()
+    if a.vehicle=='real' and a.simulate_charge:
+        p.error('Veiculo real exige --no-simulate-charge; recarga fisica depende do hardware')
     if not a.mavproxy.startswith('udpin:127.0.0.1:') or not 1<=a.sysid<=255 or not 0<a.speed<=.25 or not all(math.isfinite(v) and 0<v<=600 for v in (a.mode_timeout,a.docking_timeout,a.phase_timeout,a.exit_timeout,a.pose_timeout,a.sensor_recovery)):
         p.error('Parametros de comunicacao/velocidade/timeout invalidos')
     lock=None

@@ -1,0 +1,6 @@
+# Fill from measurements, then save as hardware.yaml. These are NOT calibration values.
+validated: false
+imu_axes_aligned_to_base: false
+base_to_imu: [0.0, 0.0, 0.0]
+lidar_to_imu_translation: [0.0, 0.0, 0.0]
+lidar_to_imu_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]

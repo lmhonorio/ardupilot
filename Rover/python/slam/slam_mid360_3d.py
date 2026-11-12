@@ -45,33 +45,42 @@ def main():
     status_pub=ros.Publisher('/rover_slam_3d/status',String,queue_size=1,latch=True)
     lock=threading.RLock();recent=LocalCloud(a.window);voxels=OrderedDict()
     state={'frames':0,'rejected':0,'last_wall':0.,'last_stamp':0.,'last_map':0.,'last_seq':-1,'error':'aguardando FAST-LIO'}
-    def reset(reason):
-        recent.clear();voxels.clear();state['error']=reason;state['rejected']+=1
+    def reset(reason,clear_map=True):
+        if clear_map:recent.clear();voxels.clear()
+        else:recent.invalidate_window()
+        state['error']=reason;state['rejected']+=1
         state['last_map']=0.;state['last_stamp']=0.
         state['last_seq']=-1
         h=Header(stamp=ros.now(),frame_id='body')
         local_pub.publish(point_cloud2.create_cloud_xyz32(h,[]))
-        h.frame_id='camera_init';map_pub.publish(point_cloud2.create_cloud_xyz32(h,[]))
+        if clear_map:
+            h.frame_id='camera_init';map_pub.publish(point_cloud2.create_cloud_xyz32(h,[]))
     def receive(cloud,odom):
         with lock:
             try:
                 stamp=ros.seconds(cloud.header.stamp);lag=ros.age(cloud.header.stamp)
                 if cloud.header.frame_id!='camera_init' or odom.header.frame_id!='camera_init' or odom.child_frame_id!='body':
                     raise ValueError('Frames FAST-LIO inesperados')
-                if lag<-.05 or lag>.5:raise ValueError('Nuvem registrada desatualizada')
+                if lag<-.05:raise ValueError('Nuvem registrada no futuro/relogio reiniciado')
+                if lag>.5:
+                    # Late data cannot authorize docking, but does not invalidate
+                    # the already measured display map in the same reference.
+                    reset('Nuvem registrada desatualizada',clear_map=False)
+                    ros.logwarn_throttle(3,'Nuvem local invalidada por atraso; mapa visual preservado')
+                    return
                 position,rotation=checked_pose(odom)
                 xyz=cloud_xyz(cloud)
                 if len(xyz)<10:raise ValueError('Nuvem registrada vazia')
                 local=recent.add(stamp,xyz,position,rotation)
                 h=Header(stamp=cloud.header.stamp,frame_id='body')
-                local_pub.publish(point_cloud2.create_cloud_xyz32(h,local.tolist()))
+                local_pub.publish(point_cloud2.create_cloud_xyz32(h,local))
                 # Display/export map: bounded XYZ voxels, never supplied to docking.
                 for point in voxel_points(xyz,a.voxel):
                     key=tuple(np.floor(point/a.voxel).astype(int));voxels[key]=point;voxels.move_to_end(key)
                 while len(voxels)>a.max_points:voxels.popitem(last=False)
                 if stamp-state['last_map']>=1.:
                     h.frame_id='camera_init'
-                    map_pub.publish(point_cloud2.create_cloud_xyz32(h,np.array(list(voxels.values())).tolist()))
+                    map_pub.publish(point_cloud2.create_cloud_xyz32(h,np.array(list(voxels.values()))))
                     state['last_map']=stamp
                 state.update(frames=state['frames']+1,last_wall=time.monotonic(),last_stamp=stamp,last_seq=state['frames'],error='')
             except (ValueError,TypeError,np.linalg.LinAlgError) as e:
@@ -88,7 +97,7 @@ def main():
             now=time.monotonic()
             with lock:
                 if state['last_wall'] and now-state['last_wall']>a.wall_timeout:
-                    reset('FAST-LIO sem atualizacao; nuvem local invalidada');state['last_wall']=0.
+                    reset('FAST-LIO sem atualizacao; nuvem local invalidada',clear_map=False);state['last_wall']=0.
                 if now>=report:
                     info=dict(state,voxels=len(voxels));status_pub.publish(json.dumps(info));print(info,flush=True);report=now+5
             if a.duration and now-start>=a.duration:break

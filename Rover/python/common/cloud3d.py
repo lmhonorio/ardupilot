@@ -40,7 +40,11 @@ def voxel_points(xyz,size):
     xyz=xyz[np.isfinite(xyz).all(axis=1)]
     if not len(xyz):return xyz
     keys=np.floor(xyz/size).astype(np.int64)
-    _,indices=np.unique(keys,axis=0,return_index=True)
+    # Compare packed integer rows, avoiding slow structured-field comparisons.
+    # Equality is unchanged, including negative coordinates. Sorting original
+    # indices retains the same first point per voxel and the same point order.
+    rows=np.ascontiguousarray(keys).view(np.dtype((np.void,3*keys.dtype.itemsize))).ravel()
+    _,indices=np.unique(rows,return_index=True)
     return xyz[np.sort(indices)]
 
 
@@ -72,3 +76,7 @@ class LocalCloud:
 
     def clear(self):
         self.history.clear();self.previous=None
+
+    def invalidate_window(self):
+        # Expire points while retaining the time/pose discontinuity guard.
+        self.history.clear()

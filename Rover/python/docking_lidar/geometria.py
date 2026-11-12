@@ -11,7 +11,8 @@ import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from common.cloud3d import corrected_mid360,voxel_points
 
-OFFSET=np.array([-.003,0.,.434])
+from common.hardware import base_to_imu
+OFFSET=base_to_imu()
 SIM_MIN_RANGE=.10
 
 
@@ -44,11 +45,13 @@ def superficies(q,dimensions=(1.,1.,1.)):
         np.sqrt((z-c)**2+ex**2+ey**2),np.sqrt((z+c)**2+ex**2+ey**2)))
 
 
-def estimar(xyz,prior,corrected=False,dimensions=(1.,1.,1.),base_height=.15,max_points=6000):
+def estimar(xyz,prior,corrected=False,dimensions=(1.,1.,1.),base_height=.15,max_points=6000,prepared=False):
     prior=np.asarray(prior,dtype=float);dims=np.asarray(dimensions,dtype=float)
     if prior.shape!=(3,) or not np.isfinite(prior).all() or dims.shape!=(3,) or not np.isfinite(dims).all() or np.any(dims<=0):
         raise ValueError('Referencia/dimensoes invalidas')
-    points=pontos_3d(xyz,corrected)
+    # The process worker prepares the SAME base-frame sweep once for fitting
+    # and protection. Other callers continue to prepare raw sensor points here.
+    points=np.asarray(xyz,dtype=float).reshape(-1,3) if prepared else pontos_3d(xyz,corrected)
     seed=np.array([prior[0],prior[1],dims[2]/2-base_height,prior[2]])
     points=points[np.min(superficies(local(points,seed),dims),axis=1)<.35]
     if len(points)<35:

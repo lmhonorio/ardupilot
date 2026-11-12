@@ -211,9 +211,29 @@ class Link:
                 return
         raise RuntimeError('GPS/EKF/SIMSTATE nao prontos. Rover fisico exige --real.')
 
+    def wait_navigation_ready(self, timeout=90):
+        """A GPS fix alone does not authorize armed AUTO/GUIDED navigation."""
+        self.command(511,193,200000)  # EKF_STATUS_REPORT, 5 Hz simulated time
+        # Require attitude, horizontal velocity and actual absolute position.
+        # Predicted position while disarmed and constant-position mode are not
+        # sufficient for Rover::ekf_position_ok() after arming.
+        required=1|2|16
+        return self.wait('EKF_STATUS_REPORT',
+                         lambda m:(m.flags&required)==required and not m.flags&(128|1024),
+                         timeout=timeout)
+
     def download_mission(self):
-        self.conn.mav.mission_request_list_send(self.sysid, self.compid)
-        count = self.wait('MISSION_COUNT', self.addressed).count
+        # MISSION_REQUEST_LIST / MISSION_COUNT also crosses UDP. Retransmit a
+        # lost request/reply just as we already do for individual mission items.
+        # Keep the total count deadline bounded by the existing link timeout.
+        for retry in range(3):
+            self.conn.mav.mission_request_list_send(self.sysid, self.compid)
+            try:
+                count = self.wait('MISSION_COUNT', self.addressed,
+                                  timeout=min(4.,self.timeout/3.)).count
+                break
+            except TimeoutError:
+                if retry == 2:raise
         items = []
         for seq in range(count):
             for retry in range(3):

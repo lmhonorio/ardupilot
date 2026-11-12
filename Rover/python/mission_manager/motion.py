@@ -255,8 +255,14 @@ class Motion:
                 continue
             lost=None
             dt=measured['stamp']-previous['stamp']
-            if dt<=0:
-                self.command(0,0);continue
+            if dt<0:
+                self.command(0,0)
+                raise RuntimeError('Tempo da geometria voltou durante a saida')
+            if dt==0:
+                # snapshot() and exit_observation() already enforce freshness.
+                # Keep the last valid command between scans; do not inject a
+                # stop at the faster telemetry loop rate or integrate twice.
+                continue
             along,lateral,heading=alinhamento(measured)
             pa,pl,_=alinhamento(previous)
             if math.hypot(along-pa,lateral-pl)>.1+1.5*dt:

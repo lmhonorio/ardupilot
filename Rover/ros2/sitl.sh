@@ -4,6 +4,9 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$root/setup.bash"
 params="$root/../nroverobst.param"
 instance=0
+companion_host=${ROVER_COMPANION_HOST:-}
+streamrate=${ROVER_STREAMRATE:-}
+non_interactive=
 args=()
 while (($#)); do
   case "$1" in
@@ -11,14 +14,26 @@ while (($#)); do
     --add-param-file=*) params="${1#*=}"; shift;;
     --foreground) shift;;
     --instance|-I) instance="$2"; shift 2;;
+    --companion-host) companion_host="$2"; shift 2;;
+    --streamrate) streamrate="$2"; shift 2;;
+    --non-interactive) non_interactive=' --non-interactive'; shift;;
     --without-avoidance) params="$root/../nrover_sem_desvio.param"; shift;;
     --avoidance) params="$root/../nroverobst.param"; shift;;
-    --help|-h) echo 'Uso: ./sim_1_gzrover.sh --foreground [--add-param-file ARQUIVO] [--no-rebuild] [--instance 0..9]'; exit 0;;
+    --help|-h) echo 'Uso: ./sim_1_gzrover.sh --foreground [--add-param-file ARQUIVO] [--no-rebuild] [--instance 0..9] [--companion-host IP_OU_NOME] [--streamrate HZ] [--non-interactive]'; exit 0;;
     *) args+=("$1"); shift;;
   esac
 done
 [[ "$instance" =~ ^[0-9]$ ]] || { echo 'Instancia deve estar entre 0 e 9.' >&2; exit 2; }
 tcp=$((5760+10*instance)); sysid=$((instance+1))
+companion_outputs=()
+if [[ -n "$companion_host" ]]; then
+  [[ "$companion_host" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'Endereco companion invalido.' >&2; exit 2; }
+  companion_outputs+=("--out=udp:$companion_host:$((14600+10*instance))")
+fi
+if [[ -z "$streamrate" ]]; then
+  if [[ -n "$companion_host" ]]; then streamrate=4; else streamrate=10; fi
+fi
+[[ "$streamrate" =~ ^[1-9][0-9]?$ ]] || { echo 'Streamrate deve ser inteiro entre 1 e 99 Hz.' >&2; exit 2; }
 if ss -H -ltn "sport = :$tcp" | grep -q .; then echo "Ja existe SITL na porta $tcp." >&2; exit 1; fi
 run="$root/run/sitl"
 ((instance == 0)) || run="$root/run/sitl_$instance"
@@ -30,4 +45,4 @@ exec "$root/venv/bin/python" "$root/../../Tools/autotest/sim_vehicle.py" -v Rove
   --out=udp:127.0.0.1:14550 --out=udp:127.0.0.1:$((14555+10*instance)) --out=udp:127.0.0.1:$((14556+10*instance)) \
   --out=udp:127.0.0.1:$((14557+10*instance)) --out=udp:127.0.0.1:$((14551+10*instance)) \
   --out=udp:192.168.0.131:14550 --out=udp:192.168.0.131:14551 \
-  --mavproxy-args='--streamrate=10 --cmd="set mavfwd true; rc 1 1500; rc 3 1500"' "${args[@]}"
+  --mavproxy-args="--streamrate=$streamrate$non_interactive --cmd=\"set mavfwd true; rc 1 1500; rc 3 1500\"" "${companion_outputs[@]}" "${args[@]}"

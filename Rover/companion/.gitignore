@@ -1,0 +1,9 @@
+data/
+missions/
+.env
+*.log
+__pycache__/
+config/hardware.yaml
+config/livox.yaml
+config/mid360.json
+config/envelope.json

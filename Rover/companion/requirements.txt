@@ -1,0 +1,9 @@
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pymavlink==2.4.50
+# MAVProxy is installed separately without its desktop/map3d dependencies.
+defusedxml==0.7.1
+pyserial==3.5
+pynmeagps==1.1.9
+pexpect==4.9.0
+future==1.0.0

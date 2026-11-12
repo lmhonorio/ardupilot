@@ -1,0 +1,17 @@
+**/.git
+**/__pycache__
+**/*.pyc
+companion/data
+companion/missions
+companion/.env
+companion/config/hardware.yaml
+companion/config/livox.yaml
+companion/config/mid360.json
+companion/config/envelope.json
+python/run
+python/.deps
+python/mission_tune/runs
+python/tests
+ros2/deps/FAST_LIO/Log
+ros2/deps/FAST_LIO/PCD
+ros2/deps/FAST_LIO/.git

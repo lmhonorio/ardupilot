@@ -1,0 +1,18 @@
+# This profile must be calibrated and commissioned on the physical rover first.
+profile: real
+hardware_configured: false
+namespace: /rover_argo_N1/Instance1
+mavproxy_master: /dev/ttyACM0
+mavproxy_baud: 115200
+stations: /config/estacoes_recarga.txt
+no_qr: true
+obstacles: false
+map_voxel: 0.06
+map_max_points: 100000
+fastlio_point_filter: 2
+# Native Livox CustomMsg retains real per-point timestamps; no Gazebo timing.
+livox_topic: /livox/lidar
+imu_topic: /livox/imu
+calibration_file: /config/hardware.yaml
+livox_params: /config/livox.yaml
+envelope_file: /config/envelope.json

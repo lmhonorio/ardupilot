@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rover_companion_bridge</name><version>0.1.0</version>
+  <description>Lossless local distribution of simulated MID360 scans.</description>
+  <maintainer email="rover@example.com">Rover</maintainer><license>GPL-3.0-or-later</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend>
+  <depend>livox_ros_driver2</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

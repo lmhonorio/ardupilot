@@ -18,12 +18,13 @@ PYTHON_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PYTHON_DIR))
 from common.ros_cloud import cloud_xyz, subscribe_cloud
 from common.cloud3d import corrected_mid360, checked_pose
+from common.hardware import base_to_imu, calibration
 FAST_LIO_BINARY = PYTHON_DIR.parent / 'ros2/install/lib/fast_lio/fastlio_mapping'
 
 PACKET = struct.Struct('<4sIIQ7fB')
 DATA_TYPE, SOURCE_SYSID, SOURCE_COMPID = 201, 245, 197
 OFFSET_NS = 100_000_000  # all points were acquired at the same simulator instant
-BASE_TO_IMU = np.array([-.003, 0., .434])
+BASE_TO_IMU = base_to_imu()
 
 
 def rotation(q):
@@ -55,12 +56,31 @@ def main():
     parser.add_argument('--namespace', default='/rover_argo_N1/Instance1')
     parser.add_argument('--cloud-topic')
     parser.add_argument('--imu-topic')
+    parser.add_argument('--sensor-profile',choices=('simulation','real'),default='simulation')
+    parser.add_argument('--external-simulation-adapter',action='store_true',
+                        help='Companion supervisiona adaptador C++ separado para /fast_lio/lidar')
+    parser.add_argument('--calibration',help='Calibracao fisica validada; obrigatoria no perfil real')
+    parser.add_argument('--point-filter',type=int,default=1)
+    parser.add_argument('--adapter-stride',type=int,default=1,help='Amostragem da nuvem simulada antes de criar CustomMsg; nao altera a nuvem original')
+    parser.add_argument('--map-voxel',type=float,default=.05)
+    parser.add_argument('--surface-voxel',type=float,default=.05)
     parser.add_argument('--mavproxy', default='udpin:127.0.0.1:14556')
     parser.add_argument('--no-mavlink', action='store_true')
     parser.add_argument('--duration', type=float, default=0, help='Tempo de teste em segundos; 0 = continuo')
     parser.add_argument('--max-lag', type=float, default=.5, help='Idade maxima de uma pose em segundos ROS')
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
+    if not 1<=args.point_filter<=10:parser.error('point-filter deve estar entre 1 e 10')
+    if not 1<=args.adapter_stride<=16:parser.error('adapter-stride deve estar entre 1 e 16')
+    if not .03<=args.map_voxel<=.3 or not .03<=args.surface_voxel<=.3:
+        parser.error('Voxel FAST-LIO deve estar entre 0.03 e 0.3 m')
+    real=args.sensor_profile=='real'
+    if real and args.external_simulation_adapter:parser.error('Adaptador Gazebo nao pode ser usado com Livox real')
+    if real and not args.calibration:parser.error('Perfil real exige --calibration')
+    hardware=calibration(args.calibration) if real else None
+    os.environ['ROVER_USE_SIM_TIME']='false' if real else 'true'
+    global BASE_TO_IMU
+    if real:BASE_TO_IMU=np.asarray(hardware['base_to_imu'],dtype=float)
     if not args.mavproxy.startswith('udpin:') or args.duration < 0 or args.max_lag <= 0:
         parser.error('Use udpin:IP:PORTA de MAVProxy, duration >= 0 e max-lag > 0')
     backend = FAST_LIO_BINARY
@@ -87,12 +107,16 @@ def main():
         'publish': {'path_en': True, 'scan_publish_en': True,
                     'dense_publish_en': True, 'scan_bodyframe_pub_en': True,
                     'scan_effect_pub_en': False},
-        'feature_extract_enable': False, 'point_filter_num': 1, 'max_iteration': 3,
-        'filter_size_surf': .05, 'filter_size_map': .05, 'cube_side_length': 200.,
+        'feature_extract_enable': False, 'point_filter_num': args.point_filter, 'max_iteration': 3,
+        'filter_size_surf': args.surface_voxel, 'filter_size_map': args.map_voxel, 'cube_side_length': 200.,
         'ivox_grid_resolution': .25, 'ivox_nearby_type': 18, 'esti_plane_threshold': .1,
         'runtime_pos_log_enable': False, 'path_save_en': False,
         'pcd_save': {'pcd_save_en': False, 'interval': -1}}
-    params['use_sim_time'] = True
+    params['use_sim_time'] = not real
+    if real:
+        params['preprocess']['scan_line']=4
+        params['mapping']['extrinsic_T']=hardware['lidar_to_imu_translation']
+        params['mapping']['extrinsic_R']=hardware['lidar_to_imu_rotation']
     (output/'params.yaml').write_text(yaml.safe_dump({'/**': {'ros__parameters': params}}))
     cloud_pub = ros.Publisher('/fast_lio/lidar', CustomMsg, queue_size=1)
     points_pub = ros.Publisher('/mid360/points3d', PointCloud2, queue_size=1)
@@ -102,7 +126,9 @@ def main():
     transform=TransformStamped()
     transform.header.stamp=ros.now()
     transform.header.frame_id='body';transform.child_frame_id='base_link'
-    transform.transform.translation.x=.003;transform.transform.translation.z=-.434
+    transform.transform.translation.x=float(-BASE_TO_IMU[0])
+    transform.transform.translation.y=float(-BASE_TO_IMU[1])
+    transform.transform.translation.z=float(-BASE_TO_IMU[2])
     transform.transform.rotation.w=1.
     static_tf.sendTransform(transform)  # IMU and ray origins are co-located in this model
     lock = threading.RLock()
@@ -121,10 +147,11 @@ def main():
             xyz = cloud_xyz(msg)
             ranges = np.linalg.norm(xyz, axis=1)
             xyz = xyz[(ranges > .35) & (ranges < 50.)]
+            xyz = xyz[::args.adapter_stride]
             now_ns = ros.nanoseconds(msg.header.stamp)
             if len(xyz) < 10 or now_ns <= OFFSET_NS:
                 return
-            points_pub.publish(point_cloud2.create_cloud_xyz32(msg.header,xyz.tolist()))
+            points_pub.publish(point_cloud2.create_cloud_xyz32(msg.header,xyz))
             out = CustomMsg()
             # Gazebo evaluates the entire batch at the message timestamp.
             # Represent every return at that same instant, without invented scan timing.
@@ -143,6 +170,22 @@ def main():
     def receive_imu(msg):
         with lock:
             state['imu'] += 1
+
+    # Physical Livox scans already carry per-point acquisition times. Keep
+    # those values intact for deskewing; never apply the Gazebo 100 ms adapter.
+    normalized_pub=ros.Publisher(ns+'/livox/lidar',PointCloud2,queue_size=1) if real else None
+    def receive_real_cloud(msg):
+        if not msg.points:return
+        cloud_pub.publish(msg)
+        xyz=np.asarray([(p.x,p.y,p.z) for p in msg.points],dtype=np.float32)
+        r=np.asarray(hardware['lidar_to_imu_rotation']).reshape(3,3)
+        xyz=xyz@r.T+np.asarray(hardware['lidar_to_imu_translation'])
+        from std_msgs.msg import Header
+        end_ns=ros.nanoseconds(msg.header.stamp)+max(p.offset_time for p in msg.points)
+        h=Header(stamp=ros.stamp_from_seconds(end_ns/1e9),frame_id='body')
+        normalized_pub.publish(point_cloud2.create_cloud_xyz32(h,xyz))
+        points_pub.publish(point_cloud2.create_cloud_xyz32(h,xyz))
+        with lock:state['clouds']+=1
 
     def receive_pose(msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
@@ -184,7 +227,13 @@ def main():
     result = 0
     try:
         proc = subprocess.Popen(command, env=env, cwd=str(output), stdout=log, stderr=subprocess.STDOUT)
-        subscribers.append(subscribe_cloud(ros, cloud_topic, receive_cloud, 30))
+        if real:
+            subscribers.append(ros.Subscriber(cloud_topic,CustomMsg,receive_real_cloud,queue_size=1))
+        elif not args.external_simulation_adapter:
+            subscribers.append(subscribe_cloud(ros, cloud_topic, receive_cloud, 30))
+        else:
+            state['clouds']=-1  # scan conversion is owned by the native adapter
+            print('Adaptador de nuvem externo; nuvens=-1 significa contador externo.',flush=True)
         print('MID360:', cloud_topic, '| IMU:', imu_topic, flush=True)
         print('Odometria: /fast_lio/odometry | Lua via MAVProxy:', args.mavproxy, flush=True)
         print('Mantenha o rover parado durante a inicializacao da IMU. Log:', output, flush=True)

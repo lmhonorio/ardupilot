@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 DEFAULTS={'world':'gravel_plane','gui':'true','N':'1','start_x':'0','start_y':'0','z':'0.155',
           'dx':'3','dy':'3','mid360_enabled':'true','insta360_enabled':'false',
           'samsung_s23_ultra_cam_enabled':'true','hokuyo_enabled':'true',
-          'headless_rendering':'false'}
+          'headless_rendering':'false','real_time_factor':'1.0'}
 
 
 def start(context):
@@ -28,6 +28,13 @@ def start(context):
     path=ROOT/'generated/worlds'/(values['world']+'.sdf')
     if not path.is_file():raise RuntimeError('Prepare o mundo: python/simulation/ros2/prepare_assets.py --world '+values['world'])
     root=ET.parse(path).getroot();world=root.find('world')
+    rtf=float(values['real_time_factor'])
+    if not math.isfinite(rtf) or rtf<=0:raise ValueError('real_time_factor deve ser positivo')
+    physics=world.find('physics')
+    if physics is None:physics=ET.SubElement(world,'physics',{'name':'physics','type':'ignored'})
+    factor=physics.find('real_time_factor')
+    if factor is None:factor=ET.SubElement(physics,'real_time_factor')
+    factor.text=str(rtf)
     original=world.find("model[@name='rover_argo_N1']")
     world.remove(original)
     template=yaml.safe_load((ROOT/'config/bridge.yaml').read_text())
@@ -74,6 +81,27 @@ def start(context):
     run=ROOT/'run/launch'/str(os.getpid());run.mkdir(parents=True,exist_ok=True)
     scene=run/'world.sdf';ET.ElementTree(root).write(scene,encoding='utf-8',xml_declaration=True)
     bridge_file=run/'bridge.yaml';bridge_file.write_text(yaml.safe_dump(bridges))
+    # Large image/cloud writes must not queue /clock or IMU callbacks. Keep
+    # independent transport processes and only the latest large sensor frame.
+    nodes.append(ExecuteProcess(cmd=[str(ROOT/'venv/bin/python'),
+        str(ROOT.parent/'python/simulation/ros2/clock_bridge.py'),'--hz','50'],output='screen'))
+    groups={'time_imu':[],'cloud':[],'visual':[]}
+    for entry in bridges:
+        if entry['gz_type_name']=='gz.msgs.Clock':continue
+        name=('time_imu' if entry['gz_type_name']=='gz.msgs.IMU'
+              else 'cloud' if entry['gz_type_name']=='gz.msgs.PointCloudPacked' else 'visual')
+        item=copy.deepcopy(entry)
+        if name=='cloud':
+            item.update(publisher_queue=1,subscriber_queue=1)
+            item.pop('qos_profile',None)  # rclcpp default: RELIABLE, volatile
+        groups[name].append(item)
+    for name,entries in groups.items():
+        config=run/('bridge_'+name+'.yaml');config.write_text(yaml.safe_dump(entries))
+        env={'RMW_FASTRTPS_PUBLICATION_MODE':'ASYNCHRONOUS'}
+        if name!='time_imu':env['GZ_TRANSPORT_RCVHWM']='2'
+        nodes.append(Node(package='ros_gz_bridge',executable='parameter_bridge',
+            name='rover_'+name+'_bridge',parameters=[{'config_file':str(config),'use_sim_time':True}],
+            additional_env=env,output='screen'))
     # Server-only and EGL rendering are different choices. On this GPU the
     # EGL path silently loses cubemap sectors in a 360-degree GPU lidar.
     # Use the normal display renderer even without the Gazebo GUI by default.
@@ -83,9 +111,7 @@ def start(context):
         raise RuntimeError('Renderizacao requer DISPLAY (ou Xvfb). EGL explicito: headless_rendering:=true; valide todos os setores do LiDAR antes de navegar.')
     gazebo=ExecuteProcess(cmd=['gz','sim','-r']+server+(['--headless-rendering'] if egl else [])+[str(scene)],output='screen')
     return [gazebo,
-        RegisterEventHandler(OnProcessExit(target_action=gazebo,on_exit=[EmitEvent(event=Shutdown(reason='Gazebo encerrou'))])),
-        Node(package='ros_gz_bridge',executable='parameter_bridge',name='rover_bridge',
-             parameters=[{'config_file':str(bridge_file),'use_sim_time':True}],output='screen')]+nodes
+        RegisterEventHandler(OnProcessExit(target_action=gazebo,on_exit=[EmitEvent(event=Shutdown(reason='Gazebo encerrou'))]))]+nodes
 
 
 def generate_launch_description():

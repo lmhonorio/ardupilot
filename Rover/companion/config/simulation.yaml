@@ -1,0 +1,11 @@
+profile: simulation
+namespace: /rover_argo_N1/Instance1
+mavproxy_master: udpin:0.0.0.0:14600
+mavproxy_baud: 115200
+stations: /config/estacoes_recarga.txt
+no_qr: true
+obstacles: false
+map_voxel: 0.06
+map_max_points: 100000
+fastlio_point_filter: 2
+fastlio_adapter_stride: 8

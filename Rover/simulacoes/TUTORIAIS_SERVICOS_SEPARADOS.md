@@ -1,5 +1,15 @@
 # Serviços separados — ROS 2 Jazzy / Gazebo Harmonic
 
+Para iniciar diretamente, use os tutoriais rápidos:
+[tudo local](TUTORIAL_RAPIDO_LOCAL.md) ou
+[controle na Raspberry](TUTORIAL_RAPIDO_REMOTO.md).
+
+Para usar a Raspberry como computador de bordo, consulte o
+[tutorial do container remoto](companion/RASPBERRY_DOCKER.md). Nesse modo,
+Gazebo, SITL, RViz e clientes ROS ficam neste computador; FAST-LIO, mapa e
+gerenciador ficam na Raspberry. Não abra suas cópias locais simultaneamente.
+
+
 Para o ciclo integrado de missão, entrada por LiDAR com QR opcional, recarga
 simulada e saída antes de AUTO, siga o
 [tutorial do Mission Manager](mission_manager/TUTORIAL.md). Veja também a

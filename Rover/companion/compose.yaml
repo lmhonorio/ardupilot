@@ -1,0 +1,36 @@
+name: rover-companion
+services:
+  companion:
+    image: rover-companion:jazzy
+    container_name: rover-companion
+    network_mode: host
+    # All onboard ROS nodes share this IPC namespace. Use SHM locally and UDP
+    # between computers; run diagnostic ROS commands via docker exec on the Pi.
+    shm_size: 256m
+    mem_limit: 3g
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      FASTDDS_BUILTIN_TRANSPORTS: DEFAULT
+      FASTRTPS_DEFAULT_PROFILES_FILE: /config/fastdds.xml
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      RMW_FASTRTPS_PUBLICATION_MODE: ASYNCHRONOUS
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      ROVER_CONFIG: /config/${ROVER_PROFILE:-simulation}.yaml
+    volumes:
+      - ${ROVER_DATA:-./data}:/data
+      - ${ROVER_MISSIONS:-./missions}:/missions:ro
+      - ${ROVER_CONFIG_DIR:-./config}:/config:ro
+    stop_grace_period: 45s
+    restart: 'no'
+    healthcheck:
+      test: ["CMD", "/opt/companion-venv/bin/python", "/opt/rover/Rover/companion/health.py"]
+      interval: 20s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'

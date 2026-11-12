@@ -1,0 +1,8 @@
+# Add only when commissioning the physical autopilot; simulation has no device access.
+services:
+  companion:
+    devices:
+      - ${ARDUPILOT_DEVICE:-/dev/ttyACM0}:/dev/ttyACM0
+    environment:
+      ROVER_CONFIG: /config/real.yaml
+      ROS_DOMAIN_ID: ${ROVER_REAL_DOMAIN_ID:-20}
