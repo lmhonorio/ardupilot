@@ -22,7 +22,7 @@ local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local CONTROL_OUTPUT_YAW = 4
 local THROTTLE_PARAM_TABLE_KEY = 17
 local THROTTLE_PARAM_TABLE_PREFIX = 'THRO_'
-assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1), 'could not add Lua throttle parameter table')
+assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 2), 'could not add Lua throttle parameter table')
 --[[
   // @Param: THRO_MAX_LUA
   // @DisplayName: Lua maximum motor output
@@ -35,6 +35,18 @@ assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1)
 assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 1, 'MAX_LUA', 90), 'could not add THRO_MAX_LUA parameter')
 local throttle_max_lua_param = Parameter()
 assert(throttle_max_lua_param:init('THRO_MAX_LUA'), 'could not bind THRO_MAX_LUA parameter')
+--[[
+  // @Param: THRO_MIN_LUA
+  // @DisplayName: Lua minimum motor PWM
+  // @Description: Minimum PWM above neutral to start a commanded yaw alignment from rest. Mirrored below neutral. 1500 disables it.
+  // @Units: us
+  // @Range: 1500 2000
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 2, 'MIN_LUA', 1500), 'could not add Lua minimum motor PWM parameter')
+local throttle_min_lua_param = Parameter()
+assert(throttle_min_lua_param:init('THRO_MIN_LUA'), 'could not bind THRO_MIN_LUA parameter')
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
@@ -59,8 +71,15 @@ local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_LOG_INTERVAL_MS = 1000
 local last_yaw_align_log_ms = 0
 local YAW_SEQUENCE_DEGREES = { 0, 90, 180, 270, 360 }
+local YAW_SEQUENCE_PAUSE_MS = 5000
+local YAW_SEQUENCE_MOVEMENT_RAD = math.rad(1)
+local YAW_SEQUENCE_DEFAULT_TIMEOUT_S = 15
 local yaw_sequence_active = false
 local yaw_sequence_index = 0
+local yaw_sequence_pause_start = nil
+local yaw_sequence_last_movement_ms
+local yaw_sequence_movement_reference_rad
+local yaw_sequence_timeout_ms
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
@@ -84,28 +103,29 @@ local AUTOTUNE_PERIOD_MS = UPDATE_PERIOD_MS
 
 -- Yaw autotune parameters
 local YAW_TUNE_PARAM_TABLE_KEY = 16
-assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 3), 'could not add yaw autotune parameter table')
-assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG', 45), 'could not add yaw autotune max angle parameter')
+assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 7), 'could not add yaw autotune parameter table')
+-- Keep the saved abort limit and switching angle in their original slots.
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG_ERR', 90), 'could not add yaw autotune error limit')
 --[[
-  // @Param: YAWT_MAX_ANG
-  // @DisplayName: Yaw autotune maximum angle
+  // @Param: YAWT_MAX_ANG_ERR
+  // @DisplayName: Yaw autotune abort angle
   // @Description: Abort yaw autotune if the yaw error exceeds this angle
   // @Units: deg
   // @Range: 5 90
   // @User: Standard
 --]]
-local yaw_max_angle_param = Parameter()
-assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG parameter')
+local yaw_max_error_param = Parameter()
+assert(yaw_max_error_param:init('YAWT_MAX_ANG_ERR'), 'could not bind YAWT_MAX_ANG_ERR parameter')
 
 --[[
   // @Param: YAWT_MAX_OUT
   // @DisplayName: Yaw autotune maximum motor output
-  // @Description: Maximum steering command applied by yaw autotune; lower values reduce wheel spin speed
+  // @Description: Steering command applied by the yaw relay as a percentage of the THRO_MAX_LUA output range
   // @Units: %
-  // @Range: 5 45
+  // @Range: 1 100
   // @User: Standard
 --]]
-assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 20), 'could not add yaw autotune max output parameter')
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 100), 'could not add yaw autotune max output parameter')
 local yaw_max_out_param = Parameter()
 assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT parameter')
 
@@ -120,6 +140,55 @@ assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT para
 assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 3, 'GAIN_MULT', 1), 'could not add yaw autotune gain multiplier parameter')
 local yaw_gain_multiplier_param = Parameter()
 assert(yaw_gain_multiplier_param:init('YAWT_GAIN_MULT'), 'could not bind YAWT_GAIN_MULT parameter')
+
+--[[
+  // @Param: YAWT_MAX_ANG
+  // @DisplayName: Yaw autotune relay switching angle
+  // @Description: Heading error on either side of the starting heading where the relay reverses. Must be below YAWT_MAX_ANG_ERR.
+  // @Units: deg
+  // @Range: 1 89
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 4, 'MAX_ANG', 45), 'could not add yaw autotune switching angle parameter')
+local yaw_max_angle_param = Parameter()
+assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG parameter')
+
+--[[
+  // @Param: YAWT_MIN_OUT
+  // @DisplayName: Yaw autotune minimum motor output
+  // @Description: Minimum allowed relay output as a percentage of the THRO_MAX_LUA output range. Must be at most YAWT_MAX_OUT.
+  // @Units: %
+  // @Range: 1 100
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 5, 'MIN_OUT', 5), 'could not add yaw autotune min output parameter')
+local yaw_min_out_param = Parameter()
+assert(yaw_min_out_param:init('YAWT_MIN_OUT'), 'could not bind YAWT_MIN_OUT parameter')
+
+--[[
+  // @Param: YAWT_MAX_CYCLE
+  // @DisplayName: Yaw autotune total relay cycles
+  // @Description: Total full cycles to complete, including the first two discarded cycles
+  // @Range: 3 60
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 6, 'MAX_CYCLE', 6), 'could not add yaw autotune cycle parameter')
+local yaw_max_cycle_param = Parameter()
+assert(yaw_max_cycle_param:init('YAWT_MAX_CYCLE'), 'could not bind YAWT_MAX_CYCLE parameter')
+
+--[[
+  // @Param: YAWT_TIMEOUT
+  // @DisplayName: Yaw verification inactivity timeout
+  // @Description: Time without at least one degree of heading change before stopping the post-tune yaw verification
+  // @Units: s
+  // @Range: 1 120
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 7, 'TIMEOUT', YAW_SEQUENCE_DEFAULT_TIMEOUT_S),
+  'could not add yaw verification timeout parameter')
+local yaw_timeout_param = Parameter()
+assert(yaw_timeout_param:init('YAWT_TIMEOUT'), 'could not bind YAWT_TIMEOUT parameter')
 
 local function getYawGainMultiplier()
   return math.max(0.1, math.min(10000, yaw_gain_multiplier_param:get()))
@@ -157,6 +226,10 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param t number - Throttle command from -1.0 to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
+local function getLuaPWMRange()
+  return 5 * math.max(0, math.min(100, throttle_max_lua_param:get()))
+end
+
 local function applyControlAllocation(t, s, timeout_ms)
   timeout_ms = timeout_ms or 300
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
@@ -166,8 +239,7 @@ local function applyControlAllocation(t, s, timeout_ms)
   -- 2 - 3
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
-  local throttle_limit_pct = math.max(0, math.min(100, throttle_max_lua_param:get()))
-  local pwm_range = 5 * throttle_limit_pct
+  local pwm_range = getLuaPWMRange()
   local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   local pwm_min = PWM_TRIM_VALUE - pwm_range
   local pwm_max = PWM_TRIM_VALUE + pwm_range
@@ -188,24 +260,34 @@ Reset the yaw control state
 --]]
 local function resetYawControlState()
   yaw_target_rad = nil
+  yaw_sequence_pause_start = nil
   yaw_align_steps = 0
   yaw_settle_steps = 0
   steering_steady_pid:resetInternalState()
 end
 
+local function startYawVerificationHeading()
+  resetYawControlState()
+  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
+  yaw_sequence_movement_reference_rad = ahrs:get_yaw()
+  yaw_sequence_last_movement_ms = millis()
+  local timeout_s = yaw_timeout_param:get()
+  if not (timeout_s >= 1 and timeout_s <= 120) then
+    timeout_s = YAW_SEQUENCE_DEFAULT_TIMEOUT_S
+  end
+  yaw_sequence_timeout_ms = timeout_s * 1000
+  last_yaw_align_log_ms = 0
+  gcs:send_text(MAV_SEVERITY.INFO, string.format(
+    'YawTune: tentando orientar para %d° (etapa %d/%d)',
+    YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
+end
+
 local function startYawVerificationSequence()
   yaw_sequence_active = true
   yaw_sequence_index = 1
-  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
-  yaw_align_steps = 0
-  yaw_settle_steps = 0
-  last_yaw_align_log_ms = 0
-  steering_steady_pid:resetInternalState()
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: tentando orientar: 0°, 90°, 180°')
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: depois 270° e 360°/0°')
-  gcs:send_text(MAV_SEVERITY.INFO, string.format(
-    'YawTune: tentando orientar para %d° (etapa 1/%d)',
-    YAW_SEQUENCE_DEGREES[yaw_sequence_index], #YAW_SEQUENCE_DEGREES))
+  startYawVerificationHeading()
   if not vehicle:set_mode(DRIVING_MODES.STEERING) then
     yaw_sequence_active = false
     resetYawControlState()
@@ -228,15 +310,9 @@ local function advanceYawVerificationSequence()
     return
   end
 
-  yaw_sequence_index = yaw_sequence_index + 1
-  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
-  yaw_align_steps = 0
-  yaw_settle_steps = 0
-  last_yaw_align_log_ms = 0
-  steering_steady_pid:resetInternalState()
-  gcs:send_text(MAV_SEVERITY.INFO, string.format(
-    'YawTune: tentando orientar para %d° (etapa %d/%d)',
-    YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
+  resetYawControlState()
+  yaw_sequence_pause_start = millis()
+  gcs:send_text(MAV_SEVERITY.INFO, "YawTune: aguardando 5 s")
 end
 
 --[[
@@ -371,31 +447,48 @@ local function applyPWMSteeringMode()
     return
   end
 
-  -- Timeout safety
-  yaw_align_steps = yaw_align_steps + 1
-  local yaw_align_max_steps = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
-  if yaw_align_steps > yaw_align_max_steps then
+  if yaw_sequence_pause_start then
+    if (millis() - yaw_sequence_pause_start):tofloat() < YAW_SEQUENCE_PAUSE_MS then
+      applyControlAllocation(0, 0)
+      return
+    end
+    yaw_sequence_index = yaw_sequence_index + 1
+    startYawVerificationHeading()
+  end
+  if yaw_target_rad == nil then
     applyControlAllocation(0, 0)
-    steering_steady_pid:resetInternalState()
-    yaw_settle_steps = 0
-    if yaw_sequence_active then
+    return
+  end
+
+  local current_yaw_rad = ahrs:get_yaw()
+  local now = millis()
+  if yaw_sequence_active then
+    local movement = funcs:yawErrorRad(current_yaw_rad, yaw_sequence_movement_reference_rad)
+    if math.abs(movement) >= YAW_SEQUENCE_MOVEMENT_RAD then
+      yaw_sequence_movement_reference_rad = current_yaw_rad
+      yaw_sequence_last_movement_ms = now
+    elseif (now - yaw_sequence_last_movement_ms):tofloat() >= yaw_sequence_timeout_ms then
       local failed_heading = YAW_SEQUENCE_DEGREES[yaw_sequence_index]
       yaw_sequence_active = false
       yaw_sequence_index = 0
       resetYawControlState()
+      applyControlAllocation(0, 0)
       vehicle:set_mode(DRIVING_MODES.HOLD)
       gcs:send_text(MAV_SEVERITY.ERROR, string.format(
-        'YawTune: timeout at %d°; sequence stopped in HOLD', failed_heading))
-    else
-      vehicle:set_mode(DRIVING_MODES.AUTO)
+        'YawTune: %.1fs without movement at %d deg; HOLD', yaw_sequence_timeout_ms / 1000, failed_heading))
+      return
     end
+  elseif yaw_align_steps >= math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS) then
+    applyControlAllocation(0, 0)
+    resetYawControlState()
+    vehicle:set_mode(DRIVING_MODES.AUTO)
     return
+  else
+    yaw_align_steps = yaw_align_steps + 1
   end
 
-  -- Current yaw from AHRS (rad) and error to target
-  local current_yaw_rad = ahrs:get_yaw()
   local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
-  local now_ms = millis():toint()
+  local now_ms = now:toint()
   if now_ms - last_yaw_align_log_ms >= YAW_ALIGN_LOG_INTERVAL_MS then
     last_yaw_align_log_ms = now_ms
     gcs:send_text(MAV_SEVERITY.INFO, string.format(
@@ -420,6 +513,7 @@ local function applyPWMSteeringMode()
       advanceYawVerificationSequence()
     else
       -- Set HOLD mode so the vehicle stops for the external ROS photo routine
+      resetYawControlState()
       vehicle:set_mode(DRIVING_MODES.HOLD)
     end
     return
@@ -427,6 +521,14 @@ local function applyPWMSteeringMode()
 
   -- Rotate in place with pid output
   local s_out = steering_steady_pid:compute(err, UPDATE_DT)
+  if math.abs(err) > YAW_THRESH_RAD and math.abs(yaw_rate) <= YAW_RATE_THRESH_RAD_S and s_out * err > 0 then
+    local pwm_range = getLuaPWMRange()
+    local min_offset = throttle_min_lua_param:get() - PWM_TRIM_VALUE
+    if pwm_range > 0 and min_offset > 0 then
+      local min_command = math.min(1, min_offset / pwm_range)
+      s_out = s_out < 0 and math.min(s_out, -min_command) or math.max(s_out, min_command)
+    end
+  end
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
@@ -482,19 +584,45 @@ Switch high starts the relay test around the current yaw; switch low aborts/rear
 --]]
 local function runYawAutotune()
   if autotune_done then return false end
-  if autotune.status == "idle" then
+  local starting = autotune.status == "idle"
+  local max_error = yaw_max_error_param:get()
+  local max_error_rad = math.rad(max_error)
+  local hysteresis = starting and math.rad(yaw_max_angle_param:get()) or autotune.hyst_rad
+  if not (hysteresis >= math.rad(1) and hysteresis <= math.rad(89) and
+          max_error >= 5 and max_error <= 90 and hysteresis < max_error_rad) then
+    gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: require MAX_ANG < MAX_ANG_ERR (5-90)")
+    autotune_done = true
+    return false
+  end
+  if starting then
+    local min_output = yaw_min_out_param:get()
+    local max_output = yaw_max_out_param:get()
+    if not (min_output >= 1 and min_output <= max_output and max_output <= 100) then
+      gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: require 1 <= MIN_OUT <= MAX_OUT <= 100")
+      autotune_done = true
+      return false
+    end
+    local max_cycles = yaw_max_cycle_param:get()
+    if not (max_cycles >= 3 and max_cycles <= 60 and max_cycles % 1 == 0) then
+      gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: MAX_CYCLE must be an integer from 3 to 60")
+      autotune_done = true
+      return false
+    end
     autotune_target_rad = ahrs:get_yaw()
-    autotune.relay = math.max(0.05, math.min(0.45, yaw_max_out_param:get() / 100))
+    autotune.relay = max_output / 100
+    autotune.hyst_rad = hysteresis
+    autotune.cycles = max_cycles - autotune.skip_cycles
     autotune:start()
     yaw_tune_last_progress = 0
     yaw_tune_last_log_s = -1
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
       "YawTune: started; target %.1f deg, max error %.1f deg, max output %.0f%%",
-      math.deg(autotune_target_rad), yaw_max_angle_param:get(), autotune.relay * 100))
+      math.deg(autotune_target_rad), max_error, autotune.relay * 100))
+    gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: relay switches at +/- %.1f deg", math.deg(hysteresis)))
   end
   local err = funcs:yawErrorRad(ahrs:get_yaw(), autotune_target_rad)
   local yaw_rate = ahrs:get_gyro():z()
-  autotune.max_amp_rad = math.rad(yaw_max_angle_param:get())
+  autotune.max_amp_rad = max_error_rad
   local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
   applyControlAllocation(0, s_out)
   if autotune.cycle > yaw_tune_last_progress or autotune.t - yaw_tune_last_log_s >= 2 then
@@ -579,6 +707,8 @@ local function update()
     yaw_sequence_index = 0
     resetYawControlState()
     gcs:send_text(MAV_SEVERITY.WARNING, 'YawTune: heading sequence aborted (mode changed)')
+  elseif yaw_target_rad ~= nil and vehicle_mode ~= DRIVING_MODES.STEERING then
+    resetYawControlState()
   end
   local selector = param:get(TUNE_SELECT_PARAM)
   if not selector_armed_reported then
@@ -648,7 +778,7 @@ local function update()
 end
 
 gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
-  "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG=%.1f deg, YAWT_MAX_OUT=%.0f%%",
-  VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_angle_param:get(), yaw_max_out_param:get()))
+  "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG_ERR=%.1f deg, YAWT_MAX_OUT=%.0f%%",
+  VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_error_param:get(), yaw_max_out_param:get()))
 return update, 3000 -- run immediately before starting to reschedule
 -------------------------------------------------------------------------------

@@ -39,7 +39,7 @@ Confira que os arquivos instalados são desta branch. A documentação antiga us
 | 2 | Executa o autotune de yaw enquanto armado, em qualquer modo | Consulta a chave RC |
 | 3 | Executa o ensaio por relé quando o rover está armado em `CIRCLE` e a curva estabiliza | Suspende o QuickTune e reverte ajustes que ainda estavam pendentes |
 
-O script de yaw cria `YAWT_MAX_ANG` (padrão 45°), `YAWT_MAX_OUT` (padrão 20%) e `YAWT_GAIN_MULT` (padrão 1). A amplitude efetiva do relé é `YAWT_MAX_OUT / 100`, limitada a 5–45%. `YAWT_GAIN_MULT` multiplica P e I usados pelo PI de orientação; por exemplo, fator 10 aplica P=10 e I=5 se os ganhos base forem P=1 e I=0,5. Os ganhos base, sem multiplicador, continuam salvos em `SCR_USER2/3`.
+O script cria a tabela `YAWT_` ao carregar. Depois de atualizar o Lua e reiniciar a Pixhawk, atualize a **Full Parameter List** no Mission Planner e filtre por `YAWT_`. A amplitude fixa do comando do relé é `YAWT_MAX_OUT / 100` da faixa de PWM definida por `THRO_MAX_LUA`. O ensaio exige `1 ≤ YAWT_MIN_OUT ≤ YAWT_MAX_OUT ≤ 100`. `YAWT_GAIN_MULT` multiplica P e I usados pelo PI de orientação. Por exemplo, fator 10 aplica P=10 e I=5 se os ganhos base forem P=1 e I=0,5. Os ganhos base, sem multiplicador, continuam salvos em `SCR_USER2/3`.
 
 `SCR_USER2` e `SCR_USER3` guardam P e I base do PI de yaw. Se ambos forem maiores que zero quando `rover-controlallocation.lua` inicia, o script aplica `YAWT_GAIN_MULT` a esses valores, sem divisão por 1000. Se algum for zero ou negativo, o script mantém os defaults P=3,5 e I=8. Ao terminar com sucesso, o autotune grava os ganhos base e usa no PID em memória os ganhos multiplicados.
 
@@ -132,21 +132,21 @@ O autotune usa o método de realimentação por relé, associado a Åström–H�
 
 ### O que o rover faz
 
-O procedimento aplica aceleração zero e alterna a direção entre `+d` e `−d`, enquanto mede o erro entre o yaw capturado no início e o yaw atual. O rover deve girar no lugar, alternando o sentido, dentro do limite configurado. O script descarta dois ciclos iniciais, mede quatro ciclos e estima P/I pela regra Tyreus–Luyben. O ensaio roda no mesmo período de 200 ms usado pelo PI de alinhamento.
+O procedimento aplica aceleração zero e alterna a direção entre `+d` e `−d`, enquanto mede o erro entre o yaw capturado no início e o yaw atual. O rover deve girar no lugar, alternando o sentido, dentro do limite configurado. O script coleta `YAWT_MAX_CYCLE` ciclos completos, descarta os dois primeiros e estima P/I pela regra Tyreus–Luyben. Com o padrão de seis ciclos, quatro entram no cálculo. O ensaio roda no mesmo período de 200 ms usado pelo PI de alinhamento.
 
 As fórmulas usadas são:
 
 ```text
-ε = 2° (histerese)
+ε = YAWT_MAX_ANG convertido de graus para radianos
 Ku = 4·d / (π·√(A² − ε²))
 Kp = Ku / 3,2
 Ti = 2,2·Pu
 Ki = Kp / Ti
 ```
 
-`A` é a amplitude média do erro e `Pu` é o período médio da oscilação, após descartar os ciclos iniciais. O algoritmo rejeita ciclos com variação acima de 25%, período fora de 0,4–20 s, erro maior que `YAWT_MAX_ANG`, ou experimento acima de 60 s.
+`A` é a amplitude média do erro e `Pu` é o período médio da oscilação, após descartar os ciclos iniciais. O algoritmo rejeita ciclos com variação acima de 25%, período fora de 0,4–20 s, erro maior que `YAWT_MAX_ANG_ERR` ou experimento acima de 60 s.
 
-Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `SCR_USER2` e `Ki` para `SCR_USER3`. O controlador é PI (`D=0`) e a saída fica limitada pelo PID Lua. Depois de um ajuste bem-sucedido, o script aplica os ganhos multiplicados por `YAWT_GAIN_MULT` e tenta orientar o rover sucessivamente para 0°, 90°, 180°, 270° e 360°/0°. Cada tentativa e conclusão é informada no GCS. Ao terminar, o rover entra em `HOLD`; se uma etapa exceder o timeout, a sequência é interrompida e o rover também entra em `HOLD`. Ganhos só são apropriados se o sentido do comando fizer o erro diminuir e a estimativa de yaw for estável; o autotune não verifica sozinho a polaridade física de cada motor.
+Os valores calculados não são escalados por 1000: `Kp` vai diretamente para `SCR_USER2` e `Ki` para `SCR_USER3`. O controlador é PI (`D=0`) e a saída fica limitada pelo PID Lua. Depois de um ajuste bem-sucedido, o script aplica os ganhos multiplicados por `YAWT_GAIN_MULT` e tenta orientar o rover sucessivamente para 0°, 90°, 180°, 270° e 360°/0°. O script mantém o comando em neutro por 5 s entre duas orientações. Cada tentativa e conclusão é informada no GCS. Ao terminar, o rover entra em `HOLD`; se uma etapa exceder o timeout, a sequência é interrompida e o rover também entra em `HOLD`. Ganhos só são apropriados se o sentido do comando fizer o erro diminuir e a estimativa de yaw for estável; o autotune não verifica sozinho a polaridade física de cada motor.
 
 ### Execução
 
@@ -172,11 +172,21 @@ Durante o alinhamento, o GCS recebe uma mensagem por segundo com `YawAlign targe
 | `SCR_USER1` | Seletor compartilhado nesta branch: 0 = operação normal; 1 = QuickTune automático enquanto armado; 2 = autotune de yaw enquanto armado; 3 = autotune de taxa de giro enquanto armado em Circle. |
 | `SCR_USER2` | P do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
 | `SCR_USER3` | I do PI Lua de alinhamento; o script usa o valor diretamente se positivo. |
-| `YAWT_MAX_ANG` | Limite do erro angular do experimento; acima dele o autotune aborta. Padrão: 45°. |
-| `YAWT_MAX_OUT` | Amplitude desejada do relé em porcentagem. Padrão: 20%, limitada internamente a 5–45%. |
+| `YAWT_MAX_ANG_ERR` | Erro angular que encerra o ensaio quando excedido. Faixa de 5° a 90°. Padrão de 90°. |
+| `YAWT_MAX_ANG` | Erro angular em cada lado do rumo inicial em que o relé inverte a direção. Faixa de 1° a 89°. Padrão de 45°. |
+| `YAWT_MAX_OUT` | Amplitude do comando do relé em porcentagem de `THRO_MAX_LUA`. Faixa de 1% a 100%. Padrão de 100%. |
+| `YAWT_MIN_OUT` | Menor amplitude aceita para `YAWT_MAX_OUT`. Faixa de 1% a 100%. Padrão de 5%. |
+| `YAWT_MAX_CYCLE` | Total de ciclos, incluindo os dois descartados no início. Inteiro de 3 a 60. Padrão de 6. |
+| `YAWT_TIMEOUT` | Tempo sem mudança de rumo antes de abortar a verificação final. Faixa de 1 a 120 s. Padrão de 15 s. |
 | `YAWT_GAIN_MULT` | Multiplicador dos ganhos P/I durante alinhamentos. Padrão: 1; faixa aceita: 0,1–10000. Os valores base permanecem em `SCR_USER2/3`. |
 
 `SCR_USER2/3` não são parâmetros `ATC_*`. Eles só alimentam o `steering_steady_pid` usado para alinhamento após waypoint; não ajustam a navegação normal em `AUTO`.
+
+O autotune exige `YAWT_MAX_ANG < YAWT_MAX_ANG_ERR` para deixar margem para o rover girar após a inversão. A amplitude, o ângulo de inversão e o total de ciclos são lidos no início da tentativa. Depois de corrigir uma combinação rejeitada, selecione `SCR_USER1=0` e depois `2` para tentar novamente.
+
+Na atualização, o valor gravado no antigo `YAWT_MAX_ANG` (limite de aborto) passa para `YAWT_MAX_ANG_ERR`. O antigo `YAWT_HYST_ANG` passa para `YAWT_MAX_ANG`. Valores já gravados de `YAWT_MAX_OUT` também são preservados. Confira os valores na lista atualizada antes do primeiro ensaio.
+
+Na verificação final, a contagem começa ao iniciar cada orientação. Quando o rumo medido se afasta pelo menos 1° da última referência, o script reinicia a contagem. Se passar `YAWT_TIMEOUT` segundos sem esse movimento, o rover para e entra em `HOLD`. As pausas de 5 s entre orientações ficam fora dessa contagem.
 
 ## 5. Autotune da taxa de giro por relé em Circle
 
@@ -230,6 +240,10 @@ Arquivos necessários no cartão para estes recursos:
 - `scripts/modules/pid.lua`
 
 O QuickTune cria os parâmetros `RTUN_*` descritos na seção 6. `system-start.lua` só é necessário para os parâmetros customizados da aplicação de barco; o alocador Rover desta branch não depende de `BATT_SOC_SYSSTART`.
+
+### Limites de PWM do alocador Lua
+
+`THRO_MAX_LUA` define a faixa máxima do alocador em porcentagem. `THRO_MIN_LUA` define o PWM de partida do alinhamento de yaw em `STEERING`, em µs. O script aplica esse mínimo quando existe um alvo de rumo, o erro supera 2°, a taxa de giro tem magnitude de até 2°/s e o PI pede movimento em direção ao alvo. Por exemplo, 1560 corresponde a um mínimo de 1560 µs em um sentido e 1440 µs no outro. O padrão de 1500 µs desabilita a compensação, e o teto de `THRO_MAX_LUA` tem prioridade.
 
 Os testes auxiliares em `Rover/tests/` simulam APIs Lua e podem ajudar a verificar a lógica local, mas não substituem SITL nem validação física. O alocador e a mistura PWM devem ser verificados com o arranjo de motores real.
 
