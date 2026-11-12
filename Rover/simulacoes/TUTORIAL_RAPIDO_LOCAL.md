@@ -24,6 +24,7 @@ export ROS_DOMAIN_ID=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 unset ROVER_COMPANION_HOST
+unset FASTRTPS_DEFAULT_PROFILES_FILE
 source ros2/setup.bash
 ```
 
@@ -115,17 +116,64 @@ ros2 topic echo /mission_manager/status --full-length
 ./ros2/service.sh camera
 ```
 
-## Encerrar
+## Parar a missão e encerrar tudo
 
-No terminal de comandos:
+### 1. Solicitar parada, mantendo os serviços abertos
+
+No terminal 7, se estiver acompanhando o status, pressione Ctrl+C para voltar
+ao prompt. Esse Ctrl+C fecha somente a visualização. Depois execute:
 
 ```bash
 ros2 service call /mission_manager/cancel std_srvs/srv/Trigger '{}'
 ros2 topic echo /mission_manager/status --once --full-length
 ```
 
-Confirme HOLD e parada. Depois use Ctrl+C, nesta ordem: Mission Manager,
-mapa, FAST-LIO, câmera/RViz, SITL e Gazebo. Se houver `FALHA`, leia `last_error`
-antes de tentar outra missão; HOLD sozinho não limpa a falha do gerenciador.
+Espere `mode: 4` (HOLD), telemetria recente (`fresh: true`) e rover parado.
+A resposta ao cancelamento confirma o pedido, não a conclusão da parada.
+O cancelamento pode aparecer como `FALHA` com motivo de cancelamento pelo operador.
+Ele não garante desarmamento; para encerrar, desarme pelo QGroundControl após
+confirmar a parada e confira `armed: false`.
+
+Se o serviço não responder, interrompa a chamada com Ctrl+C e selecione HOLD
+no QGroundControl ou no console MAVProxy. Confirme a parada antes de continuar.
+
+### 2. Fechar os processos nesta ordem
+
+Em cada terminal indicado, pressione **Ctrl+C** e espere o processo terminar:
+
+| Ordem | Terminal / programa |
+| --- | --- |
+| 1 | Terminal 5 — Mission Manager |
+| 2 | Terminal 4 — mapa 3D (aguarde a exportação do mapa) |
+| 3 | Terminal 3 — FAST-LIO |
+| 4 | Terminal opcional — câmera; terminal 6 — RViz |
+| 5 | Terminal 2 — SITL e MAVProxy |
+| 6 | Terminal 1 — Gazebo |
+
+Feche também o QGroundControl pelo menu Sair ou pelo botão de fechar a janela.
+Não use Ctrl+Z: ele suspende o processo e pode deixar portas e bloqueios ocupados.
+Fechar apenas a janela do Gazebo não garante o encerramento do servidor.
+
+### 3. Conferir se restaram processos
+
+No terminal 7:
+
+```bash
+pgrep -af '[s]im_vehicle.py|[a]rdurover|[m]avproxy.py|[g]z sim|[g]z-sim|[r]viz2|[r]un_fast_lio.py|[f]astlio_mapping|[s]lam_mid360_3d.py|[m]ission_manager/manager.py|[r]ead_ros_camera.py|[Q]GroundControl'
+```
+
+Nenhuma linha indica que não há processos com esses nomes. Se aparecer algum,
+confira o PID e o comando; volte ao terminal correspondente para encerrá-lo.
+Não remova arquivos `.lock` nem mate todos os processos Python/ROS indiscriminadamente.
+
+Para apenas interromper a missão e manter a simulação aberta, execute somente
+o passo 1. Antes de outra missão, leia `last_error`, corrija a causa se necessário
+e solicite reconciliação:
+
+```bash
+ros2 service call /mission_manager/reconcile std_srvs/srv/Trigger '{}'
+```
+
+HOLD sozinho não limpa a falha do gerenciador.
 
 Detalhes: [tutorial do Mission Manager](mission_manager/TUTORIAL.md).

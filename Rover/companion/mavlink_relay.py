@@ -7,7 +7,7 @@ import time
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--remote',default='192.168.0.198');p.add_argument('--listen',type=int,default=14557);p.add_argument('--port',type=int,default=14600)
+    p=argparse.ArgumentParser();p.add_argument('--remote',default='192.168.0.167');p.add_argument('--listen',type=int,default=14557);p.add_argument('--port',type=int,default=14600)
     a=p.parse_args();peer=(socket.gethostbyname(a.remote),a.port)
     sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);sock.bind(('0.0.0.0',a.listen))
     upstream=None;last_upstream=0

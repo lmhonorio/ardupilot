@@ -14,6 +14,18 @@ for key in "${keys[@]}"; do
   (( value >= 8388608 )) || value=8388608
   printf '%s = %s\n' "$key" "$value" >> "$temp"
 done
+# Full PointCloud2 packets can fill Linux's separate IP reassembly budget even
+# when UDP socket buffers are large enough. Record and tune this budget too.
+fragment_backup=/var/lib/rover-companion/dds-fragments-before.txt
+if [[ ! -f "$fragment_backup" ]]; then
+  sysctl net.ipv4.ipfrag_high_thresh net.ipv4.ipfrag_time > "$fragment_backup"
+fi
+fragment_bytes=$(sysctl -n net.ipv4.ipfrag_high_thresh)
+(( fragment_bytes >= 67108864 )) || fragment_bytes=67108864
+fragment_seconds=$(sysctl -n net.ipv4.ipfrag_time)
+(( fragment_seconds <= 3 )) || fragment_seconds=3
+printf 'net.ipv4.ipfrag_high_thresh = %s\nnet.ipv4.ipfrag_time = %s\n' "$fragment_bytes" "$fragment_seconds" >> "$temp"
 install -m 0644 "$temp" "$config"
 sysctl --load "$config"
 echo "Valores anteriores: $backup. Reinicie os processos ROS para recriar os sockets."
+echo "Remontagem IP: valores anteriores em $fragment_backup."

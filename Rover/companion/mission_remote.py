@@ -11,7 +11,7 @@ import sys
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('mission_file');p.add_argument('--remote',default=os.environ.get('ROVER_REMOTE','leo@192.168.0.198'))
+    p.add_argument('mission_file');p.add_argument('--remote',default=os.environ.get('ROVER_REMOTE','rover@192.168.0.167'))
     a=p.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+',a.remote):p.error('Destino SSH invalido')
     path=Path(a.mission_file).expanduser().resolve()

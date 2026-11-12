@@ -1,8 +1,14 @@
 # Início rápido — controle na Raspberry
 
+Instalação na nova Pi 5: [SITL/Gazebo](companion/INSTALACAO_PI5_SIMULACAO.md)
+ou [rover físico](companion/INSTALACAO_PI5_ROVER_REAL.md).
+
 No computador: Gazebo, SITL/Lua/MAVProxy, RViz, câmera e comandos de missão.
-Na Raspberry `leo@192.168.0.198`: Docker com FAST-LIO, mapa e Mission Manager
+Na Raspberry `rover@192.168.0.167`: Docker com FAST-LIO, mapa e Mission Manager
 (docking LiDAR, saída e recarga simulada).
+
+Na Pi 5, missão → entrada → recarga passou no ensaio, mas a repetição falhou
+na saída por alinhamento/odometria. Veja a [validação e limitações atuais](companion/VALIDACAO_PI5.md).
 
 Este guia usa a imagem já instalada e os buffers de rede já configurados.
 Comece sem a simulação anterior aberta. Encerre os serviços **locais** de
@@ -17,7 +23,7 @@ os que iniciam o container por SSH. Em cada novo terminal:
 ```bash
 cd ~/ardupilot/Rover
 export ROS_DOMAIN_ID=0
-export ROVER_REMOTE=leo@192.168.0.198
+export ROVER_REMOTE=rover@192.168.0.167
 source companion/pc_env.bash
 ```
 
@@ -31,13 +37,14 @@ source companion/pc_env.bash
   insta360_enabled:=false hokuyo_enabled:=false
 ```
 
-O fator `0.5` é o perfil validado na Pi 4: cada segundo simulado leva cerca
-de dois segundos reais. Não altera a velocidade configurada em m/s.
+O fator `0.5` reduz a carga de sensores na rede: cada segundo simulado leva
+cerca de dois segundos reais. Não altera a velocidade configurada em m/s.
+Veja os resultados e limites da Pi 5 no [relatório](companion/VALIDACAO_PI5.md).
 
 ## Terminal 2 — SITL local com MAVLink para a Raspberry
 
 ```bash
-ROVER_COMPANION_HOST=192.168.0.198 \
+ROVER_COMPANION_HOST=192.168.0.167 \
   ./sim_1_gzrover.sh --foreground \
   --add-param-file nrover_sem_desvio.param --no-rebuild
 ```
@@ -103,24 +110,76 @@ e `armed=false`. Ctrl+C encerra apenas o acompanhamento do status.
 ./ros2/service.sh camera
 ```
 
-## Encerrar
+## Parar a missão e encerrar tudo
 
-No terminal de comandos:
+### 1. Solicitar parada
+
+No terminal 5, interrompa `watch` com Ctrl+C para voltar ao prompt. Isso fecha
+somente a visualização do status. Depois execute:
 
 ```bash
 ./companion/control.sh cancel
 ./companion/control.sh status
 ```
 
-Confirme HOLD e parada; depois encerre os serviços remotos:
+Espere `mode: 4` (HOLD), telemetria recente (`fresh: true`) e rover parado.
+A resposta ao cancelamento confirma o pedido, não a conclusão da parada.
+O cancelamento pode aparecer como `FALHA` com motivo de cancelamento pelo operador.
+Ele não garante desarmamento; desarme pelo QGroundControl após confirmar a
+parada e confira `armed: false`.
+
+Se o serviço não responder, interrompa a chamada com Ctrl+C e selecione HOLD
+no QGroundControl ou no MAVProxy local. Confirme a parada antes de continuar.
+
+### 2. Encerrar os serviços da Raspberry
+
+Mantenha Gazebo e SITL abertos enquanto o container encerra:
 
 ```bash
 ./companion/control.sh down
 ```
 
-Feche câmera/RViz, SITL e Gazebo com Ctrl+C nos respectivos terminais.
-Se o status estiver em `FALHA`, leia `last_error` e corrija a causa antes de
-usar `./companion/control.sh reconcile` e solicitar outra missão.
+Esse comando encerra o gerenciador, mapa, FAST-LIO e MAVProxy remotos e remove
+o container em execução. A imagem, configurações, missões e logs persistentes
+ficam disponíveis para a próxima inicialização. Não desliga a Raspberry.
+
+Confira:
+
+```bash
+ssh rover@192.168.0.167 \
+  'cd ~/rover_companion && docker compose ps --all'
+```
+
+Não deve haver serviço do projeto em execução. Ctrl+C em `logs` **não** substitui
+`down`. Após o encerramento, o tópico de status deixa de ser publicado.
+
+### 3. Fechar os programas deste computador
+
+Pressione Ctrl+C e espere terminar, nesta ordem:
+
+| Ordem | Terminal / programa |
+| --- | --- |
+| 1 | Terminal 3 — acompanhamento de logs, se ainda estiver aberto |
+| 2 | Terminal opcional — câmera; terminal 4 — RViz |
+| 3 | Terminal 2 — SITL e MAVProxy locais |
+| 4 | Terminal 1 — Gazebo |
+
+Feche também o QGroundControl pelo menu Sair ou pelo botão de fechar a janela.
+Não use Ctrl+Z: ele apenas suspende o programa. Fechar só a janela do Gazebo
+não garante que seu servidor terminou.
+
+Para conferir processos locais restantes, no terminal 5:
+
+```bash
+pgrep -af '[s]im_vehicle.py|[a]rdurover|[m]avproxy.py|[g]z sim|[g]z-sim|[r]viz2|[r]ead_ros_camera.py|[Q]GroundControl'
+```
+
+Se aparecer algum, confira o PID e volte ao terminal correspondente para
+encerrá-lo. Não use comandos que matem indiscriminadamente Python ou ROS.
+
+Para apenas interromper a missão e manter os sistemas abertos, execute somente
+o passo 1. Antes de solicitar outra missão, confira `last_error`, corrija a
+causa se necessário e use `./companion/control.sh reconcile`.
 
 Este fluxo é de simulação. Para hardware físico e configuração da imagem,
 consulte o [tutorial completo](companion/RASPBERRY_DOCKER.md).

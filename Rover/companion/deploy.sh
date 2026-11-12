@@ -3,7 +3,7 @@
 set -euo pipefail
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 rover=$(cd -- "$here/.." && pwd)
-remote=${ROVER_REMOTE:-leo@192.168.0.198}
+remote=${ROVER_REMOTE:-rover@192.168.0.167}
 [[ "$remote" =~ ^[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+$ ]] || exit 2
 archive=$(mktemp --suffix=.tgz);trap 'rm -f "$archive"' EXIT
 # FAST-LIO sources are pinned by ros2/dependencies.lock and patched on build.

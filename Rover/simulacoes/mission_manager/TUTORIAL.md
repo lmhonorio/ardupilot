@@ -415,6 +415,10 @@ executa o mesmo fluxo de entrada. Não execute `entrar_container.py` em paralelo
 
 ## 13. Cancelar, recuperar e encerrar
 
+Para fechar todos os sistemas na ordem correta, consulte
+[encerramento local](../TUTORIAL_RAPIDO_LOCAL.md#parar-a-missão-e-encerrar-tudo)
+ou [encerramento remoto](../TUTORIAL_RAPIDO_REMOTO.md#parar-a-missão-e-encerrar-tudo).
+
 ```bash
 ros2 service call /mission_manager/cancel std_srvs/srv/Trigger '{}'
 ```

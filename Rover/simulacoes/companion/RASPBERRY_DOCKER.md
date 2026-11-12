@@ -1,12 +1,22 @@
 # Raspberry como computador de bordo — ROS 2 e Docker
 
+**Raspberry atual: Pi 5, `rover@192.168.0.167`.** Instalação do zero e troca de perfil:
+[SITL/Gazebo](INSTALACAO_PI5_SIMULACAO.md) e
+[rover real / camada de abstração](INSTALACAO_PI5_ROVER_REAL.md).
+O [relatório da Pi 4](VALIDACAO.md) é histórico; os ensaios da nova máquina
+ficam no [relatório da Pi 5](VALIDACAO_PI5.md).
+
+Na nova instalação, um ciclo de missão, entrada e recarga passou; a repetição
+partindo de dentro falhou na saída por alinhamento/odometria. A sequência
+automática completa com saída ainda não está validada nesta Pi/rede.
+
 Guias rápidos com comandos por terminal:
 [controle local](../TUTORIAL_RAPIDO_LOCAL.md) e
 [controle na Raspberry](../TUTORIAL_RAPIDO_REMOTO.md).
 
 ## Distribuição dos serviços
 
-| Computador de simulação | Raspberry `leo@192.168.0.198` |
+| Computador de simulação | Raspberry `rover@192.168.0.167` |
 | --- | --- |
 | Gazebo e ponte Gazebo/ROS 2, sensores simulados e `/clock` | FAST-LIO, odometria, mapa 3D e nuvem local |
 | ArduRover SITL, Lua e MAVProxy ligado ao SITL | MAVProxy de distribuição para os serviços de bordo |
@@ -54,7 +64,7 @@ dos sensores não foram aumentados para acomodar a rede.
 
 ## Endereços e comunicação
 
-Não foi configurado IP fixo nem mDNS. O destino atual é `192.168.0.198`.
+Não foi configurado IP fixo nem mDNS. O destino atual é `192.168.0.167`.
 O nome `rover.local` pode ser uma alternativa futura quando mDNS estiver
 configurado e a rede permitir multicast. Um IP estático não é universal entre
 roteadores com sub-redes distintas.
@@ -128,15 +138,19 @@ Prepare buffers UDP para as mensagens grandes, **nos dois computadores**:
 # Neste computador:
 sudo bash ~/ardupilot/Rover/companion/configure_dds_buffers.sh
 # Na Raspberry, após enviar os fontes:
-ssh -t leo@192.168.0.198 \
+ssh -t rover@192.168.0.167 \
   'sudo bash ~/rover_companion/source/companion/configure_dds_buffers.sh'
 ```
 
-O script estabelece mínimos de 8 MiB para os buffers de envio/recepção;
+O script estabelece mínimos de 8 MiB para os buffers de envio/recepção e,
+na revisão da Pi 5, mínimo de 64 MiB para remontagem IP com retenção de
+fragmentos incompletos de no máximo 3 s;
 guarda os valores anteriores em `/var/lib/rover-companion/dds-buffers-before.txt`
 e não altera IPs ou rotas. Reinicie as pontes ROS e o container para recriar
 os sockets. Na instalação de 11/11/2026, o ajuste foi aplicado na Raspberry
-e também neste computador, com autenticação local do operador.
+e também neste computador, com autenticação local do operador. O complemento
+de remontagem IP da revisão de 12/11 exige executar novamente o script;
+o backup adicional fica em `dds-fragments-before.txt`.
 
 Para enviar o código e compilar a imagem:
 
@@ -150,9 +164,10 @@ processo de compilação por vez. Arquivos anteriores de configuração são
 preservados. Depois de uma atualização, pare e recrie o container com o rover
 parado; processos Python já iniciados não recarregam o código.
 
-Na primeira construção nesta Raspberry de 4 GB, a compilação C++ do FAST-LIO
-exigiu swap temporário adicional. Se for reconstruir as dependências do zero
-em outra máquina com a mesma memória, prepare 2 GB temporários na Raspberry:
+Na construção anterior na Raspberry Pi 4 de 4 GB, a compilação C++ do FAST-LIO
+exigiu swap temporário adicional. A Pi 5 atual tem 16 GB de RAM.
+Se for reconstruir as dependências do zero em outra máquina de 4 GB, prepare
+2 GB temporários na Raspberry:
 
 ```bash
 cd ~/rover_companion
@@ -197,7 +212,7 @@ resolução dos sensores; altera a velocidade de execução da simulação.
 ```bash
 cd ~/ardupilot/Rover
 source companion/pc_env.bash
-ROVER_COMPANION_HOST=192.168.0.198 \
+ROVER_COMPANION_HOST=192.168.0.167 \
   ./sim_1_gzrover.sh --foreground --add-param-file nrover_sem_desvio.param --no-rebuild
 ```
 
@@ -213,7 +228,7 @@ local 14557 com a ponte abaixo, mantendo-a em outro terminal:
 
 ```bash
 cd ~/ardupilot/Rover
-python3 companion/mavlink_relay.py --remote 192.168.0.198
+python3 companion/mavlink_relay.py --remote 192.168.0.167
 ```
 
 Use **um** caminho: encaminhamento direto no início do SITL **ou** essa ponte.
@@ -282,7 +297,7 @@ Para chamar `start_file` diretamente, o arquivo precisa existir **no container**
 Por exemplo, copie primeiro:
 
 ```bash
-scp Missions/new_argo.plan leo@192.168.0.198:rover_companion/missions/new_argo.plan
+scp Missions/new_argo.plan rover@192.168.0.167:rover_companion/missions/new_argo.plan
 ros2 service call /mission_manager/start_file rover_mission_interfaces/srv/StartMission \
   "{mission_file: '/missions/new_argo.plan'}"
 ```
@@ -292,17 +307,40 @@ container. `companion/control.sh mission` resolve essa diferença automaticament
 
 ## Encerramento e logs
 
+O [guia rápido remoto](../TUTORIAL_RAPIDO_REMOTO.md#parar-a-missão-e-encerrar-tudo)
+detalha a ordem de fechamento de todos os terminais e a verificação dos processos.
+Para controle local, use o
+[encerramento local](../TUTORIAL_RAPIDO_LOCAL.md#parar-a-missão-e-encerrar-tudo).
+
 Para interromper o movimento, solicite cancelamento e confira HOLD/parada:
 
 ```bash
+cd ~/ardupilot/Rover
 ./companion/control.sh cancel
 ./companion/control.sh status
+```
+
+Confirme `mode=4`, telemetria recente e parada; desarme antes de encerrar.
+Depois, com Gazebo e SITL ainda abertos:
+
+```bash
 ./companion/control.sh down
 ```
 
 O supervisor encerra primeiro o gerenciador, mantendo a comunicação para a
 parada; depois fecha mapa, FAST-LIO e MAVProxy. Gazebo e SITL locais continuam
-abertos até serem encerrados em seus terminais.
+abertos até serem encerrados em seus terminais. Após `down`, feche câmera e
+RViz, depois SITL/MAVProxy e por último Gazebo, usando Ctrl+C e aguardando
+cada processo terminar. Feche também o QGroundControl. Ctrl+C no acompanhamento
+de logs/status não encerra os serviços; Ctrl+Z apenas suspende processos.
+
+Verifique o encerramento remoto:
+
+```bash
+ssh rover@192.168.0.167 'cd ~/rover_companion && docker compose ps --all'
+```
+
+O comando `down` preserva a imagem e os dados persistentes; não desliga a Raspberry.
 
 Os dados persistentes ficam na Raspberry:
 
@@ -322,7 +360,7 @@ Os dados persistentes ficam na Raspberry:
 Para ver o log do manager:
 
 ```bash
-ssh leo@192.168.0.198 'r=$(cat ~/rover_companion/data/latest.txt); tail -60 "$HOME/rover_companion/data/${r#/data/}/manager.log"'
+ssh rover@192.168.0.167 'r=$(cat ~/rover_companion/data/latest.txt); tail -60 "$HOME/rover_companion/data/${r#/data/}/manager.log"'
 ```
 
 Se o gerenciador estiver em FALHA, leia `last_error` no status completo. Corrija
@@ -382,7 +420,7 @@ A partir deste computador:
 cd ~/ardupilot/Rover
 source companion/pc_env.bash
 python companion/network_probe.py --duration 15
-ssh leo@192.168.0.198 'docker stats --no-stream rover-companion'
+ssh rover@192.168.0.167 'docker stats --no-stream rover-companion'
 ```
 
 O diagnóstico é somente leitura: conta mensagens, mede idade pelo relógio ROS
