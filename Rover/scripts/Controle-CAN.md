@@ -1,5 +1,7 @@
 # Controle de velocidade por roda via CAN (C620 / M3508)
 
+> O driver em `esc_can.lua` fecha um PI em cada roda (`ESC_P1..4`, `ESC_I1..4`, `ESC_FF1..4`). O procedimento de campo está em `Autotunning.md`. O restante deste arquivo descreve o desenho anterior (PI de lado + correção local).
+
 Esquema de como o rover deve passar do acionamento PWM atual para um acionamento CAN com **referência de velocidade por roda** e **realimentação do encoder de cada roda**, mantendo a mesma lógica de alto nível (mixer, missões, autotunes) que já funciona em PWM.
 
 Base usada:

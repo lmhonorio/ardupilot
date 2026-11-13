@@ -57,6 +57,7 @@ function Autotune:reset()
   self.cycle = 0
   self.periods = {}
   self.amps = {}
+  self.last_period = nil
   self.status = "idle"
   self.res = nil
 end
@@ -138,9 +139,10 @@ function Autotune:step(err, dt)
   -- One full period is measured between consecutive switches to +d
   if new_u > 0 and self.u <= 0 then
     if self.last_rise_t ~= nil then
+      self.last_period = self.t - self.last_rise_t
       self.cycle = self.cycle + 1
       if self.cycle > self.skip_cycles then
-        table.insert(self.periods, self.t - self.last_rise_t)
+        table.insert(self.periods, self.last_period)
         table.insert(self.amps, (self.e_max - self.e_min) / 2)
       end
     end

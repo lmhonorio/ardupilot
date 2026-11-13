@@ -73,24 +73,23 @@ O mapeamento 73/74/74/73 é o do Vinicius. Se o seu hardware for outro, ajuste `
 | `ESC_RPM` | 400 | RPM da roda com comando 1.0 |
 | `ESC_GEAR` | 19.2032 | Redução M3508 P19 |
 | `ESC_CUR` | 10 | Limite de corrente (A) |
-| `ESC_P` | 0.03 | Será sobrescrito pelo tuning 4 |
-| `ESC_I` | 0.3 | Será sobrescrito pelo tuning 4 |
-| `ESC_D` | 0 | Não usado |
-| `ESC_FF` | 0 | Será sobrescrito pelo tuning 4 |
-| `ESC_IMAX` | 10 | Limite do integral do lado |
+| `ESC_P` | 0.03 | Fallback se `ESC_Pn` estiver 0. O tuning 4 também grava a média aqui |
+| `ESC_I` | 0.3 | Idem |
+| `ESC_D` | 0 | Termo D compartilhado; em geral 0 |
+| `ESC_FF` | 0 | Idem, A por rpm |
+| `ESC_P1..4` / `ESC_I1..4` / `ESC_FF1..4` | 0 | PI de cada roda. 0 = usa `ESC_P` / `ESC_I` / `ESC_FF`. Tuning 4 e 5 gravam. Reboot depois de atualizar o script |
+| `ESC_IMAX` | 10 | Limite do integral de cada roda |
 | `ESC_REV` | 0 | Ajuste no passo 3 |
 | `ESC_LMASK` | **6** | ESCs da esquerda: bits (2+4=6 → ESC2 e ESC3) |
 | `ESC_OPT` | **5** | bit0=log DJIC, bit2=dessaturação (1+4=5). Sem hold desarmado |
 | `ESC_BRK` | 1 | Freia até `ESC_BRKCUR` |
 | `ESC_BRKCUR` | 30 | % de `ESC_CUR` na frenagem |
 | `ESC_ACC` | 800 | Limite de aceleração da referência (rpm/s) |
-| `ESC_LOC_P` | 0 | Tuning 6 ajusta |
-| `ESC_LOC_I` | 0.5 | Tuning 6 ajusta (0.5 já ajuda em baixa velocidade) |
-| `ESC_LOC_MAX` | 15 | % de `ESC_CUR`; tuning 5 ajusta |
+| `ESC_LOC_P` / `ESC_LOC_I` / `ESC_LOC_MAX` | — | Não entram mais no controle |
 | `ESC_SLIP` | 0 | 0 = aviso de slip desligado nos testes; depois 60 |
-| `ESC_WT_RELAY` | 25 | Amplitude do relé (% de `ESC_CUR`) |
-| `ESC_WT_RPM` | 15 | Ponto de operação (% de `ESC_RPM`) |
-| `ESC_FR1`…`ESC_FR4` | 0 | Tuning 5 mede |
+| `ESC_WT_RELAY` | **100** | Amplitude do relé, % de `ESC_CUR`. 100 = o limite de corrente. Se a placa tem 25, ponha 100 |
+| `ESC_WT_RPM` | — | O ensaio usa 60 rpm e 120 rpm, fixos |
+| `ESC_FR1`…`ESC_FR4` | 0 | Não entram mais no controle |
 
 **Não edite / não grave:** `ESC_CMD_L`, `ESC_CMD_R`, `ESC_CMD_SEQ`, `ESC_STAT` (só RAM).
 
@@ -120,9 +119,9 @@ O mapeamento 73/74/74/73 é o do Vinicius. Se o seu hardware for outro, ajuste `
 | **1** | QuickTune | chão | CIRCLE (recomendado) | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
 | **2** | relé de yaw | chão, área livre | HOLD (recomendado) | PWM: `SCR_USER2/3`; CAN: `CANT_YAW_P/I` |
 | **3** | relé Circle | chão | **CIRCLE** | `ATC_STR_RAT_P/I` |
-| **4** | relé de roda | chão, ~2 m livres | **HOLD** | `ESC_FF`, `ESC_P`, `ESC_I` |
-| **5** | arranque por roda | **rodas no ar** | **HOLD** | `ESC_FR1..4`, `ESC_LOC_MAX` |
-| **6** | relé diferencial | ar ou chão | **HOLD** | `ESC_LOC_P`, `ESC_LOC_I` |
+| **4** | relé sincronizado, um PI para todas | chão, alguns metros livres | **HOLD** | `ESC_Pn` / `ESC_In` iguais, `ESC_FFn` por roda, média em `ESC_P/I/FF` |
+| **5** | relé de uma roda por vez | **rodas no ar** | **HOLD** | os mesmos ganhos, um motor de cada vez |
+| **6** | retirado | — | — | o PI de cada roda substitui o laço local |
 
 Com `ESC_CAN = 0`, os valores 4, 5 e 6 só avisam e não fazem nada.
 
@@ -158,20 +157,36 @@ Com `ESC_CAN = 0`, os valores 4, 5 e 6 só avisam e não fazem nada.
 
 ## 4. Ordem dos autotunes
 
-Faça nesta ordem. A malha de roda muda a planta das outras; se você retocar `ESC_P/I`, refaça 1 → 2 → 3 → 4 de cima.
+Faça nesta ordem. A malha de roda muda a planta das outras; se você retocar o PI das rodas, refaça QuickTune, Circle e yaw.
 
 ```text
-A. Roda (lado)          SCR_USER1 = 4     → ESC_P / ESC_I / ESC_FF
-B. Arranque (no ar)     SCR_USER1 = 5     → ESC_FR1..4 / ESC_LOC_MAX
-C. Local (entre rodas)  SCR_USER1 = 6     → ESC_LOC_P / ESC_LOC_I
-D. QuickTune            SCR_USER1 = 1     → ATC_* / CRUISE_*
-E. Circle relay         SCR_USER1 = 3     → ATC_STR_RAT_P/I (refino)
-F. Yaw relay            SCR_USER1 = 2     → CANT_YAW_P/I  (ou SCR_USER2/3 em PWM)
+A. Uma roda no ar      SCR_USER1 = 5     → ESC_Pn / ESC_In / ESC_FFn   (opcional; antes do 4)
+B. Sincronizado no chão SCR_USER1 = 4    → substitui A com o rover carregado
+D. QuickTune           SCR_USER1 = 1     → ATC_* / CRUISE_*
+E. Circle relay        SCR_USER1 = 3     → ATC_STR_RAT_P/I (refino)
+F. Yaw relay           SCR_USER1 = 2     → CANT_YAW_P/I  (ou SCR_USER2/3 em PWM)
 ```
+
+O ensaio que fica para dirigir é o **B**. O **A** mede cada motor sem o chassi e grava ganhos mais baixos. `SCR_USER1 = 6` está retirado.
 
 ---
 
-### A. Relé de roda — `SCR_USER1 = 4`
+### A. Relé de uma roda — `SCR_USER1 = 5`
+
+**Onde:** rover **levantado**, rodas no ar. **Nunca no chão.**  
+**Modo:** HOLD. Sticks no centro.  
+**Pré-requisito:** passo 3 OK, `ESC_MODE = 0`, `ESC_CAN = 1`.
+
+1. Arme em HOLD.
+2. `SCR_USER1 = 5`.
+3. Mensagens `WheelTune:`: `in the air; one wheel at a time`, depois `ESC1 fwd Ku … Pu …` / `rev`, e o mesmo para ESC2..4. No fim `P` / `I` / `FF` e `SCR_USER1 set to 0`.
+4. Uma roda com `Ku` muito diferente das outras → mecânica ou ESC.
+5. `oscillation too large` → baixe `ESC_WT_RELAY`.
+6. Desarme.
+
+---
+
+### B. Relé sincronizado — `SCR_USER1 = 4`
 
 **Onde:** chão, ~2 m livres à frente e atrás.  
 **Modo:** HOLD. Sticks no centro.  
@@ -179,52 +194,24 @@ F. Yaw relay            SCR_USER1 = 2     → CANT_YAW_P/I  (ou SCR_USER2/3 em P
 
 1. Arme em HOLD, sticks centrados.
 2. Coloque `SCR_USER1 = 4`.
-3. Espere as mensagens `WheelTune:`:
-   - `started; … rpm forward then reverse`
-   - `forward: Ku … Pu …`
-   - `reverse: Ku … Pu …`
-   - `saved ESC_FF=… ESC_P=… ESC_I=…`
+3. Mensagens `WheelTune:`:
+   - `synced; 60/120 rpm fwd/rev relay …A` (patamares fixos; o relé chega a `ESC_CUR` com `ESC_WT_RELAY = 100`)
+   - `fwd type2 Kv … T …` e `fwd P … I …` (ou `fallback Ku … Pu …`)
+   - o mesmo em `rev`
+   - `P …` / `I …` / `FF …`
    - `SCR_USER1 set to 0`
-4. O rover anda ~1–2 m para frente oscilando a velocidade e volta em ré.
+4. O rover segura dois patamares, oscila a velocidade e volta em ré. São mais metros que um único patamar.
 5. Confira em MANUAL: acelerador leve → as quatro rodas respondem juntas.
 
-**Se falhar:** mensagem `WheelTune: failed - …`; ganhos antigos ficam. Corrija (stick, HOLD, ESC perdido) e repita.
+**Se falhar:** `WheelTune: failed - …`; ganhos antigos ficam. Corrija (stick, HOLD, ESC perdido) e repita.
+
+As quatro rodas recebem o mesmo pulso de corrente, para o rover ir reto. O PI é um só, da média, pela regra de tipo II com `h = 7`: `Ti = 7·T`, `Kp = 8/(14·T·Kv)`. `T` é o atraso até o extremo de rpm e `Kv` é a rampa de rpm por ampere. Se a rampa não repetir, a mensagem `fallback` usa `Kp = 0.36·Ku` e `Ti = 1.75·Pu` na fundamental. O `FF` de cada roda é a inclinação de corrente entre os dois patamares.
 
 ---
 
-### B. Arranque por roda — `SCR_USER1 = 5`
+### C. `SCR_USER1 = 6` retirado
 
-**Onde:** rover **levantado**, rodas no ar. **Nunca no chão.**  
-**Modo:** HOLD. Sticks no centro.
-
-1. Arme em HOLD.
-2. `SCR_USER1 = 5`.
-3. Mensagens:
-   - `breakaway started; wheels must be in the air`
-   - `forward breakaway a b c d A`
-   - `reverse breakaway …`
-   - `saved ESC_FR … ESC_LOC_MAX=…`
-4. Confira `ESC_FR1..4`: valores típicos ~0,3–2 A. Uma roda bem acima das outras → checar mecânica.
-5. Desarme.
-
-Com isso, em operação cada roda já recebe a diferença de atrito em relação à média do lado.
-
----
-
-### C. Relé diferencial — `SCR_USER1 = 6`
-
-**Onde:** preferência **ainda no ar** (resultado não depende do piso); no chão também funciona.  
-**Modo:** HOLD. Sticks no centro.  
-**Pré-requisito:** A feito; idealmente B feito. Duas rodas por lado (`ESC_LMASK` correto).
-
-1. Arme em HOLD.
-2. `SCR_USER1 = 6`.
-3. Mensagens:
-   - `local relay started; forward then reverse`
-   - `local forward: Ku … Pu …`
-   - `local reverse: …`
-   - `saved ESC_LOC_P=… ESC_LOC_I=…`
-4. Teste em MANUAL com pouquíssima velocidade: as quatro rodas devem sair juntas.
+Não há mais correção local nem split de corrente. Cada roda fecha o próprio PI na meta do lado. Roda no ar chega na meta e alivia a corrente; roda no solo integra até `ESC_IMAX` / `ESC_CUR`.
 
 ---
 
@@ -292,9 +279,8 @@ Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura os `ATC_*` e usa 
 [ ] SCR_HEAP_SIZE ≥ 400000; SCR_USER5 = 2; SCR_USER1 = 0
 [ ] ESC_CAN = 1; ESC_MODE = 0
 [ ] Passo 3: sentido e lados OK (ESC_REV / ESC_LMASK)
-[ ] A  SCR_USER1=4  HOLD no chão          → ESC_P/I/FF
-[ ] B  SCR_USER1=5  HOLD no ar            → ESC_FR* / LOC_MAX
-[ ] C  SCR_USER1=6  HOLD (ar ou chão)     → ESC_LOC_P/I
+[ ] A  SCR_USER1=5  HOLD no ar           → ESC_Pn/In/FFn (opcional, antes do 4)
+[ ] B  SCR_USER1=4  HOLD no chão         → substitui com a planta carregada
 [ ] D  SCR_USER1=1  CIRCLE                → ATC_* / CRUISE
 [ ] E  SCR_USER1=3  CIRCLE                → ATC_STR_RAT_P/I
 [ ] F  SCR_USER1=2  HOLD (gira no lugar)  → CANT_YAW_P/I
@@ -310,7 +296,7 @@ Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura os `ATC_*` e usa 
 | `ESC 1 not found` / `ESC rx 0 0 0 0` | `CAN_D1_PROTOCOL=10`, porta CAN certa, bateria dos ESCs religada, sem `c620_can.lua` |
 | `SCR_USER1=4 needs ESC_CAN=1` | `ESC_CAN` está 0 |
 | `center the sticks to start` | Stick fora do trim |
-| Uma roda só anda em baixa velocidade | Rode B e C; ou suba `ESC_LOC_MAX` |
+| Uma roda não acompanha | confira `ESC_Pn/In/FFn`; suba `ESC_IMAX` ou `ESC_CUR` |
 | Acelerador e esterço “trocados” | Um lado invertido → `ESC_REV` (passo 3) |
 | Vira para o lado errado | `ESC_LMASK` |
 | QuickTune “throttle/speed low” | Aumente `CIRC_SPEED` ou raio; confira `ESC_RPM` |
