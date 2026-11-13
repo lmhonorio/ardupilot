@@ -42,7 +42,6 @@ assert(throttle_max_lua_param:init('THRO_MAX_LUA'), 'could not bind THRO_MAX_LUA
 local ESC_STAT_CAN = 1
 -- Match esc_can reactivity: publish L/R as fast as scripting allows on the CAN path.
 local CAN_MIXER_PERIOD_MS = 20
-local CAN_PWM_DIVISOR = 500
 local esc_stat_param = Parameter()
 local esc_cmd_l_param = Parameter()
 local esc_cmd_r_param = Parameter()
@@ -362,9 +361,12 @@ local function applyControlAllocation(t, s, timeout_ms)
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
   if can_selected() then
-    -- Same fraction as the PWM path, positive = forward on both sides; ESC_REV sets motor direction
-    sendCanCommand(funcs:mapMaxMin(pwm_aloc_l, -pwm_range, pwm_range) / CAN_PWM_DIVISOR,
-      funcs:mapMaxMin(pwm_aloc_r, -pwm_range, pwm_range) / CAN_PWM_DIVISOR)
+    -- Skid-steer sum, same as the PWM servo mix: left = throttle + steering,
+    -- right = throttle - steering. Scale both sides together when the sum
+    -- passes 1 so a turn while moving does not drop one stick.
+    local left, right = t + s, t - s
+    local peak = math.max(1, math.abs(left), math.abs(right))
+    sendCanCommand(left / peak, right / peak)
     return pwm_l, pwm_r
   end
   if not pwm_allowed() then

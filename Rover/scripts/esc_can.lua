@@ -31,8 +31,8 @@
 --              (ESC_LMASK=9 → ESC1+ESC4 left, ESC2+ESC3 right)
 -- ESC_WT_RELAY wheel autotune relay amplitude, % of ESC_CUR. Default 100,
 --              so the pulse runs at the current limit. 1..100, no extra amp cap.
--- ESC_WT_RPM   kept so the parameter table does not shift. The test speed is
---              fixed: 120 rpm high, 60 rpm low.
+-- ESC_WT_RPM   high plateau of USER1=4 and 5, wheel rpm. The low plateau is half.
+--              Values below 60 stay on 120, so an old saved 30 does not take over.
 --
 -- Both wheels of a side share the side command as their speed target. Each closes
 -- its own PI on its own encoder, so a slipping wheel cannot satisfy the loop of
@@ -46,9 +46,6 @@
 -- then reverse, other wheels at 0 A. Same rule, per motor. Run 5 before 4:
 -- 4 overwrites with the loaded vehicle.
 -- SCR_USER1 = 6 is retired.
-
-package.path = package.path .. ';/scripts/modules/?.lua'
-local Autotune = require("autotune")
 
 local K = {
   NUM_ESC = 4,
@@ -80,6 +77,9 @@ local K = {
   TUNE_SETTLE_S = 1.0,
   TUNE_AVERAGE_S = 1.0,
   TUNE_STICK_US = 100,
+  -- Symmetrical optimum, h = 7. High plateau falls back to this below 60 rpm.
+  TUNE_H = 7,
+  TUNE_HI_RPM = 120,
   STAT_CAN = 1,
   STAT_SAT = 2,
   STAT_TUNE_RUN = 4,
@@ -113,7 +113,7 @@ local PARAM_SPEC = {
   { 18, "SLIP", 60 },
   { 19, "LMASK", 6 },
   { 20, "WT_RELAY", 100 },
-  { 21, "WT_RPM", 30 },
+  { 21, "WT_RPM", 120 },
   { 22, "CMD_L", 0 },
   { 23, "CMD_R", 0 },
   { 24, "CMD_SEQ", 0 },
@@ -138,6 +138,34 @@ local PARAM_SPEC = {
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
+
+-- Create ESC_* before require() and before the control loop. A missing module
+-- or a later fault must not hide the parameter table. Key 74 stays; 72 is only
+-- used when 74 is already stored under another prefix.
+local table_ok = param:add_table(K.PARAM_KEY, K.PREFIX, #PARAM_SPEC)
+if not table_ok then
+  gcs:send_text(MAV_SEVERITY.WARNING, "ESC: key 74 blocked, trying 72")
+  K.PARAM_KEY = 72
+  table_ok = param:add_table(K.PARAM_KEY, K.PREFIX, #PARAM_SPEC)
+end
+if table_ok then
+  for n = 1, #PARAM_SPEC do
+    local item = PARAM_SPEC[n]
+    if not param:add_param(K.PARAM_KEY, item[1], item[2], item[3]) then
+      gcs:send_text(MAV_SEVERITY.ERROR, "ESC: failed to add " .. K.PREFIX .. item[2])
+      table_ok = false
+      break
+    end
+  end
+end
+if table_ok then
+  gcs:send_text(MAV_SEVERITY.NOTICE, "ESC: parameters created")
+else
+  gcs:send_text(MAV_SEVERITY.CRITICAL, "ESC: could not create ESC_ parameters")
+end
+
+package.path = package.path .. ';/scripts/modules/?.lua'
+local Autotune = require("autotune")
 
 local P = {}
 local params_ready = false
@@ -408,7 +436,11 @@ local function ensure_params()
   -- Commands from a previous boot must never look fresh.
   set_param("STAT", 0)
   params_ready = true
-  gcs:send_text(MAV_SEVERITY.INFO, "ESC: ESC_* parameters ready")
+  local wt_rpm = g("WT_RPM")
+  local plateau = wt_rpm >= 60 and wt_rpm or K.TUNE_HI_RPM
+  gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
+    "ESC: ready CAN=%.0f MODE=%.0f CUR=%.1f WT_RELAY=%.0f plateau=%.0f (WT_RPM=%.0f)",
+    g("CAN"), g("MODE"), g("CUR"), g("WT_RELAY"), plateau, wt_rpm))
   local vm = param:get("SCR_VM_I_COUNT") or 0
   if vm < 50000 then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("ESC: set SCR_VM_I_COUNT=100000 (now %.0f) and reboot", vm))
@@ -679,13 +711,19 @@ local function profile_wheel(i, target_rpm, dt)
   end
 end
 
--- Current window allowed for a wheel or side turning at rpm.
-local function current_window(rpm, k)
+-- Current window for a wheel spinning at rpm toward target.
+-- Opposing current stays capped only when the reference still asks for this
+-- direction and the wheel is already at least that fast. Slowing, stopping
+-- or reversing opens the full ESC_CUR range, the same as a reversed PWM pulse.
+local function current_window(rpm, target, k)
   local lo, hi = -k.max_current, k.max_current
-  local brake = k.brake and k.brake_current or 0
-  if rpm > K.MOVING_RPM then
+  if not k.brake then
+    return lo, hi
+  end
+  local brake = k.brake_current or 0
+  if rpm > K.MOVING_RPM and target >= rpm then
     lo = -brake
-  elseif rpm < -K.MOVING_RPM then
+  elseif rpm < -K.MOVING_RPM and target <= rpm then
     hi = brake
   end
   return lo, hi
@@ -714,7 +752,7 @@ local function wheel_pi(i, target, dt, k)
     derivative = k.kd * (err - fb.last_error) / dt
   end
   fb.last_error = err
-  local lo, hi = current_window(fb.wheel_rpm, k)
+  local lo, hi = current_window(fb.wheel_rpm, target, k)
   local ff = kff * target
   local unsat = ff + kp * err + fb.integrator + derivative
   local saturated = (unsat >= hi and err > 0) or (unsat <= lo and err < 0)
@@ -782,9 +820,8 @@ end
 -- Wheel speed is inertia plus a short lag, the plant the type-II rule is written
 -- for (symmetrical optimum, mid-band ratio h = 7, phase margin about 46°).
 -- Yaw and Circle keep the module default, Tyreus-Luyben.
-local TUNE_H = 7
-
-local function sort_nums(t)
+-- Methods of M, not locals: Rover 4.5 allows 100 locals in the main chunk.
+function M.sort_nums(t)
   local s = {}
   for i = 1, #t do
     s[i] = t[i]
@@ -801,19 +838,19 @@ local function sort_nums(t)
   return s
 end
 
-local function median(t)
+function M.median(t)
   local n = #t
   if n == 0 then
     return nil
   end
-  local s = sort_nums(t)
+  local s = M.sort_nums(t)
   if n % 2 == 1 then
     return s[math.floor((n + 1) / 2)]
   end
   return 0.5 * (s[math.floor(n / 2)] + s[math.floor(n / 2) + 1])
 end
 
-local function rel_spread(t, m)
+function M.rel_spread(t, m)
   if m == nil or m <= 0 then
     return math.huge
   end
@@ -824,22 +861,52 @@ local function rel_spread(t, m)
   return d
 end
 
+-- Drop the sample farthest from the median so one chatter cycle cannot fail the run.
+function M.drop_worst(t)
+  if #t < 3 then
+    return t
+  end
+  local m = M.median(t)
+  if m == nil then
+    return t
+  end
+  local worst_i, worst_d = 1, -1
+  for i, v in ipairs(t) do
+    local d = math.abs(v - m)
+    if d > worst_d then
+      worst_i, worst_d = i, d
+    end
+  end
+  local out = {}
+  for i, v in ipairs(t) do
+    if i ~= worst_i then
+      out[#out + 1] = v
+    end
+  end
+  return out
+end
+
 -- nil when there are too few samples or they disagree. min_n keeps a single bump out.
-local function robust_median(t, max_spread, min_n)
-  if #t < min_n then
+function M.robust_median(t, max_spread, min_n)
+  local src = t
+  if #src >= min_n + 1 then
+    src = M.drop_worst(src)
+  end
+  if #src < min_n then
     return nil, "short"
   end
-  local m = median(t)
+  local m = M.median(src)
   if m == nil or m <= 0 then
     return nil, "short"
   end
-  if rel_spread(t, m) > max_spread then
-    return nil, "spread"
+  local spread = M.rel_spread(src, m)
+  if spread > max_spread then
+    return nil, "spread", spread
   end
-  return m, nil
+  return m, nil, spread
 end
 
-local function gains_sane(kp, ki, k)
+function M.gains_sane(kp, ki, k)
   if kp == nil or ki == nil or not finite(kp) or not finite(ki) then
     return false
   end
@@ -847,12 +914,12 @@ local function gains_sane(kp, ki, k)
 end
 
 -- Kp in A/rpm, Kv in rpm/s per A, T in s. Ti = h*T, Kp = (h+1)/(2*h*T*Kv).
-local function gains_type2(kv, lag)
+function M.gains_type2(kv, lag)
   if kv == nil or lag == nil or kv <= 0 or lag <= 0 then
     return nil, nil
   end
-  local ti = TUNE_H * lag
-  local kp = (TUNE_H + 1) / (2 * TUNE_H * lag * kv)
+  local ti = K.TUNE_H * lag
+  local kp = (K.TUNE_H + 1) / (2 * K.TUNE_H * lag * kv)
   if ti <= 0 or kp <= 0 then
     return nil, nil
   end
@@ -860,7 +927,7 @@ local function gains_type2(kv, lag)
 end
 
 -- h = 7 mapped onto a true -180° point: Kp = 0.36 Ku, Ti = 1.75 Pu.
-local function gains_fallback(ku, pu)
+function M.gains_fallback(ku, pu)
   if ku == nil or pu == nil or ku <= 0 or pu <= 0 then
     return nil, nil
   end
@@ -869,16 +936,16 @@ local function gains_fallback(ku, pu)
   return kp, kp / ti
 end
 
-local function new_fourier()
+function M.new_fourier()
   return { sum_s = 0, sum_c = 0, sum_t = 0, phase = 0, period = nil, amps = {} }
 end
 
-local function fourier_arm(f, period)
+function M.fourier_arm(f, period)
   f.sum_s, f.sum_c, f.sum_t, f.phase = 0, 0, 0, 0
   f.period = period
 end
 
-local function fourier_step(f, err, dt)
+function M.fourier_step(f, err, dt)
   if f.period == nil or f.period <= 0 then
     return
   end
@@ -888,7 +955,7 @@ local function fourier_step(f, err, dt)
   f.sum_t = f.sum_t + dt
 end
 
-local function fourier_close(f)
+function M.fourier_close(f)
   if f.period == nil or f.sum_t < 0.5 * f.period then
     return
   end
@@ -899,22 +966,22 @@ local function fourier_close(f)
 end
 
 -- Close the window that just finished, then arm the next one at the measured period.
-local function track_cycle(relay, fou, err, dt, prev_cycle)
-  fourier_step(fou, err, dt)
+function M.track_cycle(relay, fou, err, dt, prev_cycle)
+  M.fourier_step(fou, err, dt)
   if relay.cycle == prev_cycle then
     return prev_cycle
   end
   if relay.cycle > relay.skip_cycles then
-    fourier_close(fou)
+    M.fourier_close(fou)
   end
   if relay.last_period ~= nil and relay.last_period > 0 then
-    fourier_arm(fou, relay.last_period)
+    M.fourier_arm(fou, relay.last_period)
   end
   return relay.cycle
 end
 
 -- Kv from the rpm slope just after the lag, T from the switch-to-peak delay.
-local function new_plant(turn_rpm)
+function M.new_plant(turn_rpm)
   return {
     t = 0,
     prev_u = nil,
@@ -926,7 +993,7 @@ local function new_plant(turn_rpm)
   }
 end
 
-local function plant_close(p)
+function M.plant_close(p)
   local u = p.u_hold
   if u ~= nil and u ~= 0 and p.ramp_t ~= nil then
     local rpm1, t1 = p.kv_rpm, p.kv_t
@@ -949,7 +1016,7 @@ local function plant_close(p)
   end
 end
 
-local function plant_begin(p, rpm, u)
+function M.plant_begin(p, rpm, u)
   p.switch_t = p.t
   p.switch_rpm = rpm
   p.peak_rpm = rpm
@@ -962,16 +1029,16 @@ local function plant_begin(p, rpm, u)
   p.u_hold = u
 end
 
-local function plant_step(p, rpm, u, dt)
+function M.plant_step(p, rpm, u, dt)
   p.t = p.t + dt
   if p.prev_u ~= nil and u * p.prev_u < 0 then
     p.nswitch = p.nswitch + 1
     if p.nswitch > 2 then
-      plant_close(p)
+      M.plant_close(p)
     end
-    plant_begin(p, rpm, u)
+    M.plant_begin(p, rpm, u)
   elseif p.prev_u == nil then
-    plant_begin(p, rpm, u)
+    M.plant_begin(p, rpm, u)
   elseif not p.turned then
     if math.abs(rpm - p.switch_rpm) >= math.abs(p.peak_rpm - p.switch_rpm) then
       p.peak_rpm = rpm
@@ -990,51 +1057,58 @@ local function plant_step(p, rpm, u, dt)
   p.prev_rpm = rpm
 end
 
-local function plant_flush(p)
+function M.plant_flush(p)
   if p.nswitch > 2 then
-    plant_close(p)
+    M.plant_close(p)
   end
 end
 
--- Prefer the measured Kv and T. Fall back to the fundamental Ku and Pu.
-local function wheel_gains(plant, relay, amps, k)
-  local a, aerr = robust_median(amps, 0.25, 4)
-  local pu, puerr = robust_median(relay.periods, 0.25, 4)
+-- Prefer the measured Kv and T. Fall back to Ku and Pu from the limit cycle.
+-- Åström measures amplitude as half the peak-to-peak of each cycle (relay.amps).
+-- The Fourier amplitude swings with the window on a 5 ms loop (60–100% here)
+-- and was aborting runs whose period was already usable.
+function M.wheel_gains(plant, relay, amps, k)
+  local peaks = relay.amps
+  if peaks == nil or #peaks < 4 then
+    peaks = amps
+  end
+  local a, aerr, aspread = M.robust_median(peaks, 1.0, 4)
+  local pu, puerr, pspread = M.robust_median(relay.periods, 0.60, 4)
   if aerr == "spread" or puerr == "spread" then
-    return nil, "inconsistent cycles"
+    return nil, string.format("inconsistent cycles (Pu %.0f%% amp %.0f%%)",
+      (pspread or 0) * 100, (aspread or 0) * 100)
   end
   if a == nil or pu == nil then
     return nil, "not enough cycles"
   end
   local h = relay.hyst_rad
-  if a < 4 * h then
-    return nil, "oscillation too small for hysteresis"
+  -- Åström–Hägglund: the describing function of a relay with hysteresis has
+  -- magnitude 4d/(πa) for any a > ε. The old test a < 4ε is not part of that
+  -- result; it rejected a real limit cycle after the hysteresis was widened.
+  if a <= h then
+    return nil, string.format("oscillation too small (%.0f rpm, hyst %.0f)", a, h)
   end
-  local under = a * a - h * h
-  if under <= 0 then
-    return nil, "oscillation too small for hysteresis"
-  end
-  local ku = 4 * relay.relay / (math.pi * math.sqrt(under))
-  local kv = robust_median(plant.kvs, 0.35, 3)
-  local lag = robust_median(plant.ts, 0.35, 3)
+  local ku = 4 * relay.relay / (math.pi * a)
+  local kv = M.robust_median(plant.kvs, 0.35, 3)
+  local lag = M.robust_median(plant.ts, 0.35, 3)
   local kp, ki, how
   if kv ~= nil and lag ~= nil then
-    kp, ki = gains_type2(kv, lag)
+    kp, ki = M.gains_type2(kv, lag)
     how = "type2"
   end
-  if not gains_sane(kp, ki, k) then
-    kp, ki = gains_fallback(ku, pu)
+  if not M.gains_sane(kp, ki, k) then
+    kp, ki = M.gains_fallback(ku, pu)
     how = "fallback"
     kv = kv or (4 * a / (relay.relay * pu))
     lag = lag or (pu / 4)
   end
-  if not gains_sane(kp, ki, k) then
+  if not M.gains_sane(kp, ki, k) then
     return nil, "gains out of range"
   end
   return { P = kp, I = ki, Ku = ku, Pu = pu, Kv = kv, T = lag, how = how }, nil
 end
 
-local function announce_fit(name, g)
+function M.announce_fit(name, g)
   if g.how == "type2" then
     tune_message(MAV_SEVERITY.INFO, string.format("%s type2 Kv %.0f T %.3f", name, g.Kv, g.T))
   else
@@ -1043,13 +1117,15 @@ local function announce_fit(name, g)
   tune_message(MAV_SEVERITY.INFO, string.format("%s P %.4f I %.4f", name, g.P, g.I))
 end
 
--- Hysteresis sits above the hold noise and stays far below the old 3% of ESC_RPM.
-local function hyst_of(sigma, target)
-  local cap = math.max(0.05 * math.abs(target), 6)
-  return constrain(3 * (sigma or 0), 2, cap)
+-- Hysteresis only has to clear the hold noise. Chatter is rejected by the
+-- 40 ms switch blanking in the relay. A wide band makes a < ε and the
+-- describing function is no longer defined.
+function M.hyst_of(sigma, target)
+  local cap = math.max(0.05 * math.abs(target), 8)
+  return constrain(3 * (sigma or 0), 3, cap)
 end
 
-local function sigma_of(sum, sum2, n)
+function M.sigma_of(sum, sum2, n)
   if n < 2 then
     return 0
   end
@@ -1062,7 +1138,7 @@ local function sigma_of(sum, sum2, n)
 end
 
 -- Current per rpm from two holds. A negative slope falls back to the high point.
-local function ff_slope(i_lo, rpm_lo, i_hi, rpm_hi)
+function M.ff_slope(i_lo, rpm_lo, i_hi, rpm_hi)
   if i_lo ~= nil and rpm_lo ~= nil then
     local dw = math.abs(rpm_hi) - math.abs(rpm_lo)
     local di = math.abs(i_hi) - math.abs(i_lo)
@@ -1077,7 +1153,7 @@ local function ff_slope(i_lo, rpm_lo, i_hi, rpm_hi)
 end
 
 -- Pulse amplitude is a fraction of ESC_CUR, up to the whole current limit.
-local function relay_amp(k)
+function M.relay_amp(k)
   local frac = constrain(g("WT_RELAY"), 1, 100) / 100
   return math.max(k.max_current * frac, 0.5)
 end
@@ -1085,8 +1161,8 @@ end
 -- modules/autotune.lua names its limits *_rad after the yaw use; here they are in rpm.
 -- The module's own spread check is loose. wheel_gains applies the 25% median test
 -- to the Fourier amplitude and to Pu. kp_div / ti_mul match the h = 7 fallback.
-local function make_relay(k, hyst, max_frac)
-  local amp = relay_amp(k)
+function M.make_relay(k, hyst, max_frac)
+  local amp = M.relay_amp(k)
   return Autotune:new({
     relay = amp,
     hyst_rad = hyst,
@@ -1097,38 +1173,39 @@ local function make_relay(k, hyst, max_frac)
     min_period_s = 0.02,
     max_period_s = 2,
     max_spread = 2,
+    min_switch_s = 0.04,
     min_amp_ratio = 1.5,
     kp_div = 1 / 0.36,
     ti_mul = 1.75,
   })
 end
 
-local function zero_currents()
+function M.zero_currents()
   return { 0, 0, 0, 0, 0, 0, 0, 0 }
 end
 
--- The speed test is fixed at 120 rpm, with the low plateau at half of that.
-local TUNE_HI_RPM = 120
-
-local function tune_levels(k)
-  local hi = TUNE_HI_RPM
-  local lo = hi * 0.5
+-- High plateau is ESC_WT_RPM. Below 60 rpm (the old saved default was 30) keep 120.
+-- The low plateau is half of that. ESC_RPM caps both.
+function M.tune_levels(k)
+  local hi = g("WT_RPM")
+  if hi < 60 then
+    hi = K.TUNE_HI_RPM
+  end
   if hi > k.max_rpm then
     hi = k.max_rpm
-    lo = hi * 0.5
   end
-  return lo, hi
+  return hi * 0.5, hi
 end
 
-local function tune_mag(k, level)
-  local lo, hi = tune_levels(k)
+function M.tune_mag(k, level)
+  local lo, hi = M.tune_levels(k)
   if level == 1 and lo ~= nil then
     return lo, true
   end
   return hi, lo ~= nil
 end
 
-local function clear_wheel_pi()
+function M.clear_wheel_pi()
   for i = 1, K.MAX_FB do
     esc[i].integrator = 0
     esc[i].last_error = 0
@@ -1136,14 +1213,14 @@ local function clear_wheel_pi()
   end
 end
 
-local function announce_saved(ps, is, fs)
+function M.announce_saved(ps, is, fs)
   tune_message(MAV_SEVERITY.NOTICE, M.fmt4("P", ps))
   tune_message(MAV_SEVERITY.NOTICE, M.fmt4("I", is))
   tune_message(MAV_SEVERITY.NOTICE, M.fmt4("FF", fs))
   tune_message(MAV_SEVERITY.NOTICE, "SCR_USER1 set to 0 (normal)")
 end
 
-local function tune_reset_window(zero_ref)
+function M.tune_reset_window(zero_ref)
   tune.t = 0
   tune.count = 0
   tune.sum_current = { 0, 0, 0, 0 }
@@ -1151,7 +1228,7 @@ local function tune_reset_window(zero_ref)
   tune.sum_mean = 0
   tune.sum_mean2 = 0
   if zero_ref then
-    clear_wheel_pi()
+    M.clear_wheel_pi()
   else
     for i = 1, K.MAX_FB do
       esc[i].integrator = 0
@@ -1160,7 +1237,7 @@ local function tune_reset_window(zero_ref)
   end
 end
 
-local function tune_start_direction(dir)
+function M.tune_start_direction(dir)
   tune.dir = dir
   tune.state = "ff"
   tune.ff_level = 1
@@ -1172,10 +1249,10 @@ local function tune_start_direction(dir)
   tune.fourier = nil
   tune.plant = nil
   tune.prev_cycle = 0
-  tune_reset_window(true)
+  M.tune_reset_window(true)
 end
 
-local function tune_finish()
+function M.tune_finish()
   local ok, ps, is_, fs = M.save_wheel_gains(tune.results)
   if not ok then
     tune_fail(ps)
@@ -1192,12 +1269,12 @@ local function tune_finish()
     tune_message(MAV_SEVERITY.WARNING, "wheel P differs by more than 30%")
   end
   M.queue_save(scr_user1, 0)
-  clear_wheel_pi()
+  M.clear_wheel_pi()
   tune.state = "done"
-  announce_saved(ps, is_, fs)
+  M.announce_saved(ps, is_, fs)
 end
 
-local function tune_log_wheels(target, cur)
+function M.tune_log_wheels(target, cur)
   if logger == nil then
     return
   end
@@ -1212,9 +1289,9 @@ local function tune_log_wheels(target, cur)
 end
 
 -- One PI from the mean plant. Each wheel keeps its own current slope as FF.
-local function finish_synced_relay(k)
-  plant_flush(tune.plant)
-  local g, err = wheel_gains(tune.plant, tune.relay, tune.fourier.amps, k)
+function M.finish_synced_relay(k)
+  M.plant_flush(tune.plant)
+  local g, err = M.wheel_gains(tune.plant, tune.relay, tune.fourier.amps, k)
   if g == nil then
     tune_fail(err)
     return false
@@ -1224,7 +1301,7 @@ local function finish_synced_relay(k)
     if esc[w].detected then
       local lo_i = tune.lo_i and tune.lo_i[w] or nil
       local lo_rpm = tune.lo_rpm and tune.lo_rpm[w] or nil
-      local ff = ff_slope(lo_i, lo_rpm, tune.base[w], tune.rpm[w])
+      local ff = M.ff_slope(lo_i, lo_rpm, tune.base[w], tune.rpm[w])
       if ff == nil or not finite(ff) or ff < 0 then
         tune_fail(string.format("ESC %d rpm too low for FF", w))
         return false
@@ -1233,11 +1310,11 @@ local function finish_synced_relay(k)
     end
   end
   tune.results[#tune.results + 1] = row
-  announce_fit(tune.dir > 0 and "fwd" or "rev", g)
+  M.announce_fit(tune.dir > 0 and "fwd" or "rev", g)
   if tune.dir > 0 then
-    tune_start_direction(-1)
+    M.tune_start_direction(-1)
   else
-    tune_finish()
+    M.tune_finish()
   end
   return true
 end
@@ -1253,7 +1330,7 @@ Phase "relay": that high-point current plus one common relay, switched on the
                set one PI copied to every wheel.
 Forward first, then reverse.
 --]]
-local function wheel_tune(dt, k, armed, enabled)
+function M.wheel_tune(dt, k, armed, enabled)
   local wanted = tune_wanted(armed)
   if not wanted then
     if tune.state == "ff" or tune.state == "relay" then
@@ -1261,7 +1338,7 @@ local function wheel_tune(dt, k, armed, enabled)
     end
     if tune.state ~= "idle" then
       tune_reset()
-      clear_wheel_pi()
+      M.clear_wheel_pi()
     end
     return nil
   end
@@ -1287,11 +1364,11 @@ local function wheel_tune(dt, k, armed, enabled)
       return nil
     end
     tune.results = {}
-    tune_start_direction(1)
-    local lo, hi = tune_levels(k)
+    M.tune_start_direction(1)
+    local lo, hi = M.tune_levels(k)
     local speeds = lo and string.format("%.0f/%.0f", lo, hi) or string.format("%.0f", hi)
     tune_message(MAV_SEVERITY.NOTICE, string.format("synced; %s rpm fwd/rev relay %.1fA",
-      speeds, relay_amp(k)))
+      speeds, M.relay_amp(k)))
   end
   if not enabled then
     tune_fail("ESC feedback lost or outputs disabled")
@@ -1302,9 +1379,9 @@ local function wheel_tune(dt, k, armed, enabled)
     return nil
   end
 
-  local mag = tune_mag(k, tune.ff_level)
+  local mag = M.tune_mag(k, tune.ff_level)
   local target = tune.dir * mag
-  local cur = zero_currents()
+  local cur = M.zero_currents()
   tune.t = tune.t + dt
 
   if tune.state == "ff" then
@@ -1326,7 +1403,7 @@ local function wheel_tune(dt, k, armed, enabled)
     end
     if not any then
       tune_fail("no ESC detected")
-      return zero_currents()
+      return M.zero_currents()
     end
     if tune.t >= K.TUNE_SETTLE_S and rpm_n > 0 then
       local mean_rpm = rpm_sum / rpm_n
@@ -1337,7 +1414,7 @@ local function wheel_tune(dt, k, armed, enabled)
     if tune.t >= K.TUNE_SETTLE_S + K.TUNE_AVERAGE_S then
       if tune.count < 1 then
         tune_fail("no samples")
-        return zero_currents()
+        return M.zero_currents()
       end
       local means_i, means_r = {}, {}
       for i = 0, K.NUM_ESC - 1 do
@@ -1345,27 +1422,27 @@ local function wheel_tune(dt, k, armed, enabled)
           local mean_rpm = tune.sum_rpm[i + 1] / tune.count
           if math.abs(mean_rpm - target) > 0.3 * math.abs(target) then
             tune_fail(string.format("ESC %d did not reach %.0f rpm (%.0f)", i + 1, target, mean_rpm))
-            return zero_currents()
+            return M.zero_currents()
           end
           means_i[i + 1] = tune.sum_current[i + 1] / tune.count
           means_r[i + 1] = mean_rpm
           esc[i + 1].ref_rpm = target
         end
       end
-      local _, has_lo = tune_mag(k, tune.ff_level)
+      local _, has_lo = M.tune_mag(k, tune.ff_level)
       if tune.ff_level == 1 and has_lo then
         tune.lo_i = means_i
         tune.lo_rpm = means_r
         tune.ff_level = 2
-        tune_reset_window(false)
+        M.tune_reset_window(false)
       else
         tune.base = means_i
         tune.rpm = means_r
-        local hyst = hyst_of(sigma_of(tune.sum_mean, tune.sum_mean2, tune.count), target)
-        tune.relay = make_relay(k, hyst)
+        local hyst = M.hyst_of(M.sigma_of(tune.sum_mean, tune.sum_mean2, tune.count), target)
+        tune.relay = M.make_relay(k, hyst)
         tune.relay:start()
-        tune.fourier = new_fourier()
-        tune.plant = new_plant(hyst)
+        tune.fourier = M.new_fourier()
+        tune.plant = M.new_plant(hyst)
         tune.prev_cycle = 0
         tune.state = "relay"
         tune.t = 0
@@ -1386,11 +1463,11 @@ local function wheel_tune(dt, k, armed, enabled)
     local u, status = tune.relay:step(mean_err, dt)
     if status == "fail" then
       tune_fail(tune.relay:result().msg)
-      return zero_currents()
+      return M.zero_currents()
     end
-    tune.prev_cycle = track_cycle(tune.relay, tune.fourier, mean_err, dt, tune.prev_cycle)
+    tune.prev_cycle = M.track_cycle(tune.relay, tune.fourier, mean_err, dt, tune.prev_cycle)
     if status ~= "done" then
-      plant_step(tune.plant, target - mean_err, u, dt)
+      M.plant_step(tune.plant, target - mean_err, u, dt)
     end
     for i = 0, K.NUM_ESC - 1 do
       if esc[i + 1].detected then
@@ -1398,13 +1475,13 @@ local function wheel_tune(dt, k, armed, enabled)
       end
     end
     if status == "done" then
-      if not finish_synced_relay(k) then
-        return zero_currents()
+      if not M.finish_synced_relay(k) then
+        return M.zero_currents()
       end
-      return zero_currents()
+      return M.zero_currents()
     end
   end
-  tune_log_wheels(target, cur)
+  M.tune_log_wheels(target, cur)
   return cur
 end
 
@@ -1436,7 +1513,7 @@ function LT.begin_window(zero_ref)
   LT.sum_r2 = 0
   LT.count = 0
   if zero_ref then
-    clear_wheel_pi()
+    M.clear_wheel_pi()
     return
   end
   local fb = esc[LT.idx + 1]
@@ -1456,9 +1533,9 @@ function LT.arm_hold()
 end
 
 function LT.one_wheel(dt, k)
-  local cur = zero_currents()
+  local cur = M.zero_currents()
   local idx = LT.idx
-  local mag = tune_mag(k, LT.level or 1)
+  local mag = M.tune_mag(k, LT.level or 1)
   local target = LT.dir * mag
   if LT.state == "rest" then
     if LT.t >= K.BRK_REST_S then
@@ -1486,7 +1563,7 @@ function LT.one_wheel(dt, k)
         LT.fail(string.format("ESC %d did not reach %.0f rpm (%.0f)", idx + 1, target, mean_rpm))
         return cur
       end
-      local _, has_lo = tune_mag(k, LT.level)
+      local _, has_lo = M.tune_mag(k, LT.level)
       if LT.level == 1 and has_lo then
         LT.i_lo = LT.sum_c / LT.count
         LT.rpm_lo = mean_rpm
@@ -1498,11 +1575,11 @@ function LT.one_wheel(dt, k)
       LT.base = LT.sum_c / LT.count
       LT.mean_rpm = mean_rpm
       fb.ref_rpm = target
-      local hyst = hyst_of(sigma_of(LT.sum_r, LT.sum_r2, LT.count), target)
-      LT.relay = make_relay(k, hyst, 1.0)
+      local hyst = M.hyst_of(M.sigma_of(LT.sum_r, LT.sum_r2, LT.count), target)
+      LT.relay = M.make_relay(k, hyst, 1.0)
       LT.relay:start()
-      LT.fourier = new_fourier()
-      LT.plant = new_plant(hyst)
+      LT.fourier = M.new_fourier()
+      LT.plant = M.new_plant(hyst)
       LT.prev_cycle = 0
       LT.state = "relay"
       LT.t = 0
@@ -1518,24 +1595,24 @@ function LT.one_wheel(dt, k)
     return cur
   end
   cur[idx + 1] = constrain(LT.base + u, -k.max_current, k.max_current)
-  LT.prev_cycle = track_cycle(LT.relay, LT.fourier, err, dt, LT.prev_cycle)
+  LT.prev_cycle = M.track_cycle(LT.relay, LT.fourier, err, dt, LT.prev_cycle)
   if status ~= "done" then
-    plant_step(LT.plant, fb.wheel_rpm, u, dt)
+    M.plant_step(LT.plant, fb.wheel_rpm, u, dt)
     return cur
   end
-  plant_flush(LT.plant)
-  local g, why = wheel_gains(LT.plant, LT.relay, LT.fourier.amps, k)
+  M.plant_flush(LT.plant)
+  local g, why = M.wheel_gains(LT.plant, LT.relay, LT.fourier.amps, k)
   if g == nil then
     LT.fail(string.format("ESC %d: %s", idx + 1, why))
     return cur
   end
-  g.ff = ff_slope(LT.i_lo, LT.rpm_lo, LT.base, LT.mean_rpm)
+  g.ff = M.ff_slope(LT.i_lo, LT.rpm_lo, LT.base, LT.mean_rpm)
   if g.ff == nil or not finite(g.ff) or g.ff < 0 then
     LT.fail(string.format("ESC %d rpm too low for FF", idx + 1))
     return cur
   end
   LT.results[LT.dir > 0 and 1 or 2][idx + 1] = g
-  announce_fit(string.format("ESC%d %s", idx + 1, LT.dir > 0 and "fwd" or "rev"), g)
+  M.announce_fit(string.format("ESC%d %s", idx + 1, LT.dir > 0 and "fwd" or "rev"), g)
   if LT.dir > 0 then
     LT.dir = -1
     LT.state = "rest"
@@ -1550,9 +1627,9 @@ function LT.one_wheel(dt, k)
       return cur
     end
     M.queue_save(scr_user1, 0)
-    clear_wheel_pi()
+    M.clear_wheel_pi()
     LT.state = "done"
-    announce_saved(ps, is_, fs)
+    M.announce_saved(ps, is_, fs)
     return cur
   end
   LT.idx = nxt
@@ -1642,7 +1719,7 @@ function LT.step(dt, k, armed, enabled)
   return LT.one_wheel(dt, k)
 end
 
-local function check_slip(k, now, enabled)
+function M.check_slip(k, now, enabled)
   local any = false
   for i = 0, K.MAX_FB - 1 do
     local fb = esc[i + 1]
@@ -1664,7 +1741,7 @@ local function check_slip(k, now, enabled)
   slip_active = any
 end
 
-local function run_control()
+function M.run_control()
   local now_us = micros()
   local dt = 0.01
   if last_us ~= nil then
@@ -1737,7 +1814,7 @@ local function run_control()
     side[1].goal, side[2].goal = 0, 0
   end
 
-  local wheel_currents = wheel_tune(dt, k, armed, enabled)
+  local wheel_currents = M.wheel_tune(dt, k, armed, enabled)
   if wheel_currents == nil then
     wheel_currents = LT.step(dt, k, armed, enabled)
   end
@@ -1823,7 +1900,7 @@ local function run_control()
       end
     end
   end
-  check_slip(k, now, enabled)
+  M.check_slip(k, now, enabled)
 
   -- PWM mode leaves the bus silent so the C620 can follow the servo pulse.
   if not latched_can then
@@ -1846,7 +1923,7 @@ local function run_control()
   end
 end
 
-local function check_health()
+function M.check_health()
   if not latched_can or not arming:is_armed() then
     lost_mask = 0
     return
@@ -1872,7 +1949,7 @@ local function check_health()
   lost_mask = lost
 end
 
-local function prearm()
+function M.prearm()
   if auth_id == nil then
     return
   end
@@ -1919,7 +1996,7 @@ local function prearm()
   arming:set_aux_auth_passed(auth_id)
 end
 
-local function publish_stat()
+function M.publish_stat()
   local stat = 0
   if latched_can and driver ~= nil then
     stat = stat | K.STAT_CAN
@@ -1944,7 +2021,7 @@ local function publish_stat()
   end
 end
 
-local function write_log()
+function M.write_log()
   if (M.gains.opt & 1) == 0 or logger == nil then
     return
   end
@@ -1971,7 +2048,7 @@ local function write_log()
   end
 end
 
-local function push_telem()
+function M.push_telem()
   local data = M.telem
   for i = 0, K.NUM_ESC - 1 do
     local fb = esc[i + 1]
@@ -1983,7 +2060,7 @@ local function push_telem()
   end
 end
 
-local function send_telem()
+function M.send_telem()
   if esc_telem == nil or now_ms() - last_telem < 20 then
     return
   end
@@ -1995,12 +2072,12 @@ local function send_telem()
     end
     M.telem = data
   end
-  pcall(push_telem)
+  pcall(M.push_telem)
 end
 
 -- While a motor ESC is missing, report the frames seen per ID every 5 s so a
 -- silent ESC (PWM mode, wrong ID, wiring) can be told apart from a slow loop
-local function report_rx()
+function M.report_rx()
   local now = now_ms()
   if diag.last_loop_ms ~= 0 then
     diag.max_dt = math.max(diag.max_dt, now - diag.last_loop_ms)
@@ -2028,7 +2105,7 @@ local function report_rx()
   diag.last_ms = now
 end
 
-local function warn_selector_without_can()
+function M.warn_selector_without_can()
   local sel = selector()
   if latched_can or (sel ~= K.WHEEL_TUNE_SELECTOR and sel ~= K.BRK_SELECTOR and sel ~= K.LOC_SELECTOR) then
     return
@@ -2064,7 +2141,7 @@ local function update()
           arming:set_aux_auth_passed(auth_id)
         end
       end
-      publish_stat()
+      M.publish_stat()
       return update, 1000
     end
     if not announced_driver then
@@ -2096,22 +2173,22 @@ local function update()
     kill_pwm()
   end
   drain()
-  run_control()
+  M.run_control()
   if latched_can then
     kill_pwm()
-    check_health()
+    M.check_health()
   end
-  warn_selector_without_can()
-  report_rx()
-  publish_stat()
-  prearm()
+  M.warn_selector_without_can()
+  M.report_rx()
+  M.publish_stat()
+  M.prearm()
   -- Spread EEPROM / telem / log so a single update stays under SCR_VM_I_COUNT
   M.drain_saves()
   local tick = now_ms() % 100
   if tick < 50 then
-    send_telem()
+    M.send_telem()
   else
-    write_log()
+    M.write_log()
   end
   return update, K.LOOP_MS
 end
