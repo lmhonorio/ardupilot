@@ -55,6 +55,7 @@ function Autotune:reset()
   self.e_max = -math.huge
   self.e_min = math.huge
   self.cycle = 0
+  self.last_period, self.last_amp = nil, nil
   self.periods = {}
   self.amps = {}
   self.status = "idle"
@@ -139,9 +140,11 @@ function Autotune:step(err, dt)
   if new_u > 0 and self.u <= 0 then
     if self.last_rise_t ~= nil then
       self.cycle = self.cycle + 1
+      self.last_period = self.t - self.last_rise_t
+      self.last_amp = (self.e_max - self.e_min) / 2
       if self.cycle > self.skip_cycles then
-        table.insert(self.periods, self.t - self.last_rise_t)
-        table.insert(self.amps, (self.e_max - self.e_min) / 2)
+        table.insert(self.periods, self.last_period)
+        table.insert(self.amps, self.last_amp)
       end
     end
     self.last_rise_t = self.t

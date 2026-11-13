@@ -539,7 +539,7 @@ local last_warning = get_time()
 function update()
 
   local selector = param:get('SCR_USER1')
-  if RTUN_ENABLE:get() <= 0 and selector ~= 3 then
+  if RTUN_ENABLE:get() <= 0 and selector ~= 3 and selector ~= 4 then
     return
   end
 
@@ -549,7 +549,7 @@ function update()
 
   -- SCR_USER1=1 starts QuickTune on arming, independent of driving mode.
   local sw_pos
-  if selector == 3 then
+  if selector == 3 or selector == 4 then
     -- Release pending QuickTune gains before the Circle relay measures the baseline.
     sw_pos = 0
   elseif selector == 1 then

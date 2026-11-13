@@ -789,6 +789,7 @@ end
 gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
   "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG_ERR=%.1f deg, YAWT_MAX_OUT=%.0f%%",
   VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_error_param:get(), yaw_max_out_param:get()))
+CAN_DRIVER.init()
 local next_control_ms = millis() + uint32_t(3000)
 local next_can_ms = millis()
 
