@@ -1,0 +1,11 @@
+# MID360 fisico SN 47MCNAH0037261; diagnostico isolado ROS_DOMAIN_ID=21.
+livox_driver_node:
+  ros__parameters:
+    xfer_format: 0
+    multi_topic: 0
+    data_src: 0
+    publish_freq: 10.0
+    output_data_type: 0
+    frame_id: livox_frame
+    user_config_path: /mid360/mid360.json
+    cmdline_input_bd_code: ''

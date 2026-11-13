@@ -1,0 +1,21 @@
+name: mid360
+services:
+  driver:
+    image: rover-companion:jazzy
+    container_name: rover-mid360
+    network_mode: host
+    ipc: host
+    pid: host
+    restart: 'no'
+    environment:
+      ROS_DOMAIN_ID: '21'
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      ROS_LOCALHOST_ONLY: '1'
+      RMW_FASTRTPS_PUBLICATION_MODE: ASYNCHRONOUS
+      TINI_SUBREAPER: '1'
+    volumes:
+      - .:/mid360:ro
+    command: [ros2, run, livox_ros_driver2, livox_ros_driver2_node, --ros-args, --params-file, /mid360/livox.yaml, -r, livox/lidar:=/mid360/points, -r, livox/imu:=/mid360/imu]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '2'}

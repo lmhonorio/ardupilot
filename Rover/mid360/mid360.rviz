@@ -1,0 +1,50 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+- Class: rviz_common/Views
+  Name: Views
+Visualization Manager:
+  Class: ''
+  Global Options:
+    Fixed Frame: livox_frame
+    Background Color: 30; 30; 30
+    Frame Rate: 20
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: Grade
+    Enabled: true
+    Cell Size: 1
+    Plane Cell Count: 20
+    Reference Frame: <Fixed Frame>
+  - Class: rviz_default_plugins/PointCloud2
+    Name: MID360 real
+    Enabled: true
+    Topic:
+      Value: /mid360/points
+      Reliability Policy: Best Effort
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+    Position Transformer: XYZ
+    Color Transformer: AxisColor
+    Axis: Z
+    Style: Points
+    Size (Pixels): 2
+    Alpha: 1
+    Decay Time: 0.5
+    Use Fixed Frame: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Pitch: 0.6
+      Yaw: 0.8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+  Tools:
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
