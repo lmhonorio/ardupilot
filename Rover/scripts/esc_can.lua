@@ -97,6 +97,12 @@ local K = {
   PREFIX = "ESC_",
   TELEM_CURRENT = 1 << 3,
   TELEM_MOTOR_TEMP = 1 << 1,
+  GCS_NAMES = {
+    { "ESC1_I", "ESC1_ICMD", "ESC1_RPM" },
+    { "ESC2_I", "ESC2_ICMD", "ESC2_RPM" },
+    { "ESC3_I", "ESC3_ICMD", "ESC3_RPM" },
+    { "ESC4_I", "ESC4_ICMD", "ESC4_RPM" },
+  },
 }
 
 local PARAM_SPEC = {
@@ -975,50 +981,6 @@ function M.gains_fallback(ku, pu)
   return kp, kp / ti
 end
 
-function M.new_fourier()
-  return { sum_s = 0, sum_c = 0, sum_t = 0, phase = 0, period = nil, amps = {} }
-end
-
-function M.fourier_arm(f, period)
-  f.sum_s, f.sum_c, f.sum_t, f.phase = 0, 0, 0, 0
-  f.period = period
-end
-
-function M.fourier_step(f, err, dt)
-  if f.period == nil or f.period <= 0 then
-    return
-  end
-  f.phase = f.phase + (2 * math.pi * dt / f.period)
-  f.sum_s = f.sum_s + err * math.sin(f.phase) * dt
-  f.sum_c = f.sum_c + err * math.cos(f.phase) * dt
-  f.sum_t = f.sum_t + dt
-end
-
-function M.fourier_close(f)
-  if f.period == nil or f.sum_t < 0.5 * f.period then
-    return
-  end
-  local a = 2 * math.sqrt(f.sum_s * f.sum_s + f.sum_c * f.sum_c) / f.sum_t
-  if a > 0 then
-    f.amps[#f.amps + 1] = a
-  end
-end
-
--- Close the window that just finished, then arm the next one at the measured period.
-function M.track_cycle(relay, fou, err, dt, prev_cycle)
-  M.fourier_step(fou, err, dt)
-  if relay.cycle == prev_cycle then
-    return prev_cycle
-  end
-  if relay.cycle > relay.skip_cycles then
-    M.fourier_close(fou)
-  end
-  if relay.last_period ~= nil and relay.last_period > 0 then
-    M.fourier_arm(fou, relay.last_period)
-  end
-  return relay.cycle
-end
-
 -- Kv from the rpm slope just after the lag, T from the switch-to-peak delay.
 function M.new_plant(turn_rpm)
   return {
@@ -1104,14 +1066,10 @@ end
 
 -- Prefer the measured Kv and T. Fall back to Ku and Pu from the limit cycle.
 -- Åström measures amplitude as half the peak-to-peak of each cycle (relay.amps).
--- The Fourier amplitude swings with the window on a 5 ms loop (60–100% here)
--- and was aborting runs whose period was already usable.
-function M.wheel_gains(plant, relay, amps, k)
-  local peaks = relay.amps
-  if peaks == nil or #peaks < 4 then
-    peaks = amps
-  end
-  local a, aerr, aspread = M.robust_median(peaks, 1.0, 4)
+-- The relay always measures 6 cycles, so relay.amps is always long enough; the
+-- Fourier fallback was never reached and was removed to save scripting heap.
+function M.wheel_gains(plant, relay, k)
+  local a, aerr, aspread = M.robust_median(relay.amps, 1.0, 4)
   local pu, puerr, pspread = M.robust_median(relay.periods, 0.60, 4)
   if aerr == "spread" or puerr == "spread" then
     return nil, string.format("inconsistent cycles (Pu %.0f%% amp %.0f%%)",
@@ -1285,10 +1243,8 @@ function M.tune_start_direction(dir)
   tune.base = { 0, 0, 0, 0 }
   tune.rpm = { 0, 0, 0, 0 }
   tune.relay = nil
-  tune.fourier = nil
   tune.plant = nil
   tune.plants = nil
-  tune.prev_cycle = 0
   M.tune_reset_window(true)
 end
 
@@ -1367,7 +1323,7 @@ its own current slope as FF.
 --]]
 function M.finish_synced_relay(k)
   M.plant_flush(tune.plant)
-  local g, err = M.wheel_gains(tune.plant, tune.relay, tune.fourier.amps, k)
+  local g, err = M.wheel_gains(tune.plant, tune.relay, k)
   if g == nil then
     tune_fail(err)
     return false
@@ -1528,7 +1484,6 @@ function M.wheel_tune(dt, k, armed, enabled)
         local hyst = M.hyst_of(M.sigma_of(tune.sum_mean, tune.sum_mean2, tune.count), target)
         tune.relay = M.make_relay(k, hyst)
         tune.relay:start()
-        tune.fourier = M.new_fourier()
         tune.plant = M.new_plant(hyst)
         -- One plant per wheel for the per-wheel P and I
         tune.plants = {}
@@ -1537,7 +1492,6 @@ function M.wheel_tune(dt, k, armed, enabled)
             tune.plants[w] = M.new_plant(hyst)
           end
         end
-        tune.prev_cycle = 0
         tune.state = "relay"
         tune.t = 0
       end
@@ -1563,7 +1517,6 @@ function M.wheel_tune(dt, k, armed, enabled)
       tune_fail(tune.relay:result().msg)
       return M.zero_currents()
     end
-    tune.prev_cycle = M.track_cycle(tune.relay, tune.fourier, mean_err, dt, tune.prev_cycle)
     if status ~= "done" then
       M.plant_step(tune.plant, target - mean_err, u, dt)
       for w = 1, K.NUM_ESC do
@@ -1629,7 +1582,6 @@ function LT.arm_hold()
   LT.state = "hold"
   LT.level = 1
   LT.relay = nil
-  LT.fourier = nil
   LT.plant = nil
   LT.i_lo = nil
   LT.rpm_lo = nil
@@ -1682,9 +1634,7 @@ function LT.one_wheel(dt, k)
       local hyst = M.hyst_of(M.sigma_of(LT.sum_r, LT.sum_r2, LT.count), target)
       LT.relay = M.make_relay(k, hyst, 1.0)
       LT.relay:start()
-      LT.fourier = M.new_fourier()
       LT.plant = M.new_plant(hyst)
-      LT.prev_cycle = 0
       LT.state = "relay"
       LT.t = 0
     end
@@ -1699,13 +1649,12 @@ function LT.one_wheel(dt, k)
     return cur
   end
   cur[idx + 1] = constrain(LT.base + u, -k.max_current, k.max_current)
-  LT.prev_cycle = M.track_cycle(LT.relay, LT.fourier, err, dt, LT.prev_cycle)
   if status ~= "done" then
     M.plant_step(LT.plant, fb.wheel_rpm, u, dt)
     return cur
   end
   M.plant_flush(LT.plant)
-  local g, why = M.wheel_gains(LT.plant, LT.relay, LT.fourier.amps, k)
+  local g, why = M.wheel_gains(LT.plant, LT.relay, k)
   if g == nil then
     LT.fail(string.format("ESC %d: %s", idx + 1, why))
     return cur
@@ -2191,9 +2140,11 @@ function M.send_gcs()
   for i = 1, K.NUM_ESC do
     local fb = esc[i]
     if fb.detected then
-      gcs:send_named_float(string.format("ESC%d_I", i), direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
-      gcs:send_named_float(string.format("ESC%d_ICMD", i), fb.current_a)
-      gcs:send_named_float(string.format("ESC%d_RPM", i), fb.wheel_rpm)
+      -- Constant names: no new strings on every send
+      local names = K.GCS_NAMES[i]
+      gcs:send_named_float(names[1], direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
+      gcs:send_named_float(names[2], fb.current_a)
+      gcs:send_named_float(names[3], fb.wheel_rpm)
     end
   end
   gcs:send_named_float("ESC_TGT_L", side[1].target_rpm or 0)
