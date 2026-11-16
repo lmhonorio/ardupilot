@@ -29,8 +29,11 @@
 -- ESC_SLIP     wheel-to-side rpm difference reported as slip (0 = off)
 -- ESC_LMASK    bitmask of the ESCs (1..4) on the left side; the others are right
 --              (ESC_LMASK=9 → ESC1+ESC4 left, ESC2+ESC3 right)
--- ESC_WT_RELAY wheel autotune relay amplitude, % of ESC_CUR. Default 100,
---              so the pulse runs at the current limit. 1..100, no extra amp cap.
+-- ESC_WT_RELAY wheel autotune current, % of ESC_CUR (1..100): the current step
+--              of USER1=4 and the relay amplitude of USER1=5. 20-30% suits the
+--              loaded rover (a step that moves it but stays below the rpm guard).
+-- ESC_WT_BW    USER1=4 target bandwidth, rad/s (default 8). Higher = faster and
+--              stiffer with bigger current peaks; capped by the measured lag.
 -- ESC_WT_RPM   high plateau of USER1=4 and 5, wheel rpm. The low plateau is half.
 --              Values below 60 stay on 120, so an old saved 30 does not take over.
 -- ESC_GCS_HZ   live NAMED_VALUE_FLOAT stream to the GCS, Hz (0 = off, max 20):
@@ -47,13 +50,13 @@
 -- its own PI on its own encoder, so a slipping wheel cannot satisfy the loop of
 -- the wheel that is still on the ground.
 --
--- SCR_USER1 = 4, armed in HOLD, on the ground. Synchronised relay: every wheel
--- gets the same extra current, switched on the median wheel speed error, so the rover
--- drives straight. A common PI (type II, h = 7) comes from the median plant.
--- Each wheel then gets its own P and I from its own Kv and T under that same
--- current; a wheel whose fit is unusable (slip, too few clean cycles, or P
--- outside 0.5..2x the common P) keeps the common gains.
--- ESC_FFn is the current slope of that wheel between two speeds.
+-- SCR_USER1 = 4, armed in HOLD, on the ground, a few metres free. Every wheel
+-- holds 60 then 120 rpm (ESC_FFn = current slope between them), then gets a
+-- current step up and down at 120 rpm: the rpm slope is Kv with the rover's
+-- own mass and the line intercept is the lag T. Kp = wc / Kv, Ti = 4 / wc with
+-- wc = min(ESC_WT_BW, 1 / (2.65 T)). A closed-loop check (60 -> 120 rpm with
+-- ESC_ACC and ESC_PREF) must stay under 15% overshoot, or wc drops by 25%
+-- (3 tries). Forward then reverse; P and I are per wheel.
 -- SCR_USER1 = 5, WHEELS IN THE AIR, armed in HOLD. One wheel at a time, forward
 -- then reverse, other wheels at 0 A. Same rule, per motor. Run 5 before 4:
 -- 4 overwrites with the loaded vehicle.
@@ -61,7 +64,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611d",
+  VERSION = "v2611e",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -158,6 +161,7 @@ local PARAM_SPEC = {
   { 42, "FF4", 0 },
   { 43, "GCS_HZ", 4 },
   { 44, "PREF", 0.5 },
+  { 45, "WT_BW", 8 },
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
@@ -357,27 +361,8 @@ local M = {
     fast = {},
     raw = { 0, 0, 0, 0, 0, 0, 0, 0 },
     goals = { 0, 0 },
-    med = { 0, 0, 0, 0 },
   },
 }
-
--- Median of the first n entries of t, sorted in place (no allocation; n <= 4
--- in the 5 ms loop). Even n gives the mean of the two middle values.
-function M.median_n(t, n)
-  for i = 2, n do
-    local v = t[i]
-    local j = i - 1
-    while j >= 1 and t[j] > v do
-      t[j + 1] = t[j]
-      j = j - 1
-    end
-    t[j + 1] = v
-  end
-  if n % 2 == 1 then
-    return t[(n + 1) // 2]
-  end
-  return 0.5 * (t[n // 2] + t[n // 2 + 1])
-end
 
 function M.queue_save(obj, value)
   obj:set(value)
@@ -979,8 +964,6 @@ end
 
 -- Fixed 24-slot list: allocated once at its final size, never grown
 K.PLANT_CAP = 24
--- Relay rises ignored before per-wheel amplitudes are kept (relay skips 3 cycles)
-K.PLANT_SKIP_RISES = 4
 function M.fixed_list()
   return { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 end
@@ -1052,13 +1035,6 @@ function M.new_plant(turn_rpm)
     ts = M.fixed_list(),
     nts = 0,
     turn_rpm = turn_rpm,
-    -- Half peak-to-peak rpm of each relay cycle (rise to rise), for Ku of
-    -- this wheel when the cycle is too fast for the Kv/T fit
-    amps = M.fixed_list(),
-    namp = 0,
-    rises = 0,
-    rmax = -math.huge,
-    rmin = math.huge,
   }
 end
 
@@ -1106,17 +1082,6 @@ end
 
 function M.plant_step(p, rpm, u, dt)
   p.t = p.t + dt
-  if rpm > p.rmax then p.rmax = rpm end
-  if rpm < p.rmin then p.rmin = rpm end
-  if u > 0 and (p.prev_u == nil or p.prev_u <= 0) then
-    p.rises = p.rises + 1
-    -- Skip the first cycles, as the relay does, while the oscillation settles
-    if p.rises > K.PLANT_SKIP_RISES and p.namp < K.PLANT_CAP and p.rmax > p.rmin then
-      p.namp = p.namp + 1
-      p.amps[p.namp] = (p.rmax - p.rmin) / 2
-    end
-    p.rmax, p.rmin = rpm, rpm
-  end
   if p.prev_u ~= nil and u * p.prev_u < 0 then
     p.nswitch = p.nswitch + 1
     if p.nswitch > 2 then
@@ -1307,8 +1272,6 @@ function M.tune_reset_window(zero_ref)
   tune.count = 0
   tune.sum_current = { 0, 0, 0, 0 }
   tune.sum_rpm = { 0, 0, 0, 0 }
-  tune.sum_mean = 0
-  tune.sum_mean2 = 0
   if zero_ref then
     M.clear_wheel_pi()
   else
@@ -1333,77 +1296,35 @@ function M.tune_start_direction(dir)
   M.tune_reset_window(true)
 end
 
--- A wheel's own fit may move this far from the common P before it is
--- treated as a slip or noise artefact and the common gains are used instead
-K.OWN_P_MIN_RATIO = 0.5
-K.OWN_P_MAX_RATIO = 2.0
-
 --[[
-P and I of one wheel from its own response to the shared relay current.
-Returns kp, ki, nil on success, or nil, nil, reason to keep the common gains.
+Ground wheel tune (SCR_USER1 = 4) constants.
+Step test: from the high plateau, every wheel gets its hold current plus a
+current step dI (ESC_WT_RELAY % of ESC_CUR), then minus dI. The rpm slope of
+each wheel gives Kv (rpm/s per A) with the rover's own mass, and the line's
+intercept with the starting rpm gives the lag T.
+Gains: wc = min(ESC_WT_BW, 1 / (2.65 T)); Kp = wc / Kv; Ti = 4 / wc.
+Verify: hold the low plateau, step the reference to the high plateau with the
+new gains (and ESC_ACC / ESC_PREF as when driving), measure the overshoot.
+Above 15%, wc shrinks by 25% and the check repeats (3 tries).
 --]]
---[[
-P and I of one wheel from its own response to the shared relay current.
-First choice: its own Kv and T (type II). When the cycle is too fast for that
-fit (Pu near 0.1 s leaves no clean 60 ms window), use this wheel's own
-oscillation amplitude under the same relay: Ku = 4 d / (pi a), with the
-common Pu, as the common fallback does.
-Returns kp, ki, nil, text on success, or nil, nil, reason for the common gains.
---]]
-function M.wheel_own_gains(p, common, k, relay)
-  if p == nil then
-    return nil, nil, "no data"
-  end
-  M.plant_flush(p)
-  local kp, ki, how
-  local kv = M.robust_median(M.head(p.kvs, p.nkv), 0.35, 3)
-  local lag = M.robust_median(M.head(p.ts, p.nts), 0.35, 3)
-  if kv ~= nil and lag ~= nil then
-    kp, ki = M.gains_type2(kv, lag)
-    how = string.format("Kv %.0f T %.3f", kv, lag)
-  end
-  if not M.gains_sane(kp, ki, k) then
-    kp, ki = nil, nil
-    -- Lenient on purpose: the median already drops one bad cycle, and the
-    -- 0.5..2x common-P guard below catches a wrong amplitude
-    local a, aerr, aspread = M.robust_median(M.head(p.amps, p.namp), 2.0, 3)
-    if a == nil then
-      return nil, nil, string.format("no fit: kv %d t %d amp %d%s", p.nkv, p.nts, p.namp,
-        aerr == "spread" and string.format(" spread %.0f%%", (aspread or 0) * 100) or "")
-    end
-    if relay == nil or a <= relay.hyst_rad then
-      return nil, nil, "oscillation too small"
-    end
-    local ku = 4 * relay.relay / (math.pi * a)
-    kp, ki = M.gains_fallback(ku, common.Pu)
-    how = string.format("a %.0frpm Ku %.3f", a, ku)
-    if not M.gains_sane(kp, ki, k) then
-      return nil, nil, "gains out of range"
-    end
-  end
-  local ratio = kp / common.P
-  if ratio < K.OWN_P_MIN_RATIO or ratio > K.OWN_P_MAX_RATIO then
-    return nil, nil, string.format("P %.0f%% of common", ratio * 100)
-  end
-  return kp, ki, nil, how
-end
+K.STEP_S = 0.25          -- longest current step
+K.STEP_MOVE_RPM = 4      -- a wheel this far from its start rpm is moving: fit from here
+K.STEP_MAX_DEV = 0.5     -- end the step early when a wheel is this fraction of the plateau away
+K.STEP_MIN_N = 5         -- samples needed for a slope
+K.RECOVER_S = 0.8
+K.VERIFY_HOLD_S = 1.0
+K.VERIFY_MEAS_S = 1.2
+K.VERIFY_OS = 0.15
+K.VERIFY_TRIES = 3
+K.BW_SHRINK = 0.75
+K.WC_LAG = 2.65          -- symmetrical optimum, h = 7: wc = 1 / (sqrt(h) T)
+K.TI_WC = 4              -- Ti = 4 / wc
 
 function M.tune_finish()
   local ok, ps, is_, fs = M.save_wheel_gains(tune.results)
   if not ok then
     tune_fail(ps)
     return
-  end
-  local lo, hi = nil, nil
-  for w = 1, K.NUM_ESC do
-    if ps[w] ~= nil then
-      lo = (lo == nil) and ps[w] or math.min(lo, ps[w])
-      hi = (hi == nil) and ps[w] or math.max(hi, ps[w])
-    end
-  end
-  if lo ~= nil and hi > lo * 1.3 then
-    -- Expected now that each wheel is fitted on its own; still worth a look
-    tune_message(MAV_SEVERITY.INFO, string.format("wheel P spread %.0f%%", (hi / lo - 1) * 100))
   end
   M.queue_save(scr_user1, 0)
   M.clear_wheel_pi()
@@ -1415,50 +1336,129 @@ function M.tune_log_wheels(target, cur)
   if logger == nil then
     return
   end
-  local ph = tune.state == "relay" and 2 or 1
-  local cyc = tune.relay and tune.relay.cycle or 0
+  local ph = (tune.state == "step" and 2) or (tune.state == "verify" and 3) or 1
   for i = 1, K.NUM_ESC do
     if esc[i].detected then
       logger:write("DJWT", "Side,Dir,Ph,Tgt,Rpm,Cur,Cyc", "BbBfffB",
-        i, tune.dir or 0, ph, target, esc[i].wheel_rpm, cur[i], cyc)
+        i, tune.dir or 0, ph, target, esc[i].wheel_rpm, cur[i], tune.tries or 0)
     end
   end
 end
 
---[[
-The common PI comes from the median plant and must succeed. Each wheel then
-gets its own P and I from its own Kv and T under the same relay current,
-falling back to the common gains when its fit is unusable. Each wheel keeps
-its own current slope as FF.
---]]
-function M.finish_synced_relay(k)
-  M.plant_flush(tune.plant)
-  local g, err = M.wheel_gains(tune.plant, tune.relay, k)
-  if g == nil then
-    tune_fail(err)
-    return false
+-- One current step: sign +1 speeds the wheels up (in the tune direction), -1 slows them
+function M.step_begin(sign)
+  local f = tune.fit
+  tune.state = "step"
+  tune.step_sign = sign
+  tune.t = 0
+  for w = 1, K.NUM_ESC do
+    f.n[w], f.st[w], f.sr[w], f.stt[w], f.str[w] = 0, 0, 0, 0, 0
+    f.r0[w] = tune.dir * esc[w].wheel_rpm
   end
-  local dir_name = tune.dir > 0 and "fwd" or "rev"
-  M.announce_fit(dir_name .. " common", g)
+end
+
+-- Close one step: least-squares line rpm = a t + b on each wheel's moving samples
+function M.step_close()
+  local f = tune.fit
+  local s = tune.step_sign
+  for w = 1, K.NUM_ESC do
+    local n = f.n[w]
+    if esc[w].detected and n >= K.STEP_MIN_N then
+      local den = n * f.stt[w] - f.st[w] * f.st[w]
+      if den > 0 then
+        local a = (n * f.str[w] - f.st[w] * f.sr[w]) / den
+        local b = (f.sr[w] - a * f.st[w]) / n
+        local kv = s * a / tune.step_i
+        local lag = (a ~= 0) and (f.r0[w] - b) / a or -1
+        if finite(kv) and kv > 0 and finite(lag) and lag >= 0 and lag <= 0.3 then
+          f.kv[w] = f.kv[w] + kv
+          f.kvn[w] = f.kvn[w] + 1
+          f.lag[w] = f.lag[w] + lag
+        end
+      end
+    end
+  end
+end
+
+-- Gains for every wheel from its Kv, the median lag and the current bandwidth scale
+function M.step_gains(k)
+  local f = tune.fit
+  local lags = M.fixed_list()
+  local nl = 0
+  for w = 1, K.NUM_ESC do
+    if esc[w].detected then
+      if f.kvn[w] == 0 then
+        return false, string.format("ESC %d no step response", w)
+      end
+      nl = nl + 1
+      lags[nl] = f.lag[w] / f.kvn[w]
+    end
+  end
+  local lag = M.median(M.head(lags, nl))
+  if lag == nil then
+    return false, "no step response"
+  end
+  local bw = constrain(g("WT_BW"), 1, 50)
+  if lag > 0 then
+    bw = math.min(bw, 1 / (K.WC_LAG * lag))
+  end
+  tune.lag = lag
+  tune.wc = bw * tune.bw_scale
+  local ti = K.TI_WC / tune.wc
+  for w = 1, K.NUM_ESC do
+    if esc[w].detected then
+      local kv = f.kv[w] / f.kvn[w]
+      local kp = tune.wc / kv
+      local ki = kp / ti
+      if not M.gains_sane(kp, ki, k) then
+        return false, string.format("ESC %d gains out of range (Kv %.0f)", w, kv)
+      end
+      tune.tkp[w], tune.tki[w] = kp, ki
+    end
+  end
+  return true
+end
+
+function M.verify_begin()
+  tune.state = "verify"
+  tune.vphase = "hold"
+  tune.t = 0
+  for w = 1, K.NUM_ESC do
+    tune.peak[w] = 0
+    esc[w].integrator = 0
+    esc[w].last_error = 0
+  end
+  tune.imax = 0
+end
+
+function M.tune_start_direction(dir)
+  tune.dir = dir
+  tune.state = "ff"
+  tune.ff_level = 1
+  tune.lo_i = nil
+  tune.lo_rpm = nil
+  tune.base = { 0, 0, 0, 0 }
+  tune.rpm = { 0, 0, 0, 0 }
+  tune.bw_scale = 1
+  tune.tries = 0
+  -- Constructors: every list at its final size, no growth during the tune
+  tune.fit = { n = { 0, 0, 0, 0 }, st = { 0, 0, 0, 0 }, sr = { 0, 0, 0, 0 }, stt = { 0, 0, 0, 0 },
+    str = { 0, 0, 0, 0 }, r0 = { 0, 0, 0, 0 }, kv = { 0, 0, 0, 0 }, kvn = { 0, 0, 0, 0 },
+    lag = { 0, 0, 0, 0 } }
+  tune.tkp = { 0, 0, 0, 0 }
+  tune.tki = { 0, 0, 0, 0 }
+  tune.tff = { 0, 0, 0, 0 }
+  tune.peak = { 0, 0, 0, 0 }
+  tune.kt = nil
+  M.tune_reset_window(true)
+end
+
+-- Store this direction's gains and move on
+function M.direction_done()
   local row = {}
   for w = 1, K.NUM_ESC do
     if esc[w].detected then
-      local lo_i = tune.lo_i and tune.lo_i[w] or nil
-      local lo_rpm = tune.lo_rpm and tune.lo_rpm[w] or nil
-      local ff = M.ff_slope(lo_i, lo_rpm, tune.base[w], tune.rpm[w])
-      if ff == nil or not finite(ff) or ff < 0 then
-        tune_fail(string.format("ESC %d rpm too low for FF", w))
-        return false
-      end
-      local kp, ki, why, how = M.wheel_own_gains(tune.plants and tune.plants[w], g, k, tune.relay)
-      if kp ~= nil then
-        tune_message(MAV_SEVERITY.INFO, string.format("%s ESC%d %s P %.4f I %.4f",
-          dir_name, w, how, kp, ki))
-      else
-        kp, ki = g.P, g.I
-        tune_message(MAV_SEVERITY.INFO, string.format("%s ESC%d common gains (%s)", dir_name, w, why))
-      end
-      row[w] = { P = kp, I = ki, Ku = g.Ku, Pu = g.Pu, ff = ff }
+      row[w] = { P = tune.tkp[w], I = tune.tki[w], ff = tune.tff[w] }
     end
   end
   tune.results[#tune.results + 1] = row
@@ -1467,24 +1467,21 @@ function M.finish_synced_relay(k)
   else
     M.tune_finish()
   end
-  return true
 end
 
 --[[
-Synchronised relay (SCR_USER1 = 4). Returns per-wheel currents while it owns
+Ground wheel tune (SCR_USER1 = 4). Returns per-wheel currents while it owns
 the outputs, or nil to let the normal speed loop run.
-
-Phase "ff":    hold 60 rpm, then 120 rpm. The current slope of each wheel
-               is ESC_FFn. The high hold also measures rpm noise for the hysteresis.
-Phase "relay": that high-point current plus one common relay, switched on the
-               median wheel rpm error. Kv and T of the median, or the fundamental Ku and Pu,
-               set one PI copied to every wheel.
+"ff"      hold 60 rpm, then 120 rpm; current slope of each wheel = ESC_FFn
+"step"    current step up then down at the high plateau: Kv and T of each wheel
+"recover" back to the plateau with the speed loop
+"verify"  low plateau, then a reference step to the high one with the new gains
 Forward first, then reverse.
 --]]
 function M.wheel_tune(dt, k, armed, enabled)
   local wanted = tune_wanted(armed)
   if not wanted then
-    if tune.state == "ff" or tune.state == "relay" then
+    if tune.state ~= "idle" and tune.state ~= "done" and tune.state ~= "fail" then
       tune_message(MAV_SEVERITY.WARNING, "aborted (left HOLD, disarmed or selector changed)")
     end
     if tune.state ~= "idle" then
@@ -1517,9 +1514,8 @@ function M.wheel_tune(dt, k, armed, enabled)
     tune.results = {}
     M.tune_start_direction(1)
     local lo, hi = M.tune_levels(k)
-    local speeds = lo and string.format("%.0f/%.0f", lo, hi) or string.format("%.0f", hi)
-    tune_message(MAV_SEVERITY.NOTICE, string.format("synced; %s rpm fwd/rev relay %.1fA",
-      speeds, M.relay_amp(k)))
+    tune_message(MAV_SEVERITY.NOTICE, string.format("step tune %.0f/%.0f rpm, step %.1fA, BW %.1f",
+      lo, hi, M.relay_amp(k), constrain(g("WT_BW"), 1, 50)))
   end
   if not enabled then
     tune_fail("ESC feedback lost or outputs disabled")
@@ -1530,23 +1526,21 @@ function M.wheel_tune(dt, k, armed, enabled)
     return nil
   end
 
-  local mag = M.tune_mag(k, tune.ff_level)
-  local target = tune.dir * mag
+  local lo_rpm, hi_rpm = M.tune_levels(k)
+  local dir = tune.dir
+  local dir_name = dir > 0 and "fwd" or "rev"
   local cur = M.zero_currents()
   tune.t = tune.t + dt
+  local target = dir * (tune.ff_level == 1 and lo_rpm or hi_rpm)
 
   if tune.state == "ff" then
     local any = false
-    local wheels = M.scratch.med
-    local rpm_n = 0
     for i = 0, K.NUM_ESC - 1 do
       local fb = esc[i + 1]
       if fb.detected then
         any = true
         profile_wheel(i, target, dt)
         cur[i + 1] = wheel_pi(i, fb.ref_rpm, dt, k)
-        rpm_n = rpm_n + 1
-        wheels[rpm_n] = fb.wheel_rpm
         if tune.t >= K.TUNE_SETTLE_S then
           tune.sum_current[i + 1] = tune.sum_current[i + 1] + cur[i + 1]
           tune.sum_rpm[i + 1] = tune.sum_rpm[i + 1] + fb.wheel_rpm
@@ -1557,19 +1551,11 @@ function M.wheel_tune(dt, k, armed, enabled)
       tune_fail("no ESC detected")
       return M.zero_currents()
     end
-    if tune.t >= K.TUNE_SETTLE_S and rpm_n > 0 then
-      -- Noise of the same median signal the relay will switch on, for its hysteresis
-      local mean_rpm = M.median_n(wheels, rpm_n)
-      tune.sum_mean = tune.sum_mean + mean_rpm
-      tune.sum_mean2 = tune.sum_mean2 + mean_rpm * mean_rpm
+    if tune.t >= K.TUNE_SETTLE_S then
       tune.count = tune.count + 1
     end
     if tune.t >= K.TUNE_SETTLE_S + K.TUNE_AVERAGE_S then
-      if tune.count < 1 then
-        tune_fail("no samples")
-        return M.zero_currents()
-      end
-      local means_i, means_r = {}, {}
+      local means_i, means_r = { 0, 0, 0, 0 }, { 0, 0, 0, 0 }
       for i = 0, K.NUM_ESC - 1 do
         if esc[i + 1].detected then
           local mean_rpm = tune.sum_rpm[i + 1] / tune.count
@@ -1582,8 +1568,7 @@ function M.wheel_tune(dt, k, armed, enabled)
           esc[i + 1].ref_rpm = target
         end
       end
-      local _, has_lo = M.tune_mag(k, tune.ff_level)
-      if tune.ff_level == 1 and has_lo then
+      if tune.ff_level == 1 then
         tune.lo_i = means_i
         tune.lo_rpm = means_r
         tune.ff_level = 2
@@ -1591,57 +1576,133 @@ function M.wheel_tune(dt, k, armed, enabled)
       else
         tune.base = means_i
         tune.rpm = means_r
-        local hyst = M.hyst_of(M.sigma_of(tune.sum_mean, tune.sum_mean2, tune.count), target)
-        tune.relay = M.make_relay(k, hyst)
-        tune.relay:start()
-        tune.plant = M.new_plant(hyst)
-        -- One plant per wheel for the per-wheel P and I
-        -- Constructor: one exact-size allocation, no growth
-        tune.plants = { M.new_plant(hyst), M.new_plant(hyst), M.new_plant(hyst), M.new_plant(hyst) }
-        tune.state = "relay"
-        tune.t = 0
+        for w = 1, K.NUM_ESC do
+          if esc[w].detected then
+            local ff = M.ff_slope(tune.lo_i[w], tune.lo_rpm[w], means_i[w], means_r[w])
+            if ff == nil or not finite(ff) or ff < 0 then
+              tune_fail(string.format("ESC %d rpm too low for FF", w))
+              return M.zero_currents()
+            end
+            tune.tff[w] = ff
+          end
+        end
+        tune.step_i = M.relay_amp(k)
+        M.step_begin(1)
       end
     end
-  elseif tune.state == "relay" then
-    -- Switch on the median wheel error, not the mean: one wheel that slips or
-    -- unloads (seen at -166 rpm while the others held -120) pulled the mean,
-    -- shifted the switching and made Pu inconsistent. With 4 wheels the
-    -- median is the mean of the middle two, so a single outlier drops out.
-    local errs = M.scratch.med
-    local err_n = 0
-    for i = 0, K.NUM_ESC - 1 do
-      local fb = esc[i + 1]
+  elseif tune.state == "step" then
+    local s = tune.step_sign
+    local f = tune.fit
+    local over = false
+    for w = 1, K.NUM_ESC do
+      local fb = esc[w]
       if fb.detected then
-        fb.target_rpm = target
-        err_n = err_n + 1
-        errs[err_n] = target - fb.wheel_rpm
-      end
-    end
-    local mean_err = (err_n > 0) and M.median_n(errs, err_n) or 0
-    local u, status = tune.relay:step(mean_err, dt)
-    if status == "fail" then
-      tune_fail(tune.relay:result().msg)
-      return M.zero_currents()
-    end
-    if status ~= "done" then
-      M.plant_step(tune.plant, target - mean_err, u, dt)
-      for w = 1, K.NUM_ESC do
-        local pw = tune.plants[w]
-        if pw ~= nil then
-          M.plant_step(pw, esc[w].wheel_rpm, u, dt)
+        cur[w] = constrain(tune.base[w] + dir * s * tune.step_i, -k.max_current, k.max_current)
+        local r = dir * fb.wheel_rpm
+        if math.abs(r - f.r0[w]) >= K.STEP_MOVE_RPM then
+          local t = tune.t
+          f.n[w] = f.n[w] + 1
+          f.st[w] = f.st[w] + t
+          f.sr[w] = f.sr[w] + r
+          f.stt[w] = f.stt[w] + t * t
+          f.str[w] = f.str[w] + t * r
+        end
+        if math.abs(r - hi_rpm) > K.STEP_MAX_DEV * hi_rpm then
+          over = true
         end
       end
     end
-    for i = 0, K.NUM_ESC - 1 do
-      if esc[i + 1].detected then
-        cur[i + 1] = constrain(tune.base[i + 1] + u, -k.max_current, k.max_current)
+    if over or tune.t >= K.STEP_S then
+      M.step_close()
+      if s > 0 then
+        M.step_begin(-1)
+      else
+        tune.state = "recover"
+        tune.t = 0
+        M.clear_wheel_pi()
       end
     end
-    if status == "done" then
-      if not M.finish_synced_relay(k) then
+  elseif tune.state == "recover" then
+    for i = 0, K.NUM_ESC - 1 do
+      if esc[i + 1].detected then
+        profile_wheel(i, target, dt)
+        cur[i + 1] = wheel_pi(i, esc[i + 1].ref_rpm, dt, k)
+      end
+    end
+    if tune.t >= K.RECOVER_S then
+      local ok, why = M.step_gains(k)
+      if not ok then
+        tune_fail(why)
         return M.zero_currents()
       end
-      return M.zero_currents()
+      local f = tune.fit
+      local kvs = { 0, 0, 0, 0 }
+      for w = 1, K.NUM_ESC do
+        kvs[w] = f.kvn[w] > 0 and f.kv[w] / f.kvn[w] or 0
+      end
+      tune_message(MAV_SEVERITY.INFO, string.format("%s Kv %.0f %.0f %.0f %.0f T %.3f",
+        dir_name, kvs[1], kvs[2], kvs[3], kvs[4], tune.lag))
+      M.verify_begin()
+    end
+  elseif tune.state == "verify" then
+    -- New gains through a proxy of the cached gains, with ESC_ACC and ESC_PREF as when driving
+    local kt = tune.kt
+    if kt == nil then
+      kt = setmetatable({ kp_w = tune.tkp, ki_w = tune.tki, kff_w = tune.tff }, { __index = k })
+      tune.kt = kt
+    end
+    local ref_goal = dir * (tune.vphase == "hold" and lo_rpm or hi_rpm)
+    for i = 0, K.NUM_ESC - 1 do
+      local fb = esc[i + 1]
+      if fb.detected then
+        profile_wheel(i, ref_goal, dt)
+        local ref = fb.ref_rpm
+        if k.pref > 0 then
+          ref = prefilter(fb, ref, dt, (tune.tkp[i + 1] / tune.tki[i + 1]) * k.pref)
+        end
+        cur[i + 1] = wheel_pi(i, ref, dt, kt)
+        if tune.vphase == "meas" then
+          local r = dir * fb.wheel_rpm
+          if r > tune.peak[i + 1] then
+            tune.peak[i + 1] = r
+          end
+          if math.abs(cur[i + 1]) > tune.imax then
+            tune.imax = math.abs(cur[i + 1])
+          end
+        end
+      end
+    end
+    if tune.vphase == "hold" and tune.t >= K.VERIFY_HOLD_S then
+      tune.vphase = "meas"
+      tune.t = 0
+    elseif tune.vphase == "meas" and tune.t >= K.VERIFY_MEAS_S then
+      local os = 0
+      for w = 1, K.NUM_ESC do
+        if esc[w].detected then
+          os = math.max(os, (tune.peak[w] - hi_rpm) / (hi_rpm - lo_rpm))
+        end
+      end
+      tune.tries = tune.tries + 1
+      tune_message(MAV_SEVERITY.INFO, string.format("%s check %d: BW %.1f overshoot %.0f%% peak %.1fA",
+        dir_name, tune.tries, tune.wc, math.max(os, 0) * 100, tune.imax))
+      if os > K.VERIFY_OS and tune.tries < K.VERIFY_TRIES then
+        tune.bw_scale = tune.bw_scale * K.BW_SHRINK
+        local ok, why = M.step_gains(k)
+        if not ok then
+          tune_fail(why)
+          return M.zero_currents()
+        end
+        M.verify_begin()
+      else
+        if os > K.VERIFY_OS then
+          tune_message(MAV_SEVERITY.WARNING, string.format("%s overshoot still %.0f%%; keeping BW %.1f",
+            dir_name, os * 100, tune.wc))
+        end
+        tune_message(MAV_SEVERITY.INFO, M.fmt4(dir_name .. " P", tune.tkp))
+        tune_message(MAV_SEVERITY.INFO, M.fmt4(dir_name .. " I", tune.tki))
+        M.direction_done()
+        return M.zero_currents()
+      end
     end
   end
   M.tune_log_wheels(target, cur)
@@ -2180,7 +2241,8 @@ function M.publish_stat()
   if sat_ms ~= nil and now_ms() - sat_ms < K.SAT_HOLD_MS then
     stat = stat | K.STAT_SAT
   end
-  if tune.state == "ff" or tune.state == "relay" or
+  if tune.state == "ff" or tune.state == "step" or tune.state == "recover" or
+    tune.state == "verify" or
     LT.state == "rest" or LT.state == "hold" or LT.state == "relay" then
     stat = stat | K.STAT_TUNE_RUN
   elseif tune.state == "done" or LT.state == "done" then
