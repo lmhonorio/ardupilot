@@ -10,6 +10,7 @@ FORMATS = {
     b"CSR2": struct.Struct("<BIhhh"),
     b"CRP1": struct.Struct("<BHhhhh"),
     b"CRP2": struct.Struct("<BIhhhh"),
+    b"CTG1": struct.Struct("<IBh12h"),
 }
 
 
@@ -26,6 +27,13 @@ def read_log(path):
         raise ValueError("O arquivo contém apenas o cabeçalho, sem amostras")
 
     samples = defaultdict(list)
+    if header == b"CTG1":
+        for time_ms, _trial, reference, *values in record.iter_unpack(payload):
+            for esc, offset in enumerate(range(0, len(values), 3), start=1):
+                rpm10, cmd_ma, meas_ma = values[offset:offset + 3]
+                samples[esc].append((time_ms, rpm10 / 10, cmd_ma / 1000, meas_ma / 1000, reference / 10))
+        return samples
+
     for esc, time_ms, rpm10, cmd_ma, meas_ma, *target in record.iter_unpack(payload):
         samples[esc].append((time_ms, rpm10 / 10, cmd_ma / 1000, meas_ma / 1000,
                              target[0] / 10 if target else None))
@@ -67,7 +75,7 @@ def plot_esc(plt, esc, samples, output):
 
 def main():
     parser = argparse.ArgumentParser(description="Gera um gráfico PNG por ESC em um log de degrau CAN.")
-    parser.add_argument("log", type=Path, help="Arquivo CANSTEP.BIN ou CANRPM.BIN")
+    parser.add_argument("log", type=Path, help="Arquivo CANSTEP.BIN, CANRPM.BIN ou CANTWDG.BIN")
     parser.add_argument("-o", "--output-dir", type=Path, help="Pasta de saída (padrão: ao lado do log)")
     args = parser.parse_args()
 

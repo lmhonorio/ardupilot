@@ -27,13 +27,11 @@ local RAW_MAX = 16384
 local FEEDBACK_TIMEOUT_MS = 100
 local LOOP_MS = 5
 local MAX_FRAMES = 25
-local rx_frames = 0
 -- Keep the original CAN key when available so saved settings still load.
 local PARAM_KEYS = { 19, 93, 94 }
 local DEFAULT_STEP_MIN = 0.2
 local DEFAULT_STEP_INC = 0.1
 local DEFAULT_STEP_TIME = 5
-local DEFAULT_TUNE_STEP_TIME_S = 5
 local TELEM_CURRENT = 1 << 3
 local TELEM_MOTOR_TEMP = 1 << 1
 
@@ -102,7 +100,7 @@ local function ensure_params()
   end
   local param_key
   for _, key in ipairs(PARAM_KEYS) do
-    if param:add_table(key, "CAN_", 38) then
+    if param:add_table(key, "CAN_", 41) then
       param_key = key
       break
     end
@@ -140,7 +138,9 @@ local function ensure_params()
     spec[#spec + 1] = { 28 + 2 * i, "START_F_" .. i, 0 }
     spec[#spec + 1] = { 29 + 2 * i, "START_R_" .. i, 0 }
   end
-  spec[#spec + 1] = { 38, "TUNE_TIME", DEFAULT_TUNE_STEP_TIME_S }
+  spec[#spec + 1] = { 39, "TWD_ESC", 6 }
+  spec[#spec + 1] = { 40, "TWD_EPO", 12 }
+  spec[#spec + 1] = { 41, "TWD_G_RPM", 25 }
   for n = 1, #spec do
     local item = spec[n]
     if not param:add_param(param_key, item[1], item[2], item[3]) then
@@ -259,13 +259,11 @@ end
 local function drain()
   -- Four C620s send about 4000 frames/s. Reading until the buffer stays
   -- empty never returns and the scripting VM reports exceeded time.
-  rx_frames = 0
   for _ = 1, MAX_FRAMES do
     local frame = driver:read_frame()
     if not frame then
       return
     end
-    rx_frames = rx_frames + 1
     accept_frame(frame)
   end
 end
@@ -298,495 +296,338 @@ local pending_result
 local was_armed = false
 local inhibit_drive = false
 local tune
-local tune_last_loop
-local tune_loop_ms = 0
-local rx_age_before = {}
-local TUNE_VALIDATE_START_TIMEOUT_MS = 10000
 local START_TIMEOUT_S = 2
 local START_FADE_S = 0.3
 local START_MOTION_S = 0.2
 
-local update_tune, save_tune_results, record_tune_diag
+local update_tune, save_tune_results, twiddle_selection, log_ground_sample
 do
-local tune_was_armed = false
-local tune_result
-local tune_log
-local tune_diag
-local TUNE_LOG_BLOCK_BYTES = 1024
-local TUNE_LOG_SAMPLE_BYTES = 24 * 1024
-local TUNE_LOG_SAMPLE_MS = 200
-local TUNE_START_A = 1.8
-local TUNE_INCREMENT_A = 0.05
-local TUNE_MAX_SAMPLES = 4096
-local TUNE_SAMPLE_MS = 50
-local TUNE_MAX_DELAY = 10
-local TUNE_RPM_BLOCK_SAMPLES = 64
+  local was_tune_armed = false
+  local pending
+  local TARGET, STEP, HOLD_MS = 125, 25, 2000
+  local MAX_TRIALS = 40
+  local MAX_TRACE_BYTES = 24 * 1024
+  local TRACE_FORMAT = "<I4Bi2" .. string.rep("i2", 12)
+  local MIN_STEP = { 0.0005, 0.001 }
 
-local function tune_message(level, message)
-  gcs:send_text(level, "CAN SIMC: " .. message)
-end
-
-record_tune_diag = function(reason)
-  if not tune_diag or not tune then
-    return
-  end
-  if #tune_diag >= 32 then
-    table.remove(tune_diag, 1)
-  end
-  local now = millis()
-  local function age(index)
-    local last = esc[index].last_ms
-    return last and as_number(now - last) or -1
-  end
-  tune_diag[#tune_diag + 1] = string.format(
-    "%.0f,%d,%s,%.2f,%.2f,%.2f,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%s\n",
-    as_number(now - tune.start), tune.index, tune.phase or "start", tune_loop_ms,
-    0, 0, rx_frames, rx_age_before[1] or -1, rx_age_before[2] or -1,
-    rx_age_before[3] or -1, rx_age_before[4] or -1, age(1), age(2), age(3), age(4), reason)
-end
-
--- CSI1 record 4: validation outcome, lambda scale, gains, start time,
--- peak RPM, tail MAE and time saturated. Missing measurements are -1.
-local tune_write
-local function log_validation(status)
-  if tune.phase ~= "validate" then
-    return
-  end
-  local now = millis()
-  tune_write(string.pack("<BBbI4BBffffff", 4, tune.index, tune.sign, as_number(now - tune.start),
-    status, tune.lambda_scale, tune.P, tune.I,
-    tune.tracking_since and as_number(tune.tracking_since - tune.since) * 0.001 or -1,
-    tune.peak, tune.tail_n > 0 and tune.tail_sum / tune.tail_n or -1, tune.saturated_s))
-end
-
-local function stop_tune(reason)
-  log_validation(2)
-  record_tune_diag(reason)
-  tune_message(MAV_SEVERITY.WARNING, "ESC " .. tune.index .. " " .. reason)
-  tune = nil
-end
-
--- Keep the CSI1 format. Only decimate the diagnostic trace, not the model input.
-tune_write = function(record)
-  if record:byte() == 1 then
-    local now = millis()
-    if tune_log.last_sample and as_number(now - tune_log.last_sample) < TUNE_LOG_SAMPLE_MS then
-      return true
+  twiddle_selection = function()
+    local value = math.tointeger(pget("CAN_TWD_ESC", 6))
+    if value and value >= 1 and value <= 6 then
+      return value
     end
-    if tune_log.bytes + #record > TUNE_LOG_SAMPLE_BYTES then
-      if not tune_log.limited then
-        tune_log.limited = true
-        record_tune_diag("sample log capacity reached")
+  end
+
+  local function notice(text)
+    gcs:send_text(MAV_SEVERITY.NOTICE, "CAN Twiddle: " .. text)
+  end
+
+  local function stop(reason)
+    pending.reason = reason
+    tune = nil
+    notice(reason .. "; disarm to save")
+  end
+
+  local function prepare_trial(now, gains)
+    tune.trial = tune.trial + 1
+    tune.P, tune.I = gains[1], gains[2]
+    tune.gains = gains
+    tune.reverse_pending = false
+    tune.reference, tune.rest_since = nil, nil
+    tune.since, tune.last = now, now
+    tune.error_ms, tune.weight_ms = 0, 0
+    if tune.ground then
+      tune.error_by_esc = { 0, 0, 0, 0 }
+      tune.trace_last = nil
+      notice(string.format("ground T%d ESC %d %s", tune.trial, (tune.axis + 1) // 2,
+        tune.trial == 1 and "baseline" or (tune.axis % 2 == 1 and "P" or "I")))
+    else
+      notice(string.format("ESC %d T%d P %.5f I %.5f", tune.index, tune.trial, tune.P, tune.I))
+    end
+  end
+
+  local function prepare_esc(now)
+    local p = math.max(0, pget("CAN_P_" .. tune.index, 0.03))
+    local i = math.max(0, pget("CAN_I_" .. tune.index, 0.3))
+    tune.best = { p, i }
+    tune.dp = { math.max(0.001, p * 0.2), math.max(0.005, i * 0.2) }
+    tune.axis, tune.direction, tune.trial = 1, 1, 0
+    tune.best_score = math.huge
+    prepare_trial(now, tune.best)
+  end
+
+  local function set_reference(now, reference)
+    tune.reference, tune.since, tune.last = reference, now, now
+    tune.trace_last = nil
+    notice(string.format("%s T%d %+d RPM", tune.ground and "ground" or ("ESC " .. tune.index),
+      tune.trial, reference))
+  end
+
+  local function complete_trial(now)
+    local score = tune.error_ms / tune.weight_ms
+    local improved = score < tune.best_score
+    if improved then
+      tune.best, tune.best_score = tune.gains, score
+      if tune.ground then
+        for index = 1, MAX_ESC do
+          pending.best[index] = { tune.gains[2 * index - 1], tune.gains[2 * index] }
+        end
+      else
+        pending.best[tune.index] = tune.best
       end
-      return true
     end
-    tune_log.last_sample = now
-  end
-  local blocks = tune_log.blocks
-  local index = #blocks
-  local block = blocks[index]
-  if #block + #record > TUNE_LOG_BLOCK_BYTES then
-    blocks[index + 1] = record
-  else
-    blocks[index] = block .. record
-  end
-  tune_log.bytes = tune_log.bytes + #record
-  return true
-end
-
--- Fit an affine ARX model by centering the regressors. The intercept accounts
--- for the torque required to keep the wheel moving above the dead zone.
-local function identification_sample(blocks, index)
-  local block = blocks[(index - 1) // TUNE_RPM_BLOCK_SAMPLES + 1]
-  return string.unpack("<fi2", block, 6 * ((index - 1) % TUNE_RPM_BLOCK_SAMPLES) + 1)
-end
-
-local function advance_speed_fit(fit)
-  local first = TUNE_MAX_DELAY + 1
-  local last = math.min(fit.next_sample + 31, fit.count - 1)
-  local n, sx, su, sy = fit.n, fit.sx, fit.su, fit.sy
-  local xx, uu, yy, xu, xy, uy = fit.xx, fit.uu, fit.yy, fit.xu, fit.xy, fit.uy
-  -- Use the same output samples for every candidate delay.
-  for k = fit.next_sample, last do
-    local x = identification_sample(fit.blocks, k)
-    local y = identification_sample(fit.blocks, k + 1)
-    local _, ma = identification_sample(fit.blocks, k - fit.delay)
-    local u = ma / 1000
-    n, sx, su, sy = n + 1, sx + x, su + u, sy + y
-    xx, uu, yy = xx + x*x, uu + u*u, yy + y*y
-    xu, xy, uy = xu + x*u, xy + x*y, uy + u*y
-  end
-  if last < fit.count - 1 then
-    fit.n, fit.sx, fit.su, fit.sy = n, sx, su, sy
-    fit.xx, fit.uu, fit.yy, fit.xu, fit.xy, fit.uy = xx, uu, yy, xu, xy, uy
-    fit.next_sample = last + 1
-    return false
-  end
-  xx, uu, yy = xx - sx*sx/n, uu - su*su/n, yy - sy*sy/n
-  xu, xy, uy = xu - sx*su/n, xy - sx*sy/n, uy - su*sy/n
-  local det = xx*uu - xu*xu
-  if det > 1e-9 and yy > 1e-9 then
-    local a = (xy*uu - uy*xu) / det
-    local b = (uy*xx - xy*xu) / det
-    local r2 = (a*xy + b*uy) / yy
-    if a > 0 and a < 1 and b > 0 and (not fit.best or r2 > fit.best.r2) then
-      local ts = TUNE_SAMPLE_MS / 1000
-      fit.best = { K = b / (1-a), tau = -ts / math.log(a), L = fit.delay*ts, r2 = r2 }
-    end
-  end
-  fit.delay, fit.next_sample = fit.delay + 1, first
-  fit.n, fit.sx, fit.su, fit.sy = 0, 0, 0, 0
-  fit.xx, fit.uu, fit.yy, fit.xu, fit.xy, fit.uy = 0, 0, 0, 0, 0, 0
-  return fit.delay > TUNE_MAX_DELAY, fit.best
-end
-
-local function simc_gains(model, lambda)
-  local span = lambda + model.L
-  local kp = model.tau / (model.K * span)
-  return kp, kp / math.min(model.tau, 4 * span)
-end
-
-local function tune_rest(now, phase)
-  tune.phase, tune.since, tune.rest_since = phase, now, nil
-  tune.current, tune.reference, tune.integral = 0, 0, 0
-  tune.last_error = nil
-end
-
-save_tune_results = function()
-  if arming:is_armed() then
-    return
-  end
-  if tune_log then
-    local file = io.open("APM/CANSIMC.BIN", "wb")
-    local ok
-    if file then
-      for _, block in ipairs(tune_log.blocks) do
-        ok = file:write(block)
-        if not ok then break end
+    if tune.ground then
+      for index = 1, MAX_ESC do
+        pending.rows[#pending.rows + 1] = string.format("%d,%d,%.8g,%.8g,%.4f,%d,%.4f\n",
+          index, tune.trial, tune.gains[2 * index - 1], tune.gains[2 * index],
+          tune.error_by_esc[index] / tune.weight_ms, improved and 1 or 0, score)
       end
-      local closed = file:close()
-      ok = ok and closed
+    else
+      pending.rows[#pending.rows + 1] = string.format("%d,%d,%.8g,%.8g,%.4f,%d\n",
+        tune.index, tune.trial, tune.P, tune.I, score, improved and 1 or 0)
     end
-    if ok and tune_log.limited then
-      tune_message(MAV_SEVERITY.WARNING, "log sample capacity reached")
+    notice(string.format("%s T%d MAE %.1f RPM", tune.ground and "ground" or ("ESC " .. tune.index), tune.trial, score))
+
+    local axis = tune.axis
+    if tune.trial > 1 then
+      if improved then
+        tune.dp[axis] = tune.dp[axis] * 1.1
+        tune.axis, tune.direction = axis % #tune.dp + 1, 1
+      elseif tune.direction == 1 and tune.best[axis] > 0 then
+        tune.direction = -1
+      else
+        tune.dp[axis] = tune.dp[axis] * 0.9
+        tune.axis, tune.direction = axis % #tune.dp + 1, 1
+      end
     end
-    tune_log = nil
-    tune_message(ok and MAV_SEVERITY.NOTICE or MAV_SEVERITY.WARNING,
-      ok and "APM/CANSIMC.BIN saved" or "log save failed")
-    if not ok then
-      tune_result = nil
+    local converged = true
+    for index, delta in ipairs(tune.dp) do
+      if delta > MIN_STEP[(index - 1) % 2 + 1] then
+        converged = false
+        break
+      end
     end
+    if tune.trial >= tune.max_trials or converged then
+      if tune.index == tune.last_esc then
+        stop("complete")
+        return
+      end
+      tune.index = tune.index + tune.increment
+      prepare_esc(now)
+      return
+    end
+    axis = tune.axis
+    local gains = { table.unpack(tune.best) }
+    gains[axis] = math.max(0, gains[axis] + tune.direction * tune.dp[axis])
+    prepare_trial(now, gains)
   end
-  if tune_diag then
-    local file = io.open("APM/CANSDIAG.CSV", "wb")
-    local ok
+
+  save_tune_results = function()
+    if arming:is_armed() or not pending then
+      return
+    end
+    local saved = 0
+    for index, gain in pairs(pending.best) do
+      local p_name, i_name = "CAN_P_" .. index, "CAN_I_" .. index
+      local previous_p, previous_i = pget(p_name, 0.03), pget(i_name, 0.3)
+      if previous_p == gain[1] and previous_i == gain[2] then
+        saved = saved + 1
+      elseif not param:set_and_save(p_name, gain[1]) then
+        notice("P save failed ESC " .. index)
+      elseif not param:set_and_save(i_name, gain[2]) then
+        local restored = param:set_and_save(p_name, previous_p)
+        notice(restored and ("I save failed ESC " .. index) or ("PI rollback failed ESC " .. index))
+      else
+        saved = saved + 1
+      end
+    end
+    local path = pending.ground and "APM/CANTWDG.CSV" or "APM/CANTWD.CSV"
+    local file = io.open(path, "wb")
     if file then
-      ok = file:write("ms,esc,phase,loop_ms,last_sd_ms,peak_sd_ms,rx_frames,before1,before2,before3,before4,after1,after2,after3,after4,event\n")
-      for _, row in ipairs(tune_diag) do
+      local ok = file:write("esc,trial,p,i,mae_rpm,improved", pending.ground and ",global_mae_rpm\n" or "\n")
+      for _, row in ipairs(pending.rows) do
         if not ok then break end
         ok = file:write(row)
       end
+      if ok then ok = file:write("# ", pending.reason or "ended", "\n") end
       local closed = file:close()
-      ok = ok and closed
+      notice(ok and closed and (path .. " saved") or "log save failed")
+    else
+      notice("log open failed")
     end
-    tune_diag = nil
-    tune_message(ok and MAV_SEVERITY.NOTICE or MAV_SEVERITY.WARNING,
-      ok and "APM/CANSDIAG.CSV saved" or "diagnostic save failed")
+    if pending.ground then
+      local trace_path = "APM/CANTWDG.BIN"
+      local trace = io.open(trace_path, "wb")
+      local ok
+      if trace then
+        ok = trace:write("CTG1")
+        for _, block in ipairs(pending.blocks) do
+          if not ok then break end
+          ok = trace:write(block)
+        end
+        local closed = trace:close()
+        ok = ok and closed
+      end
+      notice(ok and (trace_path .. " saved") or "trace save failed")
+      if pending.truncated then notice("trace capacity reached") end
+    end
+    local selector = pending.ground and 5 or 4
+    pending = nil
+    if pget("SCR_USER1", 0) == selector and not param:set_and_save("SCR_USER1", 0) then
+      notice("reset SCR_USER1 manually")
+    end
+    notice(string.format("saved PI for %d ESCs", saved))
   end
-  if tune_result then
-    local saved = 0
-    for index, gain in ipairs(tune_result) do
-      local p_saved = param:set_and_save("CAN_P_" .. index, gain.P)
-      local i_saved = param:set_and_save("CAN_I_" .. index, gain.I)
-      local forward_saved = param:set_and_save("CAN_START_F_" .. index, gain.forward)
-      local reverse_saved = param:set_and_save("CAN_START_R_" .. index, gain.reverse)
-      if p_saved and i_saved and forward_saved and reverse_saved then
-        saved = saved + 1
+
+  update_tune = function(armed, enabled, max_rpm, max_current, imax)
+    local now = millis()
+    local selector = pget("SCR_USER1", 0)
+    local ground = selector == 5
+    local selected = selector == 4 or ground
+    local target = ground and (tune and tune.target or pget("CAN_TWD_G_RPM", 25)) or TARGET
+    local eligible = enabled and vehicle:get_mode() == 0 and max_rpm > target
+      and max_current > 0 and imax > 0 and pget("CAN_ENABLE", 0) == 1
+      and pget("CAN_STEP_RESP", 0) ~= 1 and pget("CAN_STEP_RPM", 0) ~= 1
+    if armed and not was_tune_armed and selected then
+      inhibit_drive = true
+      local selection = twiddle_selection()
+      local max_trials = math.tointeger(pget("CAN_TWD_EPO", 12))
+      if not max_trials or max_trials < 1 or max_trials > MAX_TRIALS then
+        notice(string.format("CAN_TWD_EPO must be 1-%d", MAX_TRIALS))
+      elseif ground and not (target >= 10 and target <= 40 and math.tointeger(target)) then
+        notice("CAN_TWD_G_RPM must be 10-40")
+      elseif eligible and ground then
+        pending = { ground = true, best = {}, rows = {}, blocks = { "" }, bytes = 0 }
+        tune = { ground = true, target = target, index = 1, last_esc = 1, start = now,
+          max_current = max_current, max_rpm = max_rpm, imax = imax, max_trials = max_trials,
+          best = {}, dp = {}, best_score = math.huge, trial = 0, axis = 1, direction = 1 }
+        for index = 1, MAX_ESC do
+          local p = math.max(0, pget("CAN_P_" .. index, 0.03))
+          local i = math.max(0, pget("CAN_I_" .. index, 0.3))
+          tune.best[2 * index - 1], tune.best[2 * index] = p, i
+          tune.dp[2 * index - 1], tune.dp[2 * index] = math.max(0.001, p * 0.2), math.max(0.005, i * 0.2)
+        end
+        prepare_trial(now, tune.best)
+      elseif eligible and selection then
+        local first = selection <= MAX_ESC and selection or (selection == 5 and 1 or MAX_ESC)
+        local last = selection <= MAX_ESC and selection or (selection == 5 and MAX_ESC or 1)
+        pending = { best = {}, rows = {} }
+        tune = { index = first, last_esc = last, increment = selection == 6 and -1 or 1,
+          max_current = max_current, max_rpm = max_rpm, imax = imax, max_trials = max_trials }
+        prepare_esc(now)
       else
-        tune_message(MAV_SEVERITY.WARNING, "gain save failed ESC " .. index)
+        notice("check ESC, MANUAL, CAN and limits")
       end
     end
-    tune_result = nil
-    if pget("SCR_USER1", 0) == 4 and not param:set_and_save("SCR_USER1", 0) then
-      tune_message(MAV_SEVERITY.WARNING, "reset SCR_USER1 manually")
+    was_tune_armed = armed
+    if not tune then return end
+    if not armed or not selected or not eligible or ground ~= (tune.ground == true) then
+      stop(armed and "conditions changed" or "disarmed")
+      return
     end
-    tune_message(MAV_SEVERITY.NOTICE, string.format("saved PI for %d ESCs", saved))
-  end
-
-end
-
-local function begin_speed_fit()
-  if not tune.dead or tune.rpm_count <= TUNE_MAX_DELAY + 1 then
-    stop_tune("insufficient staircase data")
-    return
-  end
-  tune.fit = { blocks = tune.rpm_blocks, count = tune.rpm_count, delay = 0,
-    next_sample = TUNE_MAX_DELAY + 1, n = 0, sx = 0, su = 0, sy = 0,
-    xx = 0, uu = 0, yy = 0, xu = 0, xy = 0, uy = 0 }
-  tune.phase, tune.current = "fit", 0
-  tune_message(MAV_SEVERITY.NOTICE, "ESC 1 fitting model")
-end
-
-update_tune = function(armed, enabled, max_rpm, max_current, imax)
-  local now = millis()
-  local selected = pget("SCR_USER1", 0) == 4
-  if not armed and tune then
-    stop_tune("disarmed")
-  end
-
-  local start_current = TUNE_START_A
-  local blocked
-  if not selected then
-    blocked = "SCR_USER1 changed"
-  elseif pget("CAN_ENABLE", 0) ~= 1 then
-    blocked = "CAN_ENABLE must be 1"
-  elseif not enabled then
-    blocked = "outputs inhibited"
-  elseif vehicle:get_mode() ~= 0 then
-    blocked = "MANUAL required"
-  elseif max_rpm <= 44 then
-    blocked = string.format("RPM cap %.1f <= 44", max_rpm)
-  elseif max_current < start_current then
-    blocked = string.format("CAN_CUR %.2f < start %.2f A", max_current, start_current)
-  elseif imax <= 0 then
-    blocked = "CAN_IMAX <= 0 A"
-  elseif pget("CAN_STEP_RESP", 0) == 1 or pget("CAN_STEP_RPM", 0) == 1 then
-    blocked = "another CAN test selected"
-  end
-  if armed and not tune_was_armed and selected then
-    inhibit_drive = true
-    local step_ms = pget("CAN_TUNE_TIME", DEFAULT_TUNE_STEP_TIME_S) * 1000
-    if not blocked and step_ms >= 1000 and step_ms <= 10000 then
-      tune_log = { blocks = { "CSI1" }, bytes = 4 }
-      tune = { index = 1, sign = 1, start = now, step_ms = step_ms,
-        results = {}, models = {} }
-      tune_diag = {}
-      tune_rest(now, "rest_search")
-    else
-      tune_message(MAV_SEVERITY.WARNING, blocked or "check CAN_TUNE_TIME (1-10s)")
+    if max_current ~= tune.max_current or max_rpm ~= tune.max_rpm or imax ~= tune.imax then
+      stop("limits changed")
+      return
     end
-  end
-  tune_was_armed = armed
-  if not tune then
-    return
-  end
-  if blocked then
-    stop_tune(blocked)
-    return
-  end
-  local gear = math.max(pget("CAN_GEAR", 19.2032), 1)
-  local phase = tune.phase
-  local fb = esc[1]
-  if not healthy(0) then
-    local last = fb.last_ms
-    stop_tune(last and string.format("FB ESC 1 %.0f/%d ms", as_number(now - last), FEEDBACK_TIMEOUT_MS)
-      or "ESC 1 no feedback")
-    return
-  end
-  local rpm = tune.sign * direction(0) * fb.rotor_rpm / gear
-  local speed_limit = max_rpm
-  if phase == "search" and rpm >= speed_limit then
-    tune_message(MAV_SEVERITY.NOTICE, string.format("ESC 1 limit %.1f RPM at %+.2f A",
-      rpm, tune.sign * tune.current))
-    begin_speed_fit()
-    return
-  elseif (phase == "validate" and math.abs(rpm) >= speed_limit)
-      or (phase == "search" and rpm <= -speed_limit) then
-    stop_tune(string.format("RPM limit %.1f/%.1f", math.abs(rpm), speed_limit))
-    return
-  end
-
-  local elapsed = as_number(now - tune.since)
-  if phase == "rest_search" or phase == "rest_validate" then
-    if math.abs(rpm) > 1 then
-      tune.rest_since = nil
-    else
-      tune.rest_since = tune.rest_since or now
+    if tune.ground then
+      local steering, throttle = rc:get_pwm(1), rc:get_pwm(3)
+      if not rc:has_valid_input() or not steering or not throttle
+          or math.abs(steering - pget("RC1_TRIM", 1500)) > 100
+          or math.abs(throttle - pget("RC3_TRIM", 1500)) > 100 then
+        stop("RC input or pilot override")
+        return
+      end
     end
-    if elapsed >= 15000 then
-      stop_tune(string.format("rest 15s: %.1f RPM (<=1)", math.abs(rpm)))
-    elseif tune.rest_since and as_number(now - tune.rest_since) >= 1000 then
-      tune.since, tune.last_sample, tune.next_sample = now, now, now + uint32_t(TUNE_SAMPLE_MS)
-      if phase == "rest_search" then
-        tune.phase, tune.motion_since, tune.dead = "search", nil, nil
-        tune.current = start_current
-        tune.rpm_blocks, tune.rpm_count = {}, 0
-        tune_message(MAV_SEVERITY.NOTICE, string.format("ESC %d search: %+.3f A",
-          tune.index, tune.sign * tune.current))
+    local gear = math.max(pget("CAN_GEAR", 19.2032), 1)
+    local all_stopped = true
+    for index = 1, MAX_ESC do
+      local fb = esc[index]
+      if (tune.ground or (index >= math.min(tune.index, tune.last_esc) and index <= math.max(tune.index, tune.last_esc))
+          or fb.detected) and not healthy(index - 1) then
+        stop("feedback lost ESC " .. index)
+        return
+      end
+      local signed_rpm = direction(index - 1) * fb.rotor_rpm / gear
+      local wheel_speed = math.abs(signed_rpm)
+      all_stopped = all_stopped and wheel_speed <= 1
+      if wheel_speed >= max_rpm then
+        stop(string.format("ESC %d RPM %.1f/%.1f", index, wheel_speed, max_rpm))
+        return
+      end
+    end
+    local rpm = direction(tune.index - 1) * esc[tune.index].rotor_rpm / gear
+    local elapsed = as_number(now - tune.since)
+    if tune.reference == nil then
+      if (tune.ground and all_stopped) or (not tune.ground and math.abs(rpm) <= 1) then
+        tune.rest_since = tune.rest_since or now
       else
-        tune.phase, tune.peak, tune.tail_sum, tune.tail_n = "validate", 0, 0, 0
-        tune.motion_since, tune.tracking_since, tune.saturated_s = nil, nil, 0
-        tune.reference = 40
-        tune_message(MAV_SEVERITY.NOTICE, string.format("ESC %d validate %+d RPM", tune.index,
-          math.floor(tune.sign * tune.reference)))
+        tune.rest_since = nil
       end
-    end
-    return
-  end
-
-  if phase == "fit" then
-    local done, model = advance_speed_fit(tune.fit)
-    if not done then
+      if tune.rest_since and as_number(now - tune.rest_since) >= 1000 then
+        set_reference(now, tune.ground and (tune.reverse_pending and -tune.target or tune.target) or -TARGET)
+      elseif elapsed >= 15000 then
+        stop("wheel did not stop")
+      end
       return
     end
-    tune.fit = nil
-    tune.rpm_blocks, tune.rpm_count = nil, nil
-    if not model or model.r2 < 0.9 then
-      if tune.retried then
-        stop_tune(model and string.format("R2 %.3f < 0.900", model.r2) or "no valid ARX model")
+    local interval = as_number(now - tune.last)
+    if interval >= FEEDBACK_TIMEOUT_MS then
+      stop("control timing gap")
+      return
+    end
+    local weight = math.max(0, math.min(elapsed, HOLD_MS) - math.max(elapsed - interval, 500))
+    if tune.ground then
+      for index, fb in ipairs(esc) do
+        local measured = direction(index - 1) * fb.rotor_rpm / gear
+        local error_ms = math.abs(tune.reference - measured) * weight
+        tune.error_by_esc[index] = tune.error_by_esc[index] + error_ms
+        tune.error_ms = tune.error_ms + error_ms / MAX_ESC
+      end
+    else
+      tune.error_ms = tune.error_ms + math.abs(tune.reference - rpm) * weight
+    end
+    tune.weight_ms = tune.weight_ms + weight
+    tune.last = now
+    if elapsed >= HOLD_MS then
+      if tune.ground and not tune.reverse_pending then
+        tune.reverse_pending = true
+        tune.reference, tune.since, tune.rest_since = nil, now, nil
+        tune.trace_last = nil
+        notice("ground waiting for stop")
+      elseif not tune.ground and tune.reference < TARGET then
+        set_reference(now, tune.reference + STEP)
       else
-        tune.retried = true
-        tune_rest(now, "rest_search")
-        tune_message(MAV_SEVERITY.WARNING, "poor fit; repeating ESC " .. tune.index)
+        complete_trial(now)
       end
+    end
+  end
+  -- CTG1: ms, trial, reference (0.1 RPM), then RPM, commanded and measured mA per ESC.
+  log_ground_sample = function()
+    if not tune or not tune.ground or (not tune.reference and tune.trace_last) then return end
+    local now = millis()
+    if tune.trace_last and as_number(now - tune.trace_last) < 250 then return end
+    tune.trace_last = now
+    local values = {}
+    for index, fb in ipairs(esc) do
+      local offset = (index - 1) * 3
+      values[offset + 1] = math.floor(fb.wheel_rpm * 10)
+      values[offset + 2] = math.floor(fb.current_a * 1000)
+      values[offset + 3] = math.floor(constrain(direction(index - 1) * fb.current_raw / RAW_PER_AMP * 1000,
+        -32768, 32767))
+    end
+    local record = string.pack(TRACE_FORMAT, as_number(now - tune.start), tune.trial,
+      (tune.reference or 0) * 10, table.unpack(values))
+    if pending.bytes + #record > MAX_TRACE_BYTES then
+      pending.truncated = true
       return
     end
-    if not tune_write(string.pack("<BBbI4fffff", 2, tune.index, tune.sign,
-        as_number(now - tune.start), tune.dead, model.K, model.tau, model.L, model.r2)) then
-      return
-    end
-    tune.timing_retried = nil
-    model.dead = tune.dead
-    tune.models[#tune.models + 1] = model
-    if tune.sign == 1 then
-      tune.sign, tune.retried = -1, nil
-      tune_rest(now, "rest_search")
+    local blocks = pending.blocks
+    if #blocks[#blocks] + #record > 1024 then
+      blocks[#blocks + 1] = record
     else
-      tune.lambda_scale = 1
-      tune.P, tune.I = 0, 0
-      for _, fit in ipairs(tune.models) do
-        local kp, ki = simc_gains(fit, 3 * math.max(fit.L, TUNE_SAMPLE_MS / 1000))
-        tune.P, tune.I = tune.P + kp / #tune.models, tune.I + ki / #tune.models
-      end
-      tune.sign = 1
-      tune_rest(now, "rest_validate")
+      blocks[#blocks] = blocks[#blocks] .. record
     end
-    return
+    pending.bytes = pending.bytes + #record
   end
-
-  local sample_ms = as_number(now - tune.last_sample)
-  if (now - tune.next_sample):toint() < 0 then
-    return
-  end
-  tune.last_sample = now
-  tune.next_sample = tune.next_sample + uint32_t(TUNE_SAMPLE_MS)
-  if (now - tune.next_sample):toint() >= 0 then
-    tune.next_sample = now + uint32_t(TUNE_SAMPLE_MS)
-  end
-  if (phase == "search" or phase == "validate") and sample_ms > 2 * TUNE_SAMPLE_MS then
-    local reason = string.format("%s gap %.0f/%d ms", phase, sample_ms, 2 * TUNE_SAMPLE_MS)
-    if tune.timing_retried == phase then
-      stop_tune(reason)
-    else
-      log_validation(3)
-      record_tune_diag(reason .. " retry")
-      tune.timing_retried = phase
-      tune.rpm_blocks, tune.rpm_count = nil, nil
-      tune_rest(now, phase == "search" and "rest_search" or "rest_validate")
-      tune_message(MAV_SEVERITY.WARNING, string.format("ESC %d %s; retry", tune.index, reason))
-    end
-    return
-  end
-  local next_current = tune.current
-  if phase == "search" then
-    if rpm >= 3 then
-      tune.motion_since = tune.motion_since or now
-      if not tune.dead and as_number(now - tune.motion_since) >= 200 then
-        tune.dead = tune.current
-        tune_message(MAV_SEVERITY.NOTICE, string.format("ESC %d breakaway %+.3f A",
-          tune.index, tune.sign * tune.dead))
-      end
-    else
-      tune.motion_since = nil
-    end
-    local n = tune.rpm_count
-    if n >= TUNE_MAX_SAMPLES then
-      stop_tune("staircase sample capacity")
-      return
-    end
-    if elapsed >= tune.step_ms then
-      if tune.current >= max_current then
-        stop_tune(string.format("CAN_CUR %.2f A at %.1f/%.1f RPM", max_current, rpm, speed_limit))
-        return
-      end
-      next_current = math.min(max_current, tune.current + TUNE_INCREMENT_A)
-      tune.since = now
-      if not tune.dead then
-        tune.motion_since = nil
-      end
-      tune_message(MAV_SEVERITY.NOTICE, string.format("ESC 1 search: %+.3f A", tune.sign * next_current))
-    end
-    local block_index = n // TUNE_RPM_BLOCK_SAMPLES + 1
-    local blocks = tune.rpm_blocks
-    blocks[block_index] = (blocks[block_index] or "") .. string.pack("<fi2", rpm,
-      math.floor(next_current * 1000 + 0.5))
-    tune.rpm_count = n + 1
-  else
-    local error_rpm = tune.reference - rpm
-    tune.peak = math.max(tune.peak, rpm)
-    if tune.peak > 1.1 * tune.reference then
-      if tune.lambda_scale >= 8 then
-        stop_tune(string.format("peak %.1f/%.1f RPM", tune.peak, 1.1 * tune.reference))
-        return
-      end
-      log_validation(1)
-      tune.lambda_scale = tune.lambda_scale * 2
-      tune.P, tune.I = 0, 0
-      for _, fit in ipairs(tune.models) do
-        local kp, ki = simc_gains(fit, tune.lambda_scale * 3 * math.max(fit.L, TUNE_SAMPLE_MS / 1000))
-        tune.P, tune.I = tune.P + kp / #tune.models, tune.I + ki / #tune.models
-      end
-      tune.sign = 1
-      tune_rest(now, "rest_validate")
-      return
-    end
-    if not tune.tracking_since then
-      if rpm >= 3 then
-        tune.motion_since = tune.motion_since or now
-      else
-        tune.motion_since = nil
-      end
-      if tune.motion_since and as_number(now - tune.motion_since) >= 200 then
-        tune.tracking_since = now
-        tune_message(MAV_SEVERITY.NOTICE, string.format("ESC %d moving; track for 8s", tune.index))
-      elseif elapsed >= TUNE_VALIDATE_START_TIMEOUT_MS then
-        stop_tune(string.format("start 10s: %.1f/3 RPM", rpm))
-        return
-      end
-    end
-    local tracking_ms = tune.tracking_since and as_number(now - tune.tracking_since) or 0
-    if tracking_ms >= 6000 then
-      tune.tail_sum, tune.tail_n = tune.tail_sum + math.abs(error_rpm), tune.tail_n + 1
-    end
-    if tracking_ms >= 8000 then
-      if tune.tail_n < 10 or tune.tail_sum / tune.tail_n > 0.1 * tune.reference then
-        stop_tune(tune.tail_n < 10 and string.format("samples %d/10", tune.tail_n)
-          or string.format("MAE %.1f/%.1f RPM", tune.tail_sum / tune.tail_n, 0.1 * tune.reference))
-        return
-      end
-      log_validation(0)
-      if tune.sign == 1 then
-        tune.sign = -1
-        tune.timing_retried = nil
-        tune_rest(now, "rest_validate")
-        return
-      end
-      if not tune_write(string.pack("<BBI4ff", 3, tune.index, as_number(now - tune.start), tune.P, tune.I)) then
-        return
-      end
-      tune.results[tune.index] = { P = tune.P, I = tune.I, forward = tune.models[1].dead, reverse = tune.models[2].dead }
-      tune_message(MAV_SEVERITY.NOTICE, string.format("ESC %d P %.4f I %.4f", tune.index, tune.P, tune.I))
-      tune_result, tune = tune.results, nil
-      tune_message(MAV_SEVERITY.NOTICE, "complete; disarm to save")
-      return
-    end
-  end
-  tune.current = next_current
-  local command = phase == "validate" and esc[tune.index].current_a or tune.current * tune.sign
-  tune_write(string.pack("<BBbI4ffff", 1, tune.index, tune.sign, as_number(now - tune.start),
-    tune.reference * tune.sign, rpm * tune.sign, command,
-    direction(tune.index - 1) * esc[tune.index].current_raw / RAW_PER_AMP))
-end
 
 end
 
@@ -835,7 +676,7 @@ local function update_step(armed, enabled, max_rpm, max_current)
   local current_requested = pget("CAN_STEP_RESP", 0) == 1
   if not armed then
     inhibit_drive = false
-  elseif not was_armed and pget("SCR_USER1", 0) ~= 4 and latched_can and vehicle:get_mode() == 0
+  elseif not was_armed and pget("SCR_USER1", 0) ~= 4 and pget("SCR_USER1", 0) ~= 5 and latched_can and vehicle:get_mode() == 0
       and (rpm_requested or current_requested) then
     inhibit_drive = true
     if rpm_requested and current_requested then
@@ -1035,7 +876,7 @@ local function run_control()
     end
     local active = enabled and fb.have_angle and healthy(i)
       and (not inhibit_drive or (step and step.index == i + 1)
-        or (tune and tune.index == i + 1))
+        or (tune and (tune.ground or tune.index == i + 1)))
     if not active then
       fb.integrator = 0
       fb.last_error = 0
@@ -1044,13 +885,13 @@ local function run_control()
       fb.current_a = 0
     else
       local current_a
-      if (step and not step.rpm) or (tune and tune.phase ~= "validate") then
+      if (step and not step.rpm) or (tune and (not tune.reference or tune.reference == 0)) then
         -- Identification and validation own the active ESC current.
         fb.integrator = 0
         fb.last_error = 0
         fb.start_sign, fb.start_time, fb.start_motion = nil, nil, nil
         fb.target_rpm = 0
-        current_a = tune and constrain(tune.sign * tune.current, -max_current, max_current) or (step.current or 0)
+        current_a = step and step.current or 0
       else
         local cmd = 0
         if step then
@@ -1064,20 +905,14 @@ local function run_control()
           cmd = command_norm(i)
         end
         local esc_number = tostring(i + 1)
-        fb.target_rpm = tune and tune.sign * tune.reference or cmd * max_rpm
-        local kp = tune and tune.P or pget("CAN_P_" .. esc_number, 0.03)
-        local ki = tune and tune.I or pget("CAN_I_" .. esc_number, 0.3)
+        fb.target_rpm = tune and tune.reference or cmd * max_rpm
+        local kp = tune and (tune.ground and tune.gains[2 * i + 1] or tune.P) or pget("CAN_P_" .. esc_number, 0.03)
+        local ki = tune and (tune.ground and tune.gains[2 * i + 2] or tune.I) or pget("CAN_I_" .. esc_number, 0.3)
         local kd = pget("CAN_D_" .. esc_number, 0)
         local start_param = fb.target_rpm < 0 and "CAN_START_R_" or "CAN_START_F_"
-        local breakaway = tune and tune.models[tune.sign == 1 and 1 or 2].dead
-          or pget(start_param .. esc_number, 0)
-        local saturated
-        local start_timeout = tune and TUNE_VALIDATE_START_TIMEOUT_MS / 1000 or START_TIMEOUT_S
-        current_a, saturated = speed_current(fb, fb.target_rpm, kp, ki, kd, kff, dt, imax, max_current,
-          breakaway, start_timeout)
-        if tune and saturated then
-          tune.saturated_s = tune.saturated_s + dt
-        end
+        local breakaway = pget(start_param .. esc_number, 0)
+        current_a = speed_current(fb, fb.target_rpm, kp, ki, kd, kff, dt, imax, max_current,
+          breakaway, START_TIMEOUT_S)
       end
       if step and (step.rpm and step.base or step.current) then
         local now = millis()
@@ -1108,6 +943,7 @@ local function run_control()
   end
   if detected ~= 0 then
     send_group(CMD_1_4, raw)
+    log_ground_sample()
   end
 end
 
@@ -1153,9 +989,15 @@ local function prearm()
     arming:set_aux_auth_passed(auth_id)
     return
   end
-  local simc = pget("SCR_USER1", 0) == 4 and pget("CAN_ENABLE", 0) == 1 and vehicle:get_mode() == 0
-  local required_escs = simc and 1 or MAX_ESC
-  for i = 0, required_escs - 1 do
+  local twiddle = pget("SCR_USER1", 0) == 4 and pget("CAN_ENABLE", 0) == 1 and vehicle:get_mode() == 0
+  local selection = twiddle and twiddle_selection()
+  if twiddle and not selection then
+    arming:set_aux_auth_failed(auth_id, "CAN_TWD_ESC must be 1-6")
+    return
+  end
+  local single = selection and selection <= MAX_ESC
+  local first, last = single and selection or 1, single and selection or MAX_ESC
+  for i = first - 1, last - 1 do
     if not esc[i + 1].detected then
       arming:set_aux_auth_failed(auth_id, string.format("ESC %d not found", i + 1))
       return
@@ -1269,19 +1111,7 @@ function motor_can.update()
   end
 
   apply_switch()
-  if tune then
-    local now = millis()
-    tune_loop_ms = tune_last_loop and as_number(now - tune_last_loop) or 0
-    for i = 1, MAX_ESC do
-      local last = esc[i].last_ms
-      rx_age_before[i] = last and as_number(now - last) or -1
-    end
-  end
-  tune_last_loop = millis()
   drain()
-  if tune and tune_loop_ms >= FEEDBACK_TIMEOUT_MS then
-    record_tune_diag("control loop gap")
-  end
   run_control()
   if latched_can then
     hold_trim()
