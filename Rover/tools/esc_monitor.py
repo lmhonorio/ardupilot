@@ -298,7 +298,11 @@ def run_console(store, stop, duration):
         time.sleep(1.0)
         series, _, armed, last_rx = store.snapshot()
         if last_rx is None:
-            print("Aguardando dados ESC... (ESC_GCS_HZ > 0 e ESC_CAN = 1?)")
+            if armed is None:
+                print("Aguardando MAVLink do rover... (rede/porta certas?)")
+            else:
+                print("Rover conectado, sem valores ESC: esc_can.lua novo no SD, placa reiniciada, "
+                      "ESC_CAN = 1 e ESC_GCS_HZ > 0?")
             continue
         parts = []
         for m in motor_ids(series):
