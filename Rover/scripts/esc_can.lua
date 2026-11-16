@@ -36,6 +36,12 @@
 -- ESC_GCS_HZ   live NAMED_VALUE_FLOAT stream to the GCS, Hz (0 = off, max 20):
 --              ESCn_I measured current A, ESCn_ICMD commanded current A,
 --              ESCn_RPM wheel rpm, ESC_TGT_L / ESC_TGT_R side target rpm.
+-- ESC_PREF     reference prefilter on the wheel speed PI: time constant as a
+--              fraction of that wheel's Ti (= Kp/Ki). 0 = off, default 0.5.
+--              The tuned PI (symmetrical optimum) overshoots a speed step
+--              (about 40% seen on the rover). In simulation with the tuned
+--              gains: 0.5 -> 4% overshoot, +0.09 s; 1.0 -> 0%, +0.28 s.
+--              Only speeding up is filtered: slowing and stopping are immediate.
 --
 -- Both wheels of a side share the side command as their speed target. Each closes
 -- its own PI on its own encoder, so a slipping wheel cannot satisfy the loop of
@@ -54,6 +60,8 @@
 -- SCR_USER1 = 6 is retired.
 
 local K = {
+  -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
+  VERSION = "v2611d",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -149,6 +157,7 @@ local PARAM_SPEC = {
   { 41, "I4", 0 },
   { 42, "FF4", 0 },
   { 43, "GCS_HZ", 4 },
+  { 44, "PREF", 0.5 },
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
@@ -226,6 +235,7 @@ local function reset_esc(i)
     integrator = 0,
     last_error = 0,
     ref_rpm = 0,
+    ref_f = 0,
     target_rpm = 0,
     saturated = false,
   }
@@ -338,6 +348,7 @@ local M = {
     acc = 0,
     lmask = 0,
     gcs_hz = 0,
+    pref = 0,
   },
   scratch = {
     sum = { 0, 0 },
@@ -475,8 +486,8 @@ local function ensure_params()
   local wt_rpm = g("WT_RPM")
   local plateau = wt_rpm >= 60 and wt_rpm or K.TUNE_HI_RPM
   gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
-    "ESC: ready CAN=%.0f MODE=%.0f CUR=%.1f WT_RELAY=%.0f plateau=%.0f (WT_RPM=%.0f)",
-    g("CAN"), g("MODE"), g("CUR"), g("WT_RELAY"), plateau, wt_rpm))
+    "ESC: ready %s CAN=%.0f MODE=%.0f CUR=%.1f WT_RELAY=%.0f plateau=%.0f (WT_RPM=%.0f)",
+    K.VERSION, g("CAN"), g("MODE"), g("CUR"), g("WT_RELAY"), plateau, wt_rpm))
   local vm = param:get("SCR_VM_I_COUNT") or 0
   if vm < 50000 then
     gcs:send_text(MAV_SEVERITY.WARNING, string.format("ESC: set SCR_VM_I_COUNT=100000 (now %.0f) and reboot", vm))
@@ -566,6 +577,7 @@ local function reset_control()
     fb.integrator = 0
     fb.last_error = 0
     fb.ref_rpm = 0
+    fb.ref_f = 0
     fb.target_rpm = 0
     fb.saturated = false
   end
@@ -807,6 +819,40 @@ local function wheel_pi(i, target, dt, k)
   return constrain(ff + kp * err + fb.integrator + derivative, lo, hi)
 end
 
+-- Integral time Ti = Kp / Ki of one wheel, with the shared-gain fallback of wheel_pi
+local function wheel_ti(i, k)
+  local kp = k.kp_w[i + 1]
+  local ki = k.ki_w[i + 1]
+  if kp <= 0 then
+    kp = k.kp
+  end
+  if ki <= 0 then
+    ki = k.ki
+  end
+  if kp <= 0 or ki <= 0 then
+    return 0
+  end
+  return kp / ki
+end
+
+--[[
+Reference prefilter: 1 / (1 + Ti s) on the speed reference cancels the PI zero
+that makes the symmetrical-optimum loop overshoot a step by about 40%.
+Only speeding up is filtered. Slowing down and stopping are passed at once,
+and a change of direction restarts the filter from 0.
+--]]
+local function prefilter(fb, ref, dt, tf)
+  if ref * fb.ref_f < 0 then
+    fb.ref_f = 0
+  end
+  if tf > 0 and math.abs(ref) > math.abs(fb.ref_f) then
+    fb.ref_f = fb.ref_f + (ref - fb.ref_f) * math.min(1, dt / tf)
+  else
+    fb.ref_f = ref
+  end
+  return fb.ref_f
+end
+
 local function read_gains(now)
   local cached = M.gains
   if M.gains_ms ~= 0 and now - M.gains_ms < K.GAINS_MS then
@@ -842,6 +888,7 @@ local function read_gains(now)
   cached.acc = g("ACC")
   cached.lmask = math.floor(g("LMASK"))
   cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
+  cached.pref = constrain(g("PREF"), 0, 2)
   return cached
 end
 
@@ -1317,9 +1364,12 @@ function M.wheel_own_gains(p, common, k, relay)
   end
   if not M.gains_sane(kp, ki, k) then
     kp, ki = nil, nil
-    local a = M.robust_median(M.head(p.amps, p.namp), 1.0, 4)
+    -- Lenient on purpose: the median already drops one bad cycle, and the
+    -- 0.5..2x common-P guard below catches a wrong amplitude
+    local a, aerr, aspread = M.robust_median(M.head(p.amps, p.namp), 2.0, 3)
     if a == nil then
-      return nil, nil, "too few clean cycles"
+      return nil, nil, string.format("no fit: kv %d t %d amp %d%s", p.nkv, p.nts, p.namp,
+        aerr == "spread" and string.format(" spread %.0f%%", (aspread or 0) * 100) or "")
     end
     if relay == nil or a <= relay.hyst_rad then
       return nil, nil, "oscillation too small"
@@ -1979,6 +2029,7 @@ function M.run_control()
         if at_rest then
           fb.integrator = 0
           fb.last_error = 0
+          fb.ref_f = 0
         end
         if at_rest and not hold_disarmed then
           -- Neutral stick with the wheel stopped: zero current, like a PWM
@@ -1988,7 +2039,11 @@ function M.run_control()
           fb.saturated = false
           fb.current_a = 0
         else
-          fb.current_a = wheel_pi(i, fb.ref_rpm, dt, k)
+          local ref = fb.ref_rpm
+          if k.pref > 0 then
+            ref = prefilter(fb, ref, dt, wheel_ti(i, k) * k.pref)
+          end
+          fb.current_a = wheel_pi(i, ref, dt, k)
         end
         if fb.saturated then
           sd.saturated = true
