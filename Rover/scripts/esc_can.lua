@@ -932,6 +932,8 @@ end
 
 -- Fixed 24-slot list: allocated once at its final size, never grown
 K.PLANT_CAP = 24
+-- Relay rises ignored before per-wheel amplitudes are kept (relay skips 3 cycles)
+K.PLANT_SKIP_RISES = 4
 function M.fixed_list()
   return { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 end
@@ -1003,6 +1005,13 @@ function M.new_plant(turn_rpm)
     ts = M.fixed_list(),
     nts = 0,
     turn_rpm = turn_rpm,
+    -- Half peak-to-peak rpm of each relay cycle (rise to rise), for Ku of
+    -- this wheel when the cycle is too fast for the Kv/T fit
+    amps = M.fixed_list(),
+    namp = 0,
+    rises = 0,
+    rmax = -math.huge,
+    rmin = math.huge,
   }
 end
 
@@ -1050,6 +1059,17 @@ end
 
 function M.plant_step(p, rpm, u, dt)
   p.t = p.t + dt
+  if rpm > p.rmax then p.rmax = rpm end
+  if rpm < p.rmin then p.rmin = rpm end
+  if u > 0 and (p.prev_u == nil or p.prev_u <= 0) then
+    p.rises = p.rises + 1
+    -- Skip the first cycles, as the relay does, while the oscillation settles
+    if p.rises > K.PLANT_SKIP_RISES and p.namp < K.PLANT_CAP and p.rmax > p.rmin then
+      p.namp = p.namp + 1
+      p.amps[p.namp] = (p.rmax - p.rmin) / 2
+    end
+    p.rmax, p.rmin = rpm, rpm
+  end
   if p.prev_u ~= nil and u * p.prev_u < 0 then
     p.nswitch = p.nswitch + 1
     if p.nswitch > 2 then
@@ -1275,25 +1295,47 @@ K.OWN_P_MAX_RATIO = 2.0
 P and I of one wheel from its own response to the shared relay current.
 Returns kp, ki, nil on success, or nil, nil, reason to keep the common gains.
 --]]
-function M.wheel_own_gains(p, common, k)
+--[[
+P and I of one wheel from its own response to the shared relay current.
+First choice: its own Kv and T (type II). When the cycle is too fast for that
+fit (Pu near 0.1 s leaves no clean 60 ms window), use this wheel's own
+oscillation amplitude under the same relay: Ku = 4 d / (pi a), with the
+common Pu, as the common fallback does.
+Returns kp, ki, nil, text on success, or nil, nil, reason for the common gains.
+--]]
+function M.wheel_own_gains(p, common, k, relay)
   if p == nil then
     return nil, nil, "no data"
   end
   M.plant_flush(p)
+  local kp, ki, how
   local kv = M.robust_median(M.head(p.kvs, p.nkv), 0.35, 3)
   local lag = M.robust_median(M.head(p.ts, p.nts), 0.35, 3)
-  if kv == nil or lag == nil then
-    return nil, nil, "too few clean cycles"
+  if kv ~= nil and lag ~= nil then
+    kp, ki = M.gains_type2(kv, lag)
+    how = string.format("Kv %.0f T %.3f", kv, lag)
   end
-  local kp, ki = M.gains_type2(kv, lag)
   if not M.gains_sane(kp, ki, k) then
-    return nil, nil, "gains out of range"
+    kp, ki = nil, nil
+    local a = M.robust_median(M.head(p.amps, p.namp), 1.0, 4)
+    if a == nil then
+      return nil, nil, "too few clean cycles"
+    end
+    if relay == nil or a <= relay.hyst_rad then
+      return nil, nil, "oscillation too small"
+    end
+    local ku = 4 * relay.relay / (math.pi * a)
+    kp, ki = M.gains_fallback(ku, common.Pu)
+    how = string.format("a %.0frpm Ku %.3f", a, ku)
+    if not M.gains_sane(kp, ki, k) then
+      return nil, nil, "gains out of range"
+    end
   end
   local ratio = kp / common.P
   if ratio < K.OWN_P_MIN_RATIO or ratio > K.OWN_P_MAX_RATIO then
     return nil, nil, string.format("P %.0f%% of common", ratio * 100)
   end
-  return kp, ki, nil, kv, lag
+  return kp, ki, nil, how
 end
 
 function M.tune_finish()
@@ -1358,10 +1400,10 @@ function M.finish_synced_relay(k)
         tune_fail(string.format("ESC %d rpm too low for FF", w))
         return false
       end
-      local kp, ki, why, kv, lag = M.wheel_own_gains(tune.plants and tune.plants[w], g, k)
+      local kp, ki, why, how = M.wheel_own_gains(tune.plants and tune.plants[w], g, k, tune.relay)
       if kp ~= nil then
-        tune_message(MAV_SEVERITY.INFO, string.format("%s ESC%d own Kv %.0f T %.3f P %.4f I %.4f",
-          dir_name, w, kv, lag, kp, ki))
+        tune_message(MAV_SEVERITY.INFO, string.format("%s ESC%d %s P %.4f I %.4f",
+          dir_name, w, how, kp, ki))
       else
         kp, ki = g.P, g.I
         tune_message(MAV_SEVERITY.INFO, string.format("%s ESC%d common gains (%s)", dir_name, w, why))
