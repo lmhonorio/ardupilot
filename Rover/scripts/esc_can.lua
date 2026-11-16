@@ -64,7 +64,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611f",
+  VERSION = "v2611g",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -1059,8 +1059,9 @@ Above 15%, wc shrinks by 25% and the check repeats (3 tries).
 --]]
 K.STEP_S = 0.25          -- longest current step
 K.STEP_MOVE_RPM = 4      -- a wheel this far from its start rpm is moving: fit from here
-K.STEP_MAX_DEV = 0.5     -- end the step early when a wheel is this fraction of the plateau away
+K.STEP_MAX_DEV = 0.5     -- a wheel stops its step once it moved this fraction of the plateau
 K.STEP_MIN_N = 5         -- samples needed for a slope
+K.STEP_NEG_LAG = 0.05    -- a fitted lag down to -50 ms is read as 0 (noise)
 K.RECOVER_S = 0.8
 K.VERIFY_HOLD_S = 1.0
 K.VERIFY_MEAS_S = 1.2
@@ -1119,6 +1120,7 @@ function M.step_begin(sign)
   for w = 1, K.NUM_ESC do
     f.n[w], f.st[w], f.sr[w], f.stt[w], f.str[w] = 0, 0, 0, 0, 0
     f.r0[w] = tune.dir * esc[w].wheel_rpm
+    f.done[w] = false
   end
 end
 
@@ -1128,6 +1130,7 @@ function M.step_close()
   local s = tune.step_sign
   for w = 1, K.NUM_ESC do
     local n = f.n[w]
+    f.dn[w] = n
     if M.on(w) and n >= K.STEP_MIN_N then
       local den = n * f.stt[w] - f.st[w] * f.st[w]
       if den > 0 then
@@ -1135,6 +1138,12 @@ function M.step_close()
         local b = (f.sr[w] - a * f.st[w]) / n
         local kv = s * a / tune.step_i
         local lag = (a ~= 0) and (f.r0[w] - b) / a or -1
+        f.dn[w], f.dkv[w], f.dlag[w] = n, kv, lag
+        -- A light wheel answers almost at once; with rpm noise the line can
+        -- cross the start rpm a little before the step. Read that as no lag.
+        if finite(lag) and lag < 0 and lag > -K.STEP_NEG_LAG then
+          lag = 0
+        end
         if finite(kv) and kv > 0 and finite(lag) and lag >= 0 and lag <= 0.3 then
           f.kv[w] = f.kv[w] + kv
           f.kvn[w] = f.kvn[w] + 1
@@ -1153,7 +1162,8 @@ function M.step_gains(k)
   for w = 1, K.NUM_ESC do
     if M.on(w) then
       if f.kvn[w] == 0 then
-        return false, string.format("ESC %d no step response", w)
+        return false, string.format("ESC %d no step response (n %d kv %.0f lag %.3f)",
+          w, f.dn[w], f.dkv[w], f.dlag[w])
       end
       nl = nl + 1
       lags[nl] = f.lag[w] / f.kvn[w]
@@ -1216,7 +1226,8 @@ function M.tune_start_direction(dir)
   -- Constructors: every list at its final size, no growth during the tune
   tune.fit = { n = { 0, 0, 0, 0 }, st = { 0, 0, 0, 0 }, sr = { 0, 0, 0, 0 }, stt = { 0, 0, 0, 0 },
     str = { 0, 0, 0, 0 }, r0 = { 0, 0, 0, 0 }, kv = { 0, 0, 0, 0 }, kvn = { 0, 0, 0, 0 },
-    lag = { 0, 0, 0, 0 } }
+    lag = { 0, 0, 0, 0 }, dn = { 0, 0, 0, 0 }, dkv = { 0, 0, 0, 0 }, dlag = { 0, 0, 0, 0 },
+    done = { false, false, false, false } }
   tune.tkp = { 0, 0, 0, 0 }
   tune.tki = { 0, 0, 0, 0 }
   tune.tff = { 0, 0, 0, 0 }
@@ -1392,33 +1403,56 @@ function M.wheel_tune(dt, k, armed, enabled)
   elseif tune.state == "step" then
     local s = tune.step_sign
     local f = tune.fit
-    local over = false
+    local all_done = true
     for w = 1, K.NUM_ESC do
       local fb = esc[w]
       if M.on(w) then
-        cur[w] = constrain(tune.base[w] + dir * s * tune.step_i, -k.max_current, k.max_current)
         local r = dir * fb.wheel_rpm
-        if math.abs(r - f.r0[w]) >= K.STEP_MOVE_RPM then
-          local t = tune.t
-          f.n[w] = f.n[w] + 1
-          f.st[w] = f.st[w] + t
-          f.sr[w] = f.sr[w] + r
-          f.stt[w] = f.stt[w] + t * t
-          f.str[w] = f.str[w] + t * r
+        -- Each wheel has its own guard, from the rpm this step started at: a
+        -- light wheel that gets there first goes back to its hold current
+        -- while the heavier ones keep their step (one shared guard ended the
+        -- step for every wheel before the heavy one had moved)
+        if not f.done[w] and math.abs(r - f.r0[w]) > K.STEP_MAX_DEV * hi_rpm then
+          f.done[w] = true
         end
-        if math.abs(r - hi_rpm) > K.STEP_MAX_DEV * hi_rpm then
-          over = true
+        if f.done[w] then
+          cur[w] = constrain(tune.base[w], -k.max_current, k.max_current)
+        else
+          all_done = false
+          cur[w] = constrain(tune.base[w] + dir * s * tune.step_i, -k.max_current, k.max_current)
+          -- Only samples already moving the way the step pushes: right after a
+          -- reversal the wheel still runs on for the lag time
+          if s * (r - f.r0[w]) >= K.STEP_MOVE_RPM then
+            local t = tune.t
+            f.n[w] = f.n[w] + 1
+            f.st[w] = f.st[w] + t
+            f.sr[w] = f.sr[w] + r
+            f.stt[w] = f.stt[w] + t * t
+            f.str[w] = f.str[w] + t * r
+          end
         end
       end
     end
-    if over or tune.t >= K.STEP_S then
+    if all_done or tune.t >= K.STEP_S then
       M.step_close()
       if s > 0 then
         M.step_begin(-1)
       else
+        -- Recover on the plateau: reference already at it and each integrator
+        -- holding the plateau current. Clearing them restarted the reference
+        -- ramp from 0 rpm and braked the rover hard.
         tune.state = "recover"
         tune.t = 0
-        M.clear_wheel_pi()
+        for w = 1, K.NUM_ESC do
+          local fb = esc[w]
+          fb.last_error = 0
+          fb.ref_rpm = target
+          fb.ref_f = target
+          if M.on(w) then
+            local kff = k.kff_w[w] > 0 and k.kff_w[w] or k.kff
+            fb.integrator = constrain(tune.base[w] - kff * target, -k.imax, k.imax)
+          end
+        end
       end
     end
   elseif tune.state == "recover" then
