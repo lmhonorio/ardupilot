@@ -866,11 +866,14 @@ end
 -- for (symmetrical optimum, mid-band ratio h = 7, phase margin about 46°).
 -- Yaw and Circle keep the module default, Tyreus-Luyben.
 -- Methods of M, not locals: Rover 4.5 allows 100 locals in the main chunk.
+--[[
+Heap note: on this board a table that grows (t[#t + 1] = v) is reallocated
+only inside the first part of the script heap, which the loaded code fills.
+Copies are made with {table.unpack(...)}, a single exact-size allocation that
+may come from any part of the heap, and the plant lists are fixed size.
+--]]
 function M.sort_nums(t)
-  local s = {}
-  for i = 1, #t do
-    s[i] = t[i]
-  end
+  local s = { table.unpack(t) }
   for i = 2, #s do
     local v = s[i]
     local j = i - 1
@@ -922,13 +925,20 @@ function M.drop_worst(t)
       worst_i, worst_d = i, d
     end
   end
-  local out = {}
-  for i, v in ipairs(t) do
-    if i ~= worst_i then
-      out[#out + 1] = v
-    end
-  end
+  local out = { table.unpack(t) }
+  table.remove(out, worst_i)
   return out
+end
+
+-- Fixed 24-slot list: allocated once at its final size, never grown
+K.PLANT_CAP = 24
+function M.fixed_list()
+  return { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+end
+
+-- The first n entries of a fixed list, as an exact-size copy
+function M.head(t, n)
+  return { table.unpack(t, 1, n) }
 end
 
 -- nil when there are too few samples or they disagree. min_n keeps a single bump out.
@@ -988,8 +998,10 @@ function M.new_plant(turn_rpm)
     prev_u = nil,
     prev_rpm = nil,
     nswitch = 0,
-    kvs = {},
-    ts = {},
+    kvs = M.fixed_list(),
+    nkv = 0,
+    ts = M.fixed_list(),
+    nts = 0,
     turn_rpm = turn_rpm,
   }
 end
@@ -1005,14 +1017,20 @@ function M.plant_close(p)
     if dur >= 0.03 and rpm1 ~= nil and math.abs(rpm1 - p.ramp_rpm) >= 1 then
       local kv = ((rpm1 - p.ramp_rpm) / dur) / u
       if kv > 0 and kv < 1e6 then
-        p.kvs[#p.kvs + 1] = kv
+        if p.nkv < K.PLANT_CAP then
+          p.nkv = p.nkv + 1
+          p.kvs[p.nkv] = kv
+        end
       end
     end
   end
   if p.turned and p.peak_t ~= nil and p.switch_t ~= nil then
     local lag = p.peak_t - p.switch_t
     if lag >= 0.01 and lag <= 0.8 then
-      p.ts[#p.ts + 1] = lag
+      if p.nts < K.PLANT_CAP then
+        p.nts = p.nts + 1
+        p.ts[p.nts] = lag
+      end
     end
   end
 end
@@ -1086,8 +1104,8 @@ function M.wheel_gains(plant, relay, k)
     return nil, string.format("oscillation too small (%.0f rpm, hyst %.0f)", a, h)
   end
   local ku = 4 * relay.relay / (math.pi * a)
-  local kv = M.robust_median(plant.kvs, 0.35, 3)
-  local lag = M.robust_median(plant.ts, 0.35, 3)
+  local kv = M.robust_median(M.head(plant.kvs, plant.nkv), 0.35, 3)
+  local lag = M.robust_median(M.head(plant.ts, plant.nts), 0.35, 3)
   local kp, ki, how
   if kv ~= nil and lag ~= nil then
     kp, ki = M.gains_type2(kv, lag)
@@ -1262,8 +1280,8 @@ function M.wheel_own_gains(p, common, k)
     return nil, nil, "no data"
   end
   M.plant_flush(p)
-  local kv = M.robust_median(p.kvs, 0.35, 3)
-  local lag = M.robust_median(p.ts, 0.35, 3)
+  local kv = M.robust_median(M.head(p.kvs, p.nkv), 0.35, 3)
+  local lag = M.robust_median(M.head(p.ts, p.nts), 0.35, 3)
   if kv == nil or lag == nil then
     return nil, nil, "too few clean cycles"
   end
@@ -1486,12 +1504,8 @@ function M.wheel_tune(dt, k, armed, enabled)
         tune.relay:start()
         tune.plant = M.new_plant(hyst)
         -- One plant per wheel for the per-wheel P and I
-        tune.plants = {}
-        for w = 1, K.NUM_ESC do
-          if esc[w].detected then
-            tune.plants[w] = M.new_plant(hyst)
-          end
-        end
+        -- Constructor: one exact-size allocation, no growth
+        tune.plants = { M.new_plant(hyst), M.new_plant(hyst), M.new_plant(hyst), M.new_plant(hyst) }
         tune.state = "relay"
         tune.t = 0
       end
