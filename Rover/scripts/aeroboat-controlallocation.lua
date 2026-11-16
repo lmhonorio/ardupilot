@@ -29,6 +29,20 @@ DRIVING_MODES = { MANUAL = 0, STEERING = 3, HOLD = 4, AUTO = 10, GUIDED = 15 }
 -- Variável para armazenar o modo anterior
 local previous_driving_mode = vehicle:get_mode()
 
+-- SERVO1..6_TRIM, read while disarmed instead of six by-name lookups every 200 ms
+local servo_trim = { 0, 0, 0, 0, 0, 0 }
+local function refreshServoTrims(fallback)
+  for n = 1, 6 do
+    servo_trim[n] = tonumber(param:get('SERVO' .. n .. '_TRIM')) or fallback
+  end
+end
+refreshServoTrims(0)
+local system_started_bound = false
+local BATT_LOW_V = 45
+local BATT_WARN_MS = 10000
+local last_batt_warn_ms = -BATT_WARN_MS
+local disarmed_reported = false
+
 --[[
 Control Allocation Function
 It basically calculates the norm of the desired control vector (t,s)
@@ -56,13 +70,13 @@ local function new_control_allocation(t, s)
   local naloc_right = math.floor(nft + nfs)
   local naloc_left = math.floor(nft - nfs)
 
-  -- Getting the trim values for PWM outputs
-  local pwm0_trim_value = tonumber(param:get('SERVO1_TRIM')) or 0
-  local pwm1_trim_value = tonumber(param:get('SERVO2_TRIM')) or 0
-  local pwm2_trim_value = tonumber(param:get('SERVO3_TRIM')) or 0
-  local pwm3_trim_value = tonumber(param:get('SERVO4_TRIM')) or 0
-  local pwm4_trim_value = tonumber(param:get('SERVO5_TRIM')) or 0
-  local pwm5_trim_value = tonumber(param:get('SERVO6_TRIM')) or 0
+  -- Trim values for the PWM outputs (cached, refreshed while disarmed)
+  local pwm0_trim_value = servo_trim[1]
+  local pwm1_trim_value = servo_trim[2]
+  local pwm2_trim_value = servo_trim[3]
+  local pwm3_trim_value = servo_trim[4]
+  local pwm4_trim_value = servo_trim[5]
+  local pwm5_trim_value = servo_trim[6]
 
   -- Setting the PWM outputs based on the control allocation directions
   if naloc_right >= 0 then
@@ -105,10 +119,14 @@ local function update()
     return
   end
 
-  -- Check if the system was already started before running this function
-  if not SYSTEM_STARTED:init('BATT_SOC_SYSSTART') then
-    gcs:send_text(MAV_SEVERITY.CRITICAL, 'BATT_SOC_SYSSTART is not set yet, not running control allocation ...')
-    return update, 1000
+  -- Check if the system was already started before running this function.
+  -- Bind once: init() is a by-name search of the whole parameter tree.
+  if not system_started_bound then
+    if not SYSTEM_STARTED:init('BATT_SOC_SYSSTART') then
+      gcs:send_text(MAV_SEVERITY.CRITICAL, 'BATT_SOC_SYSSTART is not set yet, not running control allocation ...')
+      return update, 1000
+    end
+    system_started_bound = true
   end
 
   -- Check the current mode of the vehicle and update the previous mode
@@ -121,20 +139,27 @@ local function update()
     previous_driving_mode = current_driving_mode
   end
 
-  -- Battery monitoring
+  -- Battery monitoring. Instances are 0 .. n-1; warn at most every 10 s
+  -- (it was sent on every 200 ms cycle and flooded the GCS)
   local num_batts = battery:num_instances()
-  for i=0,num_batts do
-      local voltage = battery:voltage(i)
-      if voltage > 0.1 then
-        if voltage < 45 then
-          gcs:send_text(MAV_SEVERITY.WARNING, string.format("NIVEL DA BATERIA BAIXO, VOLTE PARA A BASE"))
-        end
+  local now_ms = millis():toint()
+  if now_ms - last_batt_warn_ms >= BATT_WARN_MS then
+    for i = 0, num_batts - 1 do
+      local voltage = battery:voltage(i) or 0
+      if voltage > 0.1 and voltage < BATT_LOW_V then
+        last_batt_warn_ms = now_ms
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("NIVEL DA BATERIA BAIXO (%.1f V), VOLTE PARA A BASE", voltage))
+        break
       end
+    end
   end
 
   -- Check if armed to begin control allocation safely
   if not arming:is_armed() then
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("BOAT - disarmed, waiting for arming."))
+    if not disarmed_reported then
+      disarmed_reported = true
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("BOAT - disarmed, waiting for arming."))
+    end
 
     desired_yaw = -1.0
 
@@ -142,22 +167,16 @@ local function update()
     TRIM3 = param:get('RC3_TRIM')
     TRIM1 = param:get('RC1_TRIM')
 
-    -- Send the PWM trim (neutral) values to the servo outputs
-    local pwm0_trim_value = tonumber(param:get('SERVO1_TRIM')) or LOW_TRIM
-    local pwm1_trim_value = tonumber(param:get('SERVO2_TRIM')) or LOW_TRIM
-    local pwm2_trim_value = tonumber(param:get('SERVO3_TRIM')) or LOW_TRIM
-    local pwm3_trim_value = tonumber(param:get('SERVO4_TRIM')) or LOW_TRIM
-    local pwm4_trim_value = tonumber(param:get('SERVO5_TRIM')) or LOW_TRIM
-    local pwm5_trim_value = tonumber(param:get('SERVO6_TRIM')) or LOW_TRIM
-    SRV_Channels:set_output_pwm_chan_timeout(0, pwm0_trim_value, 3000)
-    SRV_Channels:set_output_pwm_chan_timeout(1, pwm1_trim_value, 3000)
-    SRV_Channels:set_output_pwm_chan_timeout(2, pwm2_trim_value, 3000)
-    SRV_Channels:set_output_pwm_chan_timeout(3, pwm3_trim_value, 3000)
-    SRV_Channels:set_output_pwm_chan_timeout(4, pwm4_trim_value, 3000)
-    SRV_Channels:set_output_pwm_chan_timeout(5, pwm5_trim_value, 3000)
+    -- Send the PWM trim (neutral) values to the servo outputs, and refresh
+    -- the cached trims used while armed
+    refreshServoTrims(LOW_TRIM)
+    for n = 1, 6 do
+      SRV_Channels:set_output_pwm_chan_timeout(n - 1, servo_trim[n], 3000)
+    end
 
     return update, 2000
   end
+  disarmed_reported = false
 
   -- Input control variables
   local steering = 0

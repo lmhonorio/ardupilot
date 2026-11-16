@@ -79,8 +79,13 @@ function CircleTune:measure()
   end
   if rc:has_valid_input() then
     self.had_rc_input = true
-    local steer = rc:get_channel(param:get("RCMAP_ROLL"))
-    local throttle = rc:get_channel(param:get("RCMAP_THROTTLE"))
+    -- RCMAP_* only change on reboot: look the channels up once
+    if self.rc_steer == nil then
+      self.rc_steer = rc:get_channel(param:get("RCMAP_ROLL")) or false
+      self.rc_throttle = rc:get_channel(param:get("RCMAP_THROTTLE")) or false
+    end
+    local steer = self.rc_steer
+    local throttle = self.rc_throttle
     if (steer and steer:norm_input_dz() ~= 0) or
        (throttle and throttle:norm_input_dz() ~= 0) then
       return

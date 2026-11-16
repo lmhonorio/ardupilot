@@ -59,6 +59,7 @@ do
   local esc_cmd_l_param = Parameter()
   local esc_cmd_r_param = Parameter()
   local esc_cmd_seq_param = Parameter()
+  local esc_can_param = Parameter()
   local esc_params_bound = false
   local esc_bind_retry_ms = 0
   local esc_cmd_seq = 0
@@ -73,7 +74,8 @@ do
     end
     esc_bind_retry_ms = now + 2000
     esc_params_bound = esc_stat_param:init('ESC_STAT') and esc_cmd_l_param:init('ESC_CMD_L') and
-      esc_cmd_r_param:init('ESC_CMD_R') and esc_cmd_seq_param:init('ESC_CMD_SEQ')
+      esc_cmd_r_param:init('ESC_CMD_R') and esc_cmd_seq_param:init('ESC_CMD_SEQ') and
+      esc_can_param:init('ESC_CAN')
     return esc_params_bound
   end
 
@@ -86,8 +88,14 @@ do
 
   -- Any pulse on MAIN 1..4 drops the C620 out of CAN mode, so with ESC_CAN = 1 the
   -- mixer must not write PWM even before esc_can.lua has published ESC_STAT
+  -- esc_can.lua creates the ESC_ table when it loads, before this script's
+  -- first update. No table means no CAN driver, so PWM is the only path.
+  -- A bound Parameter avoids a by-name lookup of the whole tree every cycle.
   pwm_allowed = function()
-    return (param:get('ESC_CAN') or 0) < 0.5
+    if not bindEscParams() then
+      return true
+    end
+    return (esc_can_param:get() or 0) < 0.5
   end
 
   sendCanCommand = function(norm_l, norm_r)
@@ -115,6 +123,50 @@ local VEHICLE_TYPE = param:get('SCR_USER5')
 local PWM_TRIM_VALUE = 1500
 local RC1_TRIM_VALUE = param:get('RC1_TRIM')
 local RC3_TRIM_VALUE = param:get('RC3_TRIM')
+-- Main-chunk locals are capped at 100 in ArduPilot Lua. State added for the
+-- CAN path and the loop timing lives in this one table.
+local S = {
+  -- Disarmed: poll at 200 ms so arming is picked up quickly (it was 2 s, and
+  -- the first stick command after arming waited up to that long)
+  DISARMED_PERIOD_MS = 200,
+  DISARMED_SYNC_MS = 2000,
+  last_gain_sync_ms = -2000,
+  -- Read every cycle: bound objects instead of by-name lookups
+  tune_select = Parameter(),
+  rc3_reversed = Parameter(),
+  -- Yaw autotune: HOLD hint rate limit and the start-output ramp
+  yaw_hold_hint_ms = -5000,
+  yaw_still_s = 0,
+  yaw_max_relay = 1,
+  yaw_ramp_rate = 0,
+  YAW_RAMP_STILL_S = 1.0, -- time below the ramp turn rate before raising the output
+  YAW_RAMP_STEP = 0.05,   -- raise by 5 % of the output range per step
+  YAW_TUNE_TIMEOUT_S = 60, -- relay measuring time, as in modules/autotune.lua
+}
+assert(S.tune_select:init('SCR_USER1'), 'could not bind SCR_USER1 parameter')
+assert(S.rc3_reversed:init('RC3_REVERSED'), 'could not bind RC3_REVERSED parameter')
+
+-- Stick deadzone for the CAN manual path: RCn_DZ when set, otherwise 20 us
+function S.stickDeadzone(name)
+  local dz = param:get(name) or 0
+  if dz > 0 then
+    return math.min(dz, 200)
+  end
+  return 20
+end
+S.RC1_DZ_US = S.stickDeadzone('RC1_DZ')
+S.RC3_DZ_US = S.stickDeadzone('RC3_DZ')
+
+-- Normalised stick (-1..1 at +/-450 us) with the deadzone removed and the
+-- rest of the travel rescaled, so full stick still gives full command
+function S.stickNorm(pwm, trim, dz_us)
+  local delta = pwm - trim
+  if math.abs(delta) <= dz_us then
+    return 0
+  end
+  delta = (delta > 0) and (delta - dz_us) or (delta + dz_us)
+  return delta / (450 - dz_us)
+end
 -- Signal smoothing logic
 local last_manual_throttle = 0
 local throttle_accel_rate_thresh = 0.5
@@ -161,7 +213,7 @@ local radio_type = 0
 -- Tuning selector parameter (SCR_USER1):
 --   0 = normal operation
 --   1 = Pixhawk PID tune (Rover QuickTune) - starts while armed
---   2 = yaw PI autotune (relay)            - starts while armed
+--   2 = yaw PI autotune (relay)            - starts armed in HOLD
 --   3 = Circle steering-rate PI (relay)    - starts while armed in Circle
 -- Yaw autotune saves SCR_USER2 (P) and SCR_USER3 (I).
 local TUNE_SELECT_PARAM = 'SCR_USER1'
@@ -188,7 +240,7 @@ assert(yaw_max_error_param:init('YAWT_MAX_ANG_ERR'), 'could not bind YAWT_MAX_AN
 --[[
   // @Param: YAWT_MAX_OUT
   // @DisplayName: Yaw autotune maximum motor output
-  // @Description: Steering command applied by the yaw relay as a percentage of the THRO_MAX_LUA output range
+  // @Description: Highest steering command the yaw relay may use, as a percentage of the THRO_MAX_LUA output range. The relay starts at YAWT_MIN_OUT.
   // @Units: %
   // @Range: 1 100
   // @User: Standard
@@ -224,7 +276,7 @@ assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG pa
 --[[
   // @Param: YAWT_MIN_OUT
   // @DisplayName: Yaw autotune minimum motor output
-  // @Description: Minimum allowed relay output as a percentage of the THRO_MAX_LUA output range. Must be at most YAWT_MAX_OUT.
+  // @Description: Relay output the yaw autotune starts with, as a percentage of the THRO_MAX_LUA output range. Before the first relay cycle, while the rover turns slower than needed to finish YAWT_MAX_CYCLE cycles of 4 x YAWT_MAX_ANG in about 36 s (checked over 1 s), the output rises in 5% steps up to YAWT_MAX_OUT, then stays fixed for the measurement. Must be at most YAWT_MAX_OUT.
   // @Units: %
   // @Range: 1 100
   // @User: Standard
@@ -369,7 +421,7 @@ local function getLuaPWMRange()
   return 5 * math.max(0, math.min(100, throttle_max_lua_param:get()))
 end
 
-local function applyControlAllocation(t, s, timeout_ms, tune_mix)
+local function applyControlAllocation(t, s, timeout_ms)
   timeout_ms = timeout_ms or 300
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
@@ -385,14 +437,11 @@ local function applyControlAllocation(t, s, timeout_ms, tune_mix)
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
   if can_selected() then
-    if tune_mix then
-      local left, right = funcs:allocateRightAndLeftPwmShare(t, s, 1)
-      sendCanCommand(left, right)
-      return pwm_l, pwm_r
-    end
     -- Skid-steer sum, same as the PWM servo mix: left = throttle + steering,
     -- right = throttle - steering. Scale both sides together when the sum
     -- passes 1 so a turn while moving does not drop one stick.
+    -- The Circle relay uses this same mix, so the gains it identifies match
+    -- the plant seen in normal CAN driving.
     local left, right = t + s, t - s
     local peak = math.max(1, math.abs(left), math.abs(right))
     sendCanCommand(left / peak, right / peak)
@@ -596,17 +645,19 @@ end
 Perform vehicle control in Manual mode
 --]]
 local function applyPWMManualMode()
-  local rc3_pwm = rc:get_pwm(3)
-  local rc1_pwm = rc:get_pwm(1)
+  -- get_pwm may return nil; treat that as a centred stick, not a script error
+  local rc3_pwm = rc:get_pwm(3) or RC3_TRIM_VALUE
+  local rc1_pwm = rc:get_pwm(1) or RC1_TRIM_VALUE
   local raw_throttle = 0
 
   if can_selected() then
-    -- CAN path is fully reactive: no Lua stick smoothing; ESC_ACC should stay 0
-    local can_throttle = (RC3_TRIM_VALUE - rc3_pwm) / 450
-    if radio_type == 1 then
-      can_throttle = (rc3_pwm - RC3_TRIM_VALUE) / 450
-    end
-    applyControlAllocation(can_throttle, (rc1_pwm - RC1_TRIM_VALUE) / 450)
+    -- CAN path is fully reactive: no Lua stick smoothing. The C620 PWM input
+    -- has its own neutral band; the CAN speed loop does not, so a few us of
+    -- stick jitter around trim became a small rpm command that made the
+    -- wheels creep and shake. Apply the deadzone here.
+    local throttle_sign = (radio_type == 1) and 1 or -1
+    applyControlAllocation(S.stickNorm(rc3_pwm, RC3_TRIM_VALUE, S.RC3_DZ_US) * throttle_sign,
+      S.stickNorm(rc1_pwm, RC1_TRIM_VALUE, S.RC1_DZ_US))
     return
   end
 
@@ -815,19 +866,51 @@ local function runYawAutotune()
       return false
     end
     autotune_target_rad = ahrs:get_yaw()
-    autotune.relay = max_output / 100
+    -- Start at MIN_OUT and step up toward MAX_OUT only while the rover does
+    -- not turn, so the relay uses the smallest output that moves it
+    autotune.relay = min_output / 100
+    S.yaw_max_relay = max_output / 100
+    S.yaw_still_s = 0
     autotune.hyst_rad = hysteresis
     autotune.cycles = max_cycles - autotune.skip_cycles
+    -- Each relay cycle sweeps about 4 x the switching angle. Ask for a turn
+    -- rate that finishes all cycles in 60 % of the measuring time; just
+    -- "moving" can be so slow that the run times out. The ramp's own time is
+    -- added to the timeout so starting low costs no measuring time.
+    S.yaw_ramp_rate = math.max(YAW_RATE_THRESH_RAD_S,
+      4 * hysteresis * max_cycles / (0.6 * S.YAW_TUNE_TIMEOUT_S))
+    autotune.timeout_s = S.YAW_TUNE_TIMEOUT_S +
+      math.ceil((max_output - min_output) / 100 / S.YAW_RAMP_STEP) * S.YAW_RAMP_STILL_S
     autotune:start()
     yaw_tune_last_progress = 0
     yaw_tune_last_log_s = -1
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
-      "YawTune: started; target %.1f deg, max error %.1f deg, max output %.0f%%",
-      math.deg(autotune_target_rad), max_error, autotune.relay * 100))
+      "YawTune: started; target %.1f deg, max error %.1f deg, output %.0f-%.0f%%",
+      math.deg(autotune_target_rad), max_error, min_output, max_output))
     gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: relay switches at +/- %.1f deg", math.deg(hysteresis)))
   end
   local err = funcs:yawErrorRad(ahrs:get_yaw(), autotune_target_rad)
   local yaw_rate = ahrs:get_gyro():z()
+  -- Output ramp: only before the first full relay cycle, so every measured
+  -- cycle (the first two are discarded anyway) runs at one fixed amplitude
+  if autotune.cycle == 0 and autotune.relay < S.yaw_max_relay then
+    if math.abs(yaw_rate) < S.yaw_ramp_rate then
+      S.yaw_still_s = S.yaw_still_s + AUTOTUNE_PERIOD_MS / 1000.0
+    else
+      S.yaw_still_s = 0
+    end
+    if S.yaw_still_s >= S.YAW_RAMP_STILL_S then
+      S.yaw_still_s = 0
+      autotune.relay = math.min(S.yaw_max_relay, autotune.relay + S.YAW_RAMP_STEP)
+      -- The relay holds its last output until the next switch; apply the new
+      -- amplitude now, same direction
+      if autotune.u ~= 0 then
+        autotune.u = (autotune.u > 0) and autotune.relay or -autotune.relay
+      end
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: turn %.0f<%.0f deg/s; output %.0f%%",
+        math.deg(math.abs(yaw_rate)), math.deg(S.yaw_ramp_rate), autotune.relay * 100))
+    end
+  end
   autotune.max_amp_rad = max_error_rad
   local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
   yaw_tune_last_s_out = s_out
@@ -886,7 +969,7 @@ local function update()
   -- steering_steady_pid:setGains(p, i, d)
 
   -- Getting radio type
-  radio_type = param:get('RC3_REVERSED') or 0
+  radio_type = S.rc3_reversed:get() or 0
 
   -- Run not armed routine to guarantee trim values
   if not arming:is_armed() then
@@ -901,14 +984,23 @@ local function update()
     selector_armed_reported = false
     resetYawControlState()
     last_nav_idx = nil
-    autotune:reset()
+    -- reset() allocates new tables; skip it when there is nothing to clear
+    if autotune.status ~= "idle" then
+      autotune:reset()
+    end
     autotune_done = false
     yaw_tune_last_tick_ms = 0
     yaw_tune_last_s_out = 0
     circle_tune:reset("disarmed")
-    syncGainSet()
-    notArmed()
-    return update, 2000
+    -- The gain-set sync does many by-name lookups; keep it at 2 s while the
+    -- loop itself polls fast, so the mixer reacts at once after arming.
+    local now_ms = millis():toint()
+    if now_ms - S.last_gain_sync_ms >= S.DISARMED_SYNC_MS then
+      S.last_gain_sync_ms = now_ms
+      syncGainSet()
+      notArmed()
+    end
+    return update, S.DISARMED_PERIOD_MS
   end
 
   local vehicle_mode = vehicle:get_mode()
@@ -920,10 +1012,10 @@ local function update()
   elseif yaw_target_rad ~= nil and vehicle_mode ~= DRIVING_MODES.STEERING then
     resetYawControlState()
   end
-  local selector = param:get(TUNE_SELECT_PARAM)
+  local selector = S.tune_select:get()
   if not selector_armed_reported then
     if selector == TUNE_MODE.YAW then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: SCR_USER1=2; starting while armed (mode %d)", vehicle_mode))
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: SCR_USER1=2; starts in HOLD (mode %d)", vehicle_mode))
     elseif selector == TUNE_MODE.PIXHAWK then
       gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: SCR_USER1=1; QuickTune enabled while armed (mode %d)", vehicle_mode))
     end
@@ -938,9 +1030,25 @@ local function update()
     yaw_tune_last_tick_ms, yaw_tune_last_s_out = 0, 0
   elseif selector == TUNE_MODE.YAW then
     circle_tune:reset("selector changed")
-    runYawAutotune()
-    if autotune.status == "fail" or autotune_done then applyControlAllocation(0, 0) end
-    return update, modePeriod(AUTOTUNE_PERIOD_MS)
+    -- The relay owns the motors only in HOLD. Any other mode keeps normal
+    -- control, and after a failure or abort the pilot gets the rover back.
+    if autotune.status == "running" and vehicle_mode ~= DRIVING_MODES.HOLD then
+      autotune:reset()
+      autotune_done = true
+      yaw_tune_last_tick_ms, yaw_tune_last_s_out = 0, 0
+      applyControlAllocation(0, 0)
+      gcs:send_text(MAV_SEVERITY.WARNING, "YawTune: aborted (left HOLD); set SCR_USER1 to 0 then 2 to retry")
+    elseif autotune.status == "running" or (not autotune_done and vehicle_mode == DRIVING_MODES.HOLD) then
+      runYawAutotune()
+      if autotune.status == "fail" or autotune_done then applyControlAllocation(0, 0) end
+      return update, modePeriod(AUTOTUNE_PERIOD_MS)
+    elseif not autotune_done then
+      local now_ms = millis():toint()
+      if now_ms - S.yaw_hold_hint_ms >= 5000 then
+        S.yaw_hold_hint_ms = now_ms
+        gcs:send_text(MAV_SEVERITY.INFO, "YawTune: switch to HOLD to start")
+      end
+    end
   end
   if selector ~= TUNE_MODE.CIRCLE then
     circle_tune:reset("selector changed")
@@ -949,7 +1057,7 @@ local function update()
     local native_steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
     local steering, allow_output = circle_tune:update(throttle, native_steering, throttle_max_lua_param:get())
     if allow_output then
-      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60, true)
+      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60)
       if steering then
         circle_tune:log_sample(throttle, steering, pwm_l, pwm_r)
       end

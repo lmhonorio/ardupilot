@@ -158,6 +158,7 @@ local INS_GYRO_FILTER  = bind_param("INS_GYRO_FILTER")
 local GCS_PID_MASK     = bind_param("GCS_PID_MASK")
 local RCMAP_ROLL       = bind_param("RCMAP_ROLL")
 local RCMAP_THROTTLE   = bind_param("RCMAP_THROTTLE")
+local SCR_USER1        = bind_param("SCR_USER1")
 local RCIN_ROLL  = rc:get_channel(RCMAP_ROLL:get())
 local RCIN_THROTTLE = rc:get_channel(RCMAP_THROTTLE:get())
 
@@ -395,10 +396,12 @@ function update_steering_ff(ff_pname)
   local complete_pct = math.min(turn_rate_complete_pct, time_complete_pct)
 
   -- check steering and turn rate and accumulate output and response
-  local steering_ok = steering_out >= STR_RAT_FF_STEERING_MIN
+  -- Magnitudes, so a counter-clockwise Circle (CIRC_DIR = 1, negative
+  -- steering) tunes too; upstream only counted right turns
+  local steering_ok = math.abs(steering_out) >= STR_RAT_FF_STEERING_MIN
   local turnrate_ok = math.abs(turn_rate_rads) > STR_RAT_FF_TURNRATE_MIN
   if (steering_ok and turnrate_ok) then
-    ff_steering_sum = ff_steering_sum + steering_out
+    ff_steering_sum = ff_steering_sum + math.abs(steering_out)
     ff_turn_rate_sum = ff_turn_rate_sum + math.abs(turn_rate_rads)
     ff_turn_rate_count = ff_turn_rate_count + 1
     if (update_user) then
@@ -407,7 +410,7 @@ function update_steering_ff(ff_pname)
   else
     if update_user then
       if not steering_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low steering command (%d%% < %d%%); drive a controlled turn", math.floor(steering_out * 100), math.floor(STR_RAT_FF_STEERING_MIN * 100)))
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low steering command (%d%% < %d%%); drive a controlled turn", math.floor(math.abs(steering_out) * 100), math.floor(STR_RAT_FF_STEERING_MIN * 100)))
       elseif not turnrate_ok then
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low turn rate (%d deg/s < %d); drive a controlled turn", math.floor(math.deg(math.abs(turn_rate_rads))), math.floor(math.deg(STR_RAT_FF_TURNRATE_MIN))))
       end
@@ -532,13 +535,19 @@ get_all_params()
 save_gcs_pid_mask()
 gcs:send_text(MAV_SEVERITY.INFO, string.format(
   "Rover QuickTune loaded; SCR_USER1=%d, RTUN_ENABLE=%d",
-  param:get('SCR_USER1') or -1, RTUN_ENABLE:get()))
+  SCR_USER1:get() or -1, RTUN_ENABLE:get()))
 
 -- main update function
 local last_warning = get_time()
+-- True while QuickTune may be measuring. Idle, the loop drops to 10 Hz: every
+-- script run is followed by a full Lua garbage collection in the scripting
+-- thread, which delays the 5 ms CAN driver loop.
+local quicktune_active = false
+local IDLE_RATE_HZ = 10
 function update()
+  quicktune_active = false
 
-  local selector = param:get('SCR_USER1')
+  local selector = SCR_USER1:get()
   if RTUN_ENABLE:get() <= 0 and selector ~= 3 and selector ~= 4 and selector ~= 5 then
     return
   end
@@ -558,10 +567,11 @@ function update()
     sw_pos = rc:get_aux_cached(RTUN_RC_FUNC:get())
   end
   if not sw_pos then return end
+  quicktune_active = sw_pos ~= 0 and arming:is_armed()
 
   -- QuickTune measures controller response; it does not drive the rover.
   -- In Manual mode, neutral RC sticks produce zero steering/throttle output.
-  if sw_pos == 1 and param:get('SCR_USER1') == 1 and vehicle:get_mode() == 0
+  if sw_pos == 1 and SCR_USER1:get() == 1 and vehicle:get_mode() == 0
       and get_time() > last_warning + 5 then
     gcs:send_text(MAV_SEVERITY.WARNING,
       "RTun: QuickTune measures only; Manual needs RC steering/throttle input")
@@ -611,7 +621,7 @@ function update()
          restore_gcs_pid_mask()
          tune_done_time = nil
          -- back to normal operation once the tune is saved
-         if param:get('SCR_USER1') == 1 then
+         if SCR_USER1:get() == 1 then
            param:set_and_save('SCR_USER1', 0)
            quicktune_started = false
            gcs:send_text(MAV_SEVERITY.NOTICE, "RTun: done, SCR_USER1 set to 0 (normal)")
@@ -676,7 +686,7 @@ function protected_wrapper()
     -- down a bit so we don't flood the console with errors
     return protected_wrapper, 1000
   end
-  return protected_wrapper, 1000/UPDATE_RATE_HZ
+  return protected_wrapper, 1000 / (quicktune_active and UPDATE_RATE_HZ or IDLE_RATE_HZ)
 end
 
 -- start running update loop

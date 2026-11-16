@@ -33,6 +33,9 @@
 --              so the pulse runs at the current limit. 1..100, no extra amp cap.
 -- ESC_WT_RPM   high plateau of USER1=4 and 5, wheel rpm. The low plateau is half.
 --              Values below 60 stay on 120, so an old saved 30 does not take over.
+-- ESC_GCS_HZ   live NAMED_VALUE_FLOAT stream to the GCS, Hz (0 = off, max 20):
+--              ESCn_I measured current A, ESCn_ICMD commanded current A,
+--              ESCn_RPM wheel rpm, ESC_TGT_L / ESC_TGT_R side target rpm.
 --
 -- Both wheels of a side share the side command as their speed target. Each closes
 -- its own PI on its own encoder, so a slipping wheel cannot satisfy the loop of
@@ -60,7 +63,8 @@ local K = {
   -- Gains do not move at the control rate. Re-read them on this period.
   GAINS_MS = 50,
   PREARM_MS = 100,
-  MAX_FRAMES = 12,
+  -- Read cap per cycle: the 25-frame buffer plus what arrives while reading.
+  MAX_FRAMES = 40,
   CMD_STALE_MS = 500,
   SAT_HOLD_MS = 100,
   SLIP_MS = 100,
@@ -135,6 +139,7 @@ local PARAM_SPEC = {
   { 40, "P4", 0 },
   { 41, "I4", 0 },
   { 42, "FF4", 0 },
+  { 43, "GCS_HZ", 4 },
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
@@ -298,6 +303,8 @@ local M = {
   gains_ms = 0,
   tx = nil,
   telem = nil,
+  latest = {},
+  gcs_ms = 0,
   c620_seen = false,
   c620_ms = 0,
   prearm_ms = 0,
@@ -321,6 +328,7 @@ local M = {
     slip = 0,
     acc = 0,
     lmask = 0,
+    gcs_hz = 0,
   },
   scratch = {
     sum = { 0, 0 },
@@ -484,20 +492,21 @@ local function selector()
   return scr_user1:get() or 0
 end
 
-local function healthy(idx)
+local function healthy(idx, now)
   local fb = esc[idx + 1]
   if not fb.detected or fb.last_ms == nil then
     return false
   end
-  return now_ms() - fb.last_ms < K.FEEDBACK_TIMEOUT_MS
+  return (now or now_ms()) - fb.last_ms < K.FEEDBACK_TIMEOUT_MS
 end
 
 local function all_healthy()
   local saw = false
+  local now = now_ms()
   for i = 0, K.MAX_FB - 1 do
     if is_throttle(i) or esc[i + 1].detected then
       saw = true
-      if not healthy(i) then
+      if not healthy(i, now) then
         return false
       end
     end
@@ -583,39 +592,20 @@ local function apply_switch()
   end
 end
 
-local function accept_frame(frame)
-  if frame:isExtended() or frame:isRemoteTransmissionRequest() or frame:isErrorFrame() or frame:dlc() ~= 8 then
-    return
-  end
-  local id = as_number(frame:id())
-  if id == nil then
-    return
-  end
-  id = math.floor(id) & 0x7FF
-  if id <= K.FB_BASE or id > K.FB_BASE + K.MAX_FB then
-    diag.other = diag.other + 1
-    diag.other_id = id
-    return
-  end
-  diag.n[id - K.FB_BASE] = diag.n[id - K.FB_BASE] + 1
-  local idx = id - K.FB_BASE - 1
+-- frame is the newest valid feedback of ESC idx + 1 seen this cycle
+local function accept_frame(frame, idx, now)
   local fb = esc[idx + 1]
-  local angle = (((frame:data(0) & 0xFF) << 8) | (frame:data(1) & 0xFF)) % K.COUNTS_PER_REV
-  if fb.have_angle then
-    local delta = angle - fb.angle
-    if delta > K.COUNTS_PER_REV / 2 then
-      delta = delta - K.COUNTS_PER_REV
-    elseif delta < -K.COUNTS_PER_REV / 2 then
-      delta = delta + K.COUNTS_PER_REV
-    end
-    fb.rotor_counts = fb.rotor_counts + delta
-  end
-  fb.angle = angle
+  fb.angle = (((frame:data(0) & 0xFF) << 8) | (frame:data(1) & 0xFF)) % K.COUNTS_PER_REV
   fb.have_angle = true
   fb.rotor_rpm = be_i16(frame:data(2), frame:data(3))
+  -- Frames are skipped, so the angle may wrap several times between two of
+  -- them. Integrate the reported speed instead (used only by the DJIC log).
+  if fb.last_ms ~= nil then
+    fb.rotor_counts = fb.rotor_counts + fb.rotor_rpm * (now - fb.last_ms) * (K.COUNTS_PER_REV / 60000)
+  end
   fb.current_raw = be_i16(frame:data(4), frame:data(5))
   fb.temperature = frame:data(6) & 0xFF
-  fb.last_ms = now_ms()
+  fb.last_ms = now
   if not fb.detected then
     fb.detected = true
     gcs:send_text(MAV_SEVERITY.INFO, string.format("ESC: found ESC %d (%s)", idx + 1,
@@ -623,15 +613,41 @@ local function accept_frame(frame)
   end
 end
 
+--[[
+Four C620s send about 4000 frames/s into a 25-frame buffer that drops the
+newest frame when full. Reading only part of it left the oldest frames for
+the next cycle, so the speed loop ran on feedback one cycle or more old.
+Empty the buffer and decode only the newest frame of each ESC: the loop sees
+current data and the VM does not parse frames it would throw away.
+--]]
 local function drain()
-  -- Four C620s send about 4000 frames/s. Reading until the buffer stays
-  -- empty never returns and the scripting VM reports exceeded time.
+  local latest = M.latest
+  for i = 1, K.MAX_FB do
+    latest[i] = nil
+  end
   for _ = 1, K.MAX_FRAMES do
     local frame = driver:read_frame()
     if not frame then
-      return
+      break
     end
-    accept_frame(frame)
+    -- No 0x7FF mask: an extended ID (29 bit) stays out of 1..8 instead of
+    -- overwriting this cycle's C620 frame with the same low bits
+    local n = frame:id_signed() - K.FB_BASE
+    if n >= 1 and n <= K.MAX_FB then
+      latest[n] = frame
+      diag.n[n] = diag.n[n] + 1
+    else
+      diag.other = diag.other + 1
+      diag.other_id = n + K.FB_BASE
+    end
+  end
+  local now = now_ms()
+  for n = 1, K.MAX_FB do
+    local frame = latest[n]
+    if frame ~= nil and not frame:isExtended() and not frame:isRemoteTransmissionRequest() and
+        not frame:isErrorFrame() and frame:dlc() == 8 then
+      accept_frame(frame, n - 1, now)
+    end
   end
 end
 
@@ -797,6 +813,7 @@ local function read_gains(now)
   cached.slip = math.max(g("SLIP"), 0)
   cached.acc = g("ACC")
   cached.lmask = math.floor(g("LMASK"))
+  cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
   return cached
 end
 
@@ -1865,12 +1882,22 @@ function M.run_control()
         local s = side_of(i)
         local sd = side[s]
         profile_wheel(i, goals[s], dt)
-        if math.abs(sd.interp_value) < 0.01 and math.abs(fb.ref_rpm) < K.MOVING_RPM
-            and math.abs(fb.wheel_rpm) < K.MOVING_RPM then
+        local at_rest = math.abs(sd.interp_value) < 0.01 and math.abs(fb.ref_rpm) < K.MOVING_RPM
+            and math.abs(fb.wheel_rpm) < K.MOVING_RPM
+        if at_rest then
           fb.integrator = 0
           fb.last_error = 0
         end
-        fb.current_a = wheel_pi(i, fb.ref_rpm, dt, k)
+        if at_rest and not hold_disarmed then
+          -- Neutral stick with the wheel stopped: zero current, like a PWM
+          -- neutral pulse. A speed loop held at 0 rpm through the gearbox
+          -- backlash and the rpm noise makes the motor buzz and shake.
+          fb.target_rpm = 0
+          fb.saturated = false
+          fb.current_a = 0
+        else
+          fb.current_a = wheel_pi(i, fb.ref_rpm, dt, k)
+        end
         if fb.saturated then
           sd.saturated = true
         end
@@ -1939,7 +1966,9 @@ function M.check_health()
     last_lost_warn = now
     for i = 0, K.MAX_FB - 1 do
       if (lost & (1 << i)) ~= 0 then
-        gcs:send_text(MAV_SEVERITY.CRITICAL, string.format("ESC: ESC %d lost, all motors stopped", i + 1))
+        local fb = esc[i + 1]
+        gcs:send_text(MAV_SEVERITY.CRITICAL, string.format("ESC: ESC %d lost %.0fms (%.1fA %dC), motors stopped",
+          i + 1, now - (fb.last_ms or now), math.abs(fb.current_raw) / K.RAW_PER_AMP, fb.temperature))
       end
     end
   end
@@ -2056,8 +2085,32 @@ function M.push_telem()
       data:motor_temp_cdeg(math.floor(constrain(fb.temperature, 0, 200) * 100))
       data:current(math.abs(fb.current_raw) / K.RAW_PER_AMP)
       esc_telem:update_telem_data(i, data, K.TELEM_MOTOR_TEMP | K.TELEM_CURRENT)
+      esc_telem:update_rpm(i, math.abs(fb.rotor_rpm), 0)
     end
   end
+end
+
+-- Live per-motor values for the GCS (Mission Planner: Quick tab or Tuning graph)
+function M.send_gcs()
+  local hz = M.gains.gcs_hz
+  if hz <= 0 or not latched_can then
+    return
+  end
+  local now = now_ms()
+  if now - M.gcs_ms < 1000 / hz then
+    return
+  end
+  M.gcs_ms = now
+  for i = 1, K.NUM_ESC do
+    local fb = esc[i]
+    if fb.detected then
+      gcs:send_named_float(string.format("ESC%d_I", i), direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
+      gcs:send_named_float(string.format("ESC%d_ICMD", i), fb.current_a)
+      gcs:send_named_float(string.format("ESC%d_RPM", i), fb.wheel_rpm)
+    end
+  end
+  gcs:send_named_float("ESC_TGT_L", side[1].target_rpm or 0)
+  gcs:send_named_float("ESC_TGT_R", side[2].target_rpm or 0)
 end
 
 function M.send_telem()
@@ -2144,6 +2197,9 @@ local function update()
       M.publish_stat()
       return update, 1000
     end
+    -- Keep only 0x200..0x20F (C620 feedback) in the script buffer so other
+    -- traffic on the bus cannot push ESC frames out of it.
+    driver:add_filter(0x7F0, 0x200)
     if not announced_driver then
       announced_driver = true
       gcs:send_text(MAV_SEVERITY.INFO, "ESC: Lua CAN driver ready")
@@ -2167,15 +2223,14 @@ local function update()
       gcs:send_text(MAV_SEVERITY.ERROR, "ESC: ESC_LMASK must put ESCs on both sides")
     end
   end
-  -- Same cadence as the CAN build where the C620 stayed on the bus:
-  -- zero MAIN 1..4 before RX and again after the current command, every 5 ms.
+  -- Zero MAIN 1..4 every cycle. The override lasts 3 s, so a second call in
+  -- the same cycle only cost VM time.
   if latched_can then
     kill_pwm()
   end
   drain()
   M.run_control()
   if latched_can then
-    kill_pwm()
     M.check_health()
   end
   M.warn_selector_without_can()
@@ -2190,7 +2245,55 @@ local function update()
   else
     M.write_log()
   end
+  M.send_gcs()
   return update, K.LOOP_MS
 end
 
-return update, 2000
+--[[
+A runtime error must not end the script: once it stops, the kill_pwm override
+expires after 3 s and Rover's own servo output reaches the C620 PWM inputs.
+After the first fault the driver latches a safe stop until reboot: zero
+current on the bus, MAIN 1..4 held at width 0 and arming refused.
+--]]
+M.fault = nil
+M.fault_warn_ms = 0
+
+function M.safe_stop()
+  if latched_can then
+    kill_pwm()
+    if driver ~= nil then
+      local zeros = M.zero_currents()
+      send_group(0x200, zeros, 1)
+      for i = 5, K.MAX_FB do
+        if esc[i].detected then
+          send_group(0x1FF, zeros, 5)
+          break
+        end
+      end
+    end
+  end
+  if auth_id ~= nil then
+    arming:set_aux_auth_failed(auth_id, "ESC script fault; reboot")
+  end
+end
+
+local function protected_update()
+  if M.fault == nil then
+    local ok, result, delay = pcall(update)
+    if ok then
+      return protected_update, delay
+    end
+    M.fault = tostring(result)
+    M.fault_warn_ms = 0
+  end
+  pcall(M.safe_stop)
+  local now = now_ms()
+  if now - M.fault_warn_ms >= 5000 then
+    M.fault_warn_ms = now
+    gcs:send_text(MAV_SEVERITY.CRITICAL, "ESC: fault, motors stopped; reboot")
+    gcs:send_text(MAV_SEVERITY.CRITICAL, "ESC: " .. string.sub(M.fault, 1, 40))
+  end
+  return protected_update, 100
+end
+
+return protected_update, 2000
