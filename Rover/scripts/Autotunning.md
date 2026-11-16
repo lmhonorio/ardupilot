@@ -27,7 +27,7 @@ As duas rodas de um lado recebem a **mesma meta** (o comando daquele lado). O qu
 |---|---|---|---|
 | Velocidade de cada roda | `esc_can.lua` | ~10 ms | `ESC_Pn` / `ESC_In` / `ESC_FFn` |
 | Taxa de giro / velocidade | ArduRover | ~50 Hz | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
-| Alinhamento de yaw (pós-WP) | `rover-controlallocation.lua` | 200 ms | CAN: `CANT_YAW_P/I` · PWM: `SCR_USER2/3` · × `YAWT_GAIN_MULT` |
+| Alinhamento de yaw (pós-WP) | `rover-controlallocation.lua` | 200 ms | CAN e PWM: `SCR_USER2/3` · × `YAWT_GAIN_MULT` |
 
 O rover é **diferencial 4WD**: as 2 rodas do mesmo lado devem ter o **mesmo RPM alvo**. `ESC_LMASK` define quem é esquerda; `ESC_REV` inverte sentido por motor.
 
@@ -132,11 +132,11 @@ Se o seu chassi for outro, ignore esses números e faça o passo 3 do zero.
 
 | Parâmetro | Inicial | Nota |
 |---|---|---|
-| `YAWT_MAX_ANG` | 45 | aborta yaw se erro > isso (°) |
-| `YAWT_MAX_OUT` | 20 | amplitude do relé de yaw em **PWM** (%) |
+| `YAWT_MAX_ANG` | 45 | ângulo de comutação do relé (°) |
+| `YAWT_MAX_ANG_ERR` | 90 | limite de erro de yaw para abortar (°) |
+| `YAWT_MAX_CYCLE` | 6 | total de ciclos, incluindo dois transitórios |
+| `YAWT_MAX_OUT` | 100 | amplitude do relé de yaw em PWM e CAN (%) |
 | `YAWT_GAIN_MULT` | 1 | multiplica P/I de yaw em uso |
-| `CANT_YAW_OUT` | **10** | amplitude do relé de yaw em **CAN** (%) |
-| `CANT_YAW_P` / `CANT_YAW_I` | 0 | gravados pelo tuning 2 em CAN |
 | `RTUN_ENABLE` | 1 | QuickTune ligado |
 | `RTUN_AXES` | 3 | 1=direção, 2=velocidade, 3=ambos |
 | `RTUN_AUTO_SAVE` | 5 | segundos para gravar ao terminar |
@@ -153,7 +153,7 @@ Se o seu chassi for outro, ignore esses números e faça o passo 3 do zero.
 |---:|---|---|---|---|
 | **0** | operação normal | — | — | — |
 | **1** | QuickTune | chão | CIRCLE recomendado | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
-| **2** | relé de yaw | chão, área livre | HOLD recomendado | PWM: `SCR_USER2/3` · CAN: `CANT_YAW_P/I` |
+| **2** | relé de yaw | chão, área livre | HOLD recomendado | `SCR_USER2/3` em CAN e PWM |
 | **3** | relé Circle | chão | **CIRCLE** | `ATC_STR_RAT_P/I` |
 | **4** | relé sincronizado, um PI para todas as rodas | chão, alguns metros livres | **HOLD** | `ESC_P1..4` e `ESC_I1..4` iguais, `ESC_FF1..4` por roda, média em `ESC_P/I/FF` |
 | **5** | relé de uma roda por vez | **rodas no ar** | **HOLD** | os mesmos ganhos, medidos em cada motor |
@@ -202,7 +202,7 @@ A. Roda no ar (opcional)   SCR_USER1 = 5   HOLD no ar       → PI de cada motor
 B. Roda no chão            SCR_USER1 = 4   HOLD no chão     → substitui A pelos ganhos com o rover carregado
 D. QuickTune               SCR_USER1 = 1   CIRCLE           → ATC_* / CRUISE_*
 E. Circle relay            SCR_USER1 = 3   CIRCLE           → ATC_STR_RAT_P/I
-F. Yaw relay               SCR_USER1 = 2   HOLD (gira)      → CANT_YAW_P/I  (ou SCR_USER2/3)
+F. Yaw relay               SCR_USER1 = 2   HOLD (gira)      → SCR_USER2/3
 ```
 
 `SCR_USER1=6` não sintoniza mais nada. O antigo laço local (`ESC_LOC_*`, `ESC_FR*`) saiu do controle.
@@ -391,10 +391,10 @@ Abortar: mudar seletor, sair de CIRCLE ou desarmar. Abort durante a espera de sa
 
 ### Teoria
 
-Relé ±d no steering com histerese de 2° no erro de yaw. Descarta 2 ciclos, mede 4, Tyreus–Luyben:
+Relé ±d no steering com comutação em `YAWT_MAX_ANG`. Descarta os dois primeiros ciclos e usa os demais até `YAWT_MAX_CYCLE`. Com o padrão de seis ciclos, quatro entram no cálculo de Tyreus–Luyben:
 
 ```text
-ε = 2°
+ε = YAWT_MAX_ANG convertido para radianos
 Ku = 4·d / (π·√(A² − ε²))
 Kp = Ku / 3,2
 Ti = 2,2·Pu
@@ -405,20 +405,19 @@ Depois valida headings 0° / 90° / 180° / 270° / 360° e entra em HOLD.
 
 | Caminho | Amplitude do relé | Ganhos gravados |
 |---|---|---|
-| CAN (`ESC_CAN=1`) | `CANT_YAW_OUT` (padrão 10%) | `CANT_YAW_P`, `CANT_YAW_I` |
-| PWM (`ESC_CAN=0`) | `YAWT_MAX_OUT` (padrão 20%) | `SCR_USER2`, `SCR_USER3` |
+| CAN e PWM | `YAWT_MAX_OUT` (padrão 100%) | `SCR_USER2`, `SCR_USER3` |
 
 Em ambos, o uso operacional multiplica por `YAWT_GAIN_MULT`.
 
 ### Execução
 
-1. CAN: confira `CANT_YAW_OUT=10`. PWM: `YAWT_MAX_OUT=20`.
+1. Confira `YAWT_MAX_OUT` e mantenha `YAWT_MAX_ANG` abaixo de `YAWT_MAX_ANG_ERR`.
 2. HOLD, arme, sticks centrados.
 3. `SCR_USER1=2`.
 4. Mensagens `YawTune:` (Ku, Pu, headings…).
 5. Sucesso → `SCR_USER1=0`, HOLD.
 
-Abortar: `SCR_USER1=0` ou desarmar. Se “oscillation too large”: baixe `CANT_YAW_OUT` (ex. 8) ou suba `YAWT_MAX_ANG`.
+Abortar: `SCR_USER1=0` ou desarmar. Se “oscillation too large”: reduza `YAWT_MAX_OUT` ou revise `YAWT_MAX_ANG_ERR`.
 
 ### Uso em missão (AUTO)
 
@@ -445,7 +444,7 @@ Esses ganhos **não** substituem `ATC_STR_RAT_*` da navegação normal.
 | `ESC_MODE` | **0** |
 | `ESC_SLIP` | **60** |
 
-Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_*` / `CANT_P_*`) e escolhe `CANT_YAW_*` ou `SCR_USER2/3`.
+Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_*` / `CANT_P_*`). O alinhamento usa `SCR_USER2/3` nos dois caminhos.
 
 ### Checklist pré-missão AUTO
 
@@ -486,7 +485,7 @@ Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_
 [ ] SCR_USER1=6 não é mais ensaio
 [ ] D  SCR_USER1=1  CIRCLE                → ATC_* / CRUISE
 [ ] E  SCR_USER1=3  CIRCLE                → ATC_STR_RAT_P/I
-[ ] F  SCR_USER1=2  HOLD (gira no lugar)  → CANT_YAW_P/I
+[ ] F  SCR_USER1=2  HOLD (gira no lugar)  → SCR_USER2/3
 [ ] SCR_USER1=0; ESC_SLIP=60
 [ ] Validar MANUAL e depois missão AUTO curta
 ```
@@ -509,7 +508,7 @@ Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_
 | Acelerador e esterço “trocados” | `ESC_REV` (§4) |
 | Vira para o lado errado | `ESC_LMASK` (6 ↔ 9) |
 | QuickTune “throttle/speed low” | `CIRC_SPEED` / raio / `ESC_RPM` |
-| Yaw “oscillation too large” | baixe `CANT_YAW_OUT` ou suba `YAWT_MAX_ANG` |
+| Yaw “oscillation too large” | reduza `YAWT_MAX_OUT` ou revise `YAWT_MAX_ANG_ERR` |
 | Circle relay cancela por saturação | baixe `CIRC_SPEED` / `CTUN_RELAY` ou suba `ESC_CUR` |
 | YawAlign erro cresce | polaridade / LMASK / REV antes de mexer em P/I |
 | Troca CAN↔PWM estranha nos ATC | desarme; deixe o mixer sincronizar `CANT_ACTIVE` |
@@ -522,10 +521,9 @@ Trocar CAN ↔ PWM: **só desarmado**. O mixer guarda/restaura `ATC_*` (`CANT_C_
 |---|---|
 | `SCR_USER1` | 0 normal; 1 QuickTune; 2 yaw; 3 Circle; 4 relé no chão; 5 relé no ar; 6 retirado |
 | `SCR_USER2/3` | P/I yaw no caminho **PWM** |
-| `CANT_YAW_P/I` | P/I yaw no caminho **CAN** |
-| `CANT_YAW_OUT` | amplitude do relé yaw em CAN (%) |
-| `YAWT_MAX_ANG` | aborta se \|erro\| > isso |
-| `YAWT_MAX_OUT` | amplitude do relé yaw em PWM (%) |
+| `YAWT_MAX_ANG` | Ângulo de comutação |
+| `YAWT_MAX_ANG_ERR` | Limite de erro para abortar |
+| `YAWT_MAX_OUT` | amplitude do relé yaw em PWM e CAN (%) |
 | `YAWT_GAIN_MULT` | multiplica P/I em alinhamentos (0,1–10000) |
 
 ---

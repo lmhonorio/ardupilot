@@ -34,7 +34,6 @@ local DEFAULTS = {
   max_period_s = 20,
   min_amp_ratio = 1,          -- minimum response amplitude relative to hysteresis
   max_spread = 0.25,          -- max relative deviation of Pu/amp between cycles
-  min_switch_s = 0,           -- ignore a new switch this soon after the last one (0 = off)
   kp_div = 3.2,               -- Tyreus-Luyben: Kp = Ku / 3.2
   ti_mul = 2.2,               -- Tyreus-Luyben: Ti = 2.2 * Pu
 }
@@ -53,13 +52,12 @@ function Autotune:reset()
   self.t = 0
   self.u = 0
   self.last_rise_t = nil
-  self.last_switch_t = nil
   self.e_max = -math.huge
   self.e_min = math.huge
   self.cycle = 0
+  self.last_period, self.last_amp = nil, nil
   self.periods = {}
   self.amps = {}
-  self.last_period = nil
   self.status = "idle"
   self.res = nil
 end
@@ -138,29 +136,20 @@ function Autotune:step(err, dt)
     new_u = self.relay
   end
 
-  -- Blank a second crossing caused by rpm noise. The wheel relay sets this;
-  -- yaw leaves it at 0.
-  if new_u ~= self.u and self.min_switch_s > 0 and self.last_switch_t ~= nil
-      and (self.t - self.last_switch_t) < self.min_switch_s then
-    new_u = self.u
-  end
-
   -- One full period is measured between consecutive switches to +d
   if new_u > 0 and self.u <= 0 then
     if self.last_rise_t ~= nil then
-      self.last_period = self.t - self.last_rise_t
       self.cycle = self.cycle + 1
+      self.last_period = self.t - self.last_rise_t
+      self.last_amp = (self.e_max - self.e_min) / 2
       if self.cycle > self.skip_cycles then
         table.insert(self.periods, self.last_period)
-        table.insert(self.amps, (self.e_max - self.e_min) / 2)
+        table.insert(self.amps, self.last_amp)
       end
     end
     self.last_rise_t = self.t
     self.e_max = -math.huge
     self.e_min = math.huge
-  end
-  if new_u ~= self.u then
-    self.last_switch_t = self.t
   end
   self.u = new_u
 

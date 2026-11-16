@@ -9,7 +9,7 @@
 --| '8' # Walking_Height
 --@return number|nil
 -- External modules
-package.path = package.path .. ';/scripts/modules/?.lua'
+package.path = package.path .. ';./scripts/?.lua;./scripts/modules/?.lua;/scripts/modules/?.lua'
 local PID = require("pid")
 local funcs = require("functions")
 local Autotune = require("autotune")
@@ -22,7 +22,7 @@ local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local CONTROL_OUTPUT_YAW = 4
 local THROTTLE_PARAM_TABLE_KEY = 17
 local THROTTLE_PARAM_TABLE_PREFIX = 'THRO_'
-assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1), 'could not add Lua throttle parameter table')
+assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 2), 'could not add Lua throttle parameter table')
 --[[
   // @Param: THRO_MAX_LUA
   // @DisplayName: Lua maximum motor output
@@ -35,112 +35,80 @@ assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 1)
 assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 1, 'MAX_LUA', 90), 'could not add THRO_MAX_LUA parameter')
 local throttle_max_lua_param = Parameter()
 assert(throttle_max_lua_param:init('THRO_MAX_LUA'), 'could not bind THRO_MAX_LUA parameter')
-
+--[[
+  // @Param: THRO_MIN_LUA
+  // @DisplayName: Lua minimum motor PWM
+  // @Description: Minimum PWM above neutral to start a commanded yaw alignment from rest. Mirrored below neutral. 1500 disables it.
+  // @Units: us
+  // @Range: 1500 2000
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 2, 'MIN_LUA', 1500), 'could not add Lua minimum motor PWM parameter')
+local throttle_min_lua_param = Parameter()
+assert(throttle_min_lua_param:init('THRO_MIN_LUA'), 'could not bind THRO_MIN_LUA parameter')
 -- CAN path (esc_can.lua). Lua scripts do not share globals, so the mixer and the
 -- driver talk through RAM-only ESC_* parameters. Everything CAN-specific in this
 -- file is behind can_selected(); with ESC_CAN = 0 the PWM path is unchanged.
-local ESC_STAT_CAN = 1
--- Match esc_can reactivity: publish L/R as fast as scripting allows on the CAN path.
-local CAN_MIXER_PERIOD_MS = 20
-local esc_stat_param = Parameter()
-local esc_cmd_l_param = Parameter()
-local esc_cmd_r_param = Parameter()
-local esc_cmd_seq_param = Parameter()
-local esc_params_bound = false
-local esc_bind_retry_ms = 0
-local esc_cmd_seq = 0
+local can_selected, pwm_allowed, sendCanCommand, modePeriod
+do
+  local ESC_STAT_CAN = 1
+  -- Match esc_can reactivity: publish L/R as fast as scripting allows on the CAN path.
+  local CAN_MIXER_PERIOD_MS = 20
+  local esc_stat_param = Parameter()
+  local esc_cmd_l_param = Parameter()
+  local esc_cmd_r_param = Parameter()
+  local esc_cmd_seq_param = Parameter()
+  local esc_params_bound = false
+  local esc_bind_retry_ms = 0
+  local esc_cmd_seq = 0
 
-local function bindEscParams()
-  if esc_params_bound then
-    return true
+  local function bindEscParams()
+    if esc_params_bound then
+      return true
+    end
+    local now = millis():toint()
+    if now < esc_bind_retry_ms then
+      return false
+    end
+    esc_bind_retry_ms = now + 2000
+    esc_params_bound = esc_stat_param:init('ESC_STAT') and esc_cmd_l_param:init('ESC_CMD_L') and
+      esc_cmd_r_param:init('ESC_CMD_R') and esc_cmd_seq_param:init('ESC_CMD_SEQ')
+    return esc_params_bound
   end
-  local now = millis():toint()
-  if now < esc_bind_retry_ms then
-    return false
+
+  can_selected = function()
+    if not bindEscParams() then
+      return false
+    end
+    return (math.floor(esc_stat_param:get() or 0) & ESC_STAT_CAN) ~= 0
   end
-  esc_bind_retry_ms = now + 2000
-  esc_params_bound = esc_stat_param:init('ESC_STAT') and esc_cmd_l_param:init('ESC_CMD_L') and
-    esc_cmd_r_param:init('ESC_CMD_R') and esc_cmd_seq_param:init('ESC_CMD_SEQ')
-  return esc_params_bound
-end
 
-local function can_selected()
-  if not bindEscParams() then
-    return false
+  -- Any pulse on MAIN 1..4 drops the C620 out of CAN mode, so with ESC_CAN = 1 the
+  -- mixer must not write PWM even before esc_can.lua has published ESC_STAT
+  pwm_allowed = function()
+    return (param:get('ESC_CAN') or 0) < 0.5
   end
-  return (math.floor(esc_stat_param:get() or 0) & ESC_STAT_CAN) ~= 0
-end
 
--- Any pulse on MAIN 1..4 drops the C620 out of CAN mode, so with ESC_CAN = 1 the
--- mixer must not write PWM even before esc_can.lua has published ESC_STAT
-local function pwm_allowed()
-  return (param:get('ESC_CAN') or 0) < 0.5
-end
-
-local function sendCanCommand(norm_l, norm_r)
-  esc_cmd_l_param:set(norm_l)
-  esc_cmd_r_param:set(norm_r)
-  esc_cmd_seq = (esc_cmd_seq + 1) % 1000000
-  esc_cmd_seq_param:set(esc_cmd_seq)
-end
-
--- In CAN the mixer runs faster so the driver's interpolation adds little delay
-local function modePeriod(pwm_period_ms)
-  if can_selected() then
-    return math.min(pwm_period_ms, CAN_MIXER_PERIOD_MS)
+  sendCanCommand = function(norm_l, norm_r)
+    esc_cmd_l_param:set(norm_l)
+    esc_cmd_r_param:set(norm_r)
+    esc_cmd_seq = (esc_cmd_seq + 1) % 1000000
+    esc_cmd_seq_param:set(esc_cmd_seq)
   end
-  return pwm_period_ms
+
+  -- In CAN the mixer runs faster so the driver's interpolation adds little delay
+  modePeriod = function(pwm_period_ms)
+    if can_selected() then
+      return math.min(pwm_period_ms, CAN_MIXER_PERIOD_MS)
+    end
+    return pwm_period_ms
+  end
+
 end
 
 -- CAN gain set. ATC_* and CRUISE_THROTTLE hold the set of the active path;
 -- the other path's copy lives here and is swapped in while disarmed.
-local CAN_GAINS_PARAM_TABLE_KEY = 19
-local CAN_GAIN_SWAP = {
-  { 'ATC_STR_RAT_FF', 'STRFF' },
-  { 'ATC_STR_RAT_P', 'STRP' },
-  { 'ATC_STR_RAT_I', 'STRI' },
-  { 'ATC_SPEED_P', 'SPDP' },
-  { 'ATC_SPEED_I', 'SPDI' },
-  { 'CRUISE_THROTTLE', 'CRUISE' },
-}
-assert(param:add_table(CAN_GAINS_PARAM_TABLE_KEY, 'CANT_', 5 + 2 * #CAN_GAIN_SWAP), 'could not add CANT_ parameter table')
---[[
-  // @Param: CANT_YAW_P
-  // @DisplayName: CAN yaw alignment P
-  // @Description: Yaw alignment P used with ESC_CAN = 1 (SCR_USER2 is used with PWM). 0 keeps the default
-  // @User: Standard
-
-  // @Param: CANT_YAW_I
-  // @DisplayName: CAN yaw alignment I
-  // @Description: Yaw alignment I used with ESC_CAN = 1 (SCR_USER3 is used with PWM). 0 keeps the default
-  // @User: Standard
-
-  // @Param: CANT_YAW_OUT
-  // @DisplayName: CAN yaw autotune relay
-  // @Description: Steering relay of the yaw autotune with ESC_CAN = 1 (YAWT_MAX_OUT is used with PWM)
-  // @Units: %
-  // @Range: 5 45
-  // @User: Standard
-
-  // @Param: CANT_ACTIVE
-  // @DisplayName: Gain set loaded in ATC_*
-  // @Description: 0 = PWM set, 1 = CAN set. Managed by the script
-  // @User: Advanced
-
-  // @Param: CANT_C_VALID
-  // @DisplayName: CAN gain set initialised
-  // @Description: 0 until the CAN set has been created from the PWM set. Managed by the script
-  // @User: Advanced
---]]
-assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 1, 'YAW_P', 0), 'could not add CANT_YAW_P parameter')
-assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 2, 'YAW_I', 0), 'could not add CANT_YAW_I parameter')
-assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 3, 'YAW_OUT', 10), 'could not add CANT_YAW_OUT parameter')
-assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 4, 'ACTIVE', 0), 'could not add CANT_ACTIVE parameter')
-assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5, 'C_VALID', 0), 'could not add CANT_C_VALID parameter')
-for n, item in ipairs(CAN_GAIN_SWAP) do
-  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + n, 'C_' .. item[2], 0), 'could not add CANT_C_' .. item[2])
-  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + #CAN_GAIN_SWAP + n, 'P_' .. item[2], 0), 'could not add CANT_P_' .. item[2])
-end
 -- Vehicle type control
 local VEHICLE_TYPE = param:get('SCR_USER5')
 -- TRIM values
@@ -165,8 +133,15 @@ local YAW_ALIGN_TIMEOUT_MS = 15000
 local YAW_ALIGN_LOG_INTERVAL_MS = 1000
 local last_yaw_align_log_ms = 0
 local YAW_SEQUENCE_DEGREES = { 0, 90, 180, 270, 360 }
+local YAW_SEQUENCE_PAUSE_MS = 5000
+local YAW_SEQUENCE_MOVEMENT_RAD = math.rad(1)
+local YAW_SEQUENCE_DEFAULT_TIMEOUT_S = 15
 local yaw_sequence_active = false
 local yaw_sequence_index = 0
+local yaw_sequence_pause_start = nil
+local yaw_sequence_last_movement_ms
+local yaw_sequence_movement_reference_rad
+local yaw_sequence_timeout_ms
 -- Params: p_gain, i_gain, d_gain, i_max, pid_max
 local steering_steady_pid = PID:new(3.5, 8, 0, 1, 0.95)
 local yaw_target_rad = nil
@@ -196,28 +171,29 @@ local AUTOTUNE_PERIOD_MS = UPDATE_PERIOD_MS
 
 -- Yaw autotune parameters
 local YAW_TUNE_PARAM_TABLE_KEY = 16
-assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 3), 'could not add yaw autotune parameter table')
-assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG', 45), 'could not add yaw autotune max angle parameter')
+assert(param:add_table(YAW_TUNE_PARAM_TABLE_KEY, 'YAWT_', 7), 'could not add yaw autotune parameter table')
+-- Keep the saved abort limit and switching angle in their original slots.
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 1, 'MAX_ANG_ERR', 90), 'could not add yaw autotune error limit')
 --[[
-  // @Param: YAWT_MAX_ANG
-  // @DisplayName: Yaw autotune maximum angle
+  // @Param: YAWT_MAX_ANG_ERR
+  // @DisplayName: Yaw autotune abort angle
   // @Description: Abort yaw autotune if the yaw error exceeds this angle
   // @Units: deg
   // @Range: 5 90
   // @User: Standard
 --]]
-local yaw_max_angle_param = Parameter()
-assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG parameter')
+local yaw_max_error_param = Parameter()
+assert(yaw_max_error_param:init('YAWT_MAX_ANG_ERR'), 'could not bind YAWT_MAX_ANG_ERR parameter')
 
 --[[
   // @Param: YAWT_MAX_OUT
   // @DisplayName: Yaw autotune maximum motor output
-  // @Description: Maximum steering command applied by yaw autotune; lower values reduce wheel spin speed
+  // @Description: Steering command applied by the yaw relay as a percentage of the THRO_MAX_LUA output range
   // @Units: %
-  // @Range: 5 45
+  // @Range: 1 100
   // @User: Standard
 --]]
-assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 20), 'could not add yaw autotune max output parameter')
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 2, 'MAX_OUT', 100), 'could not add yaw autotune max output parameter')
 local yaw_max_out_param = Parameter()
 assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT parameter')
 
@@ -232,6 +208,55 @@ assert(yaw_max_out_param:init('YAWT_MAX_OUT'), 'could not bind YAWT_MAX_OUT para
 assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 3, 'GAIN_MULT', 1), 'could not add yaw autotune gain multiplier parameter')
 local yaw_gain_multiplier_param = Parameter()
 assert(yaw_gain_multiplier_param:init('YAWT_GAIN_MULT'), 'could not bind YAWT_GAIN_MULT parameter')
+
+--[[
+  // @Param: YAWT_MAX_ANG
+  // @DisplayName: Yaw autotune relay switching angle
+  // @Description: Heading error on either side of the starting heading where the relay reverses. Must be below YAWT_MAX_ANG_ERR.
+  // @Units: deg
+  // @Range: 1 89
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 4, 'MAX_ANG', 45), 'could not add yaw autotune switching angle parameter')
+local yaw_max_angle_param = Parameter()
+assert(yaw_max_angle_param:init('YAWT_MAX_ANG'), 'could not bind YAWT_MAX_ANG parameter')
+
+--[[
+  // @Param: YAWT_MIN_OUT
+  // @DisplayName: Yaw autotune minimum motor output
+  // @Description: Minimum allowed relay output as a percentage of the THRO_MAX_LUA output range. Must be at most YAWT_MAX_OUT.
+  // @Units: %
+  // @Range: 1 100
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 5, 'MIN_OUT', 5), 'could not add yaw autotune min output parameter')
+local yaw_min_out_param = Parameter()
+assert(yaw_min_out_param:init('YAWT_MIN_OUT'), 'could not bind YAWT_MIN_OUT parameter')
+
+--[[
+  // @Param: YAWT_MAX_CYCLE
+  // @DisplayName: Yaw autotune total relay cycles
+  // @Description: Total full cycles to complete, including the first two discarded cycles
+  // @Range: 3 60
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 6, 'MAX_CYCLE', 6), 'could not add yaw autotune cycle parameter')
+local yaw_max_cycle_param = Parameter()
+assert(yaw_max_cycle_param:init('YAWT_MAX_CYCLE'), 'could not bind YAWT_MAX_CYCLE parameter')
+
+--[[
+  // @Param: YAWT_TIMEOUT
+  // @DisplayName: Yaw verification inactivity timeout
+  // @Description: Time without at least one degree of heading change before stopping the post-tune yaw verification
+  // @Units: s
+  // @Range: 1 120
+  // @User: Standard
+--]]
+assert(param:add_param(YAW_TUNE_PARAM_TABLE_KEY, 7, 'TIMEOUT', YAW_SEQUENCE_DEFAULT_TIMEOUT_S),
+  'could not add yaw verification timeout parameter')
+local yaw_timeout_param = Parameter()
+assert(yaw_timeout_param:init('YAWT_TIMEOUT'), 'could not bind YAWT_TIMEOUT parameter')
 
 local function getYawGainMultiplier()
   return math.max(0.1, math.min(10000, yaw_gain_multiplier_param:get()))
@@ -251,79 +276,75 @@ if saved_p > 0 and saved_i > 0 then
   steering_steady_pid:setGains(saved_p * gain_multiplier, saved_i * gain_multiplier, 0)
 end
 
--- Gain set currently loaded in the yaw PI: 0 = PWM (SCR_USER2/3), 1 = CAN (CANT_YAW_P/I)
-local yaw_gain_path = 0
-local YAW_DEFAULT_P, YAW_DEFAULT_I = 3.5, 8
-
-local function yawGainNames(can)
-  if can then
-    return 'CANT_YAW_P', 'CANT_YAW_I'
+local syncGainSet
+do
+  -- Preserve the saved slots of the CAN ATC gain banks. Slots 1-3 were yaw settings.
+  local CAN_GAINS_PARAM_TABLE_KEY = 19
+  local CAN_GAIN_SWAP = {
+    { 'ATC_STR_RAT_FF', 'STRFF' },
+    { 'ATC_STR_RAT_P', 'STRP' },
+    { 'ATC_STR_RAT_I', 'STRI' },
+    { 'ATC_SPEED_P', 'SPDP' },
+    { 'ATC_SPEED_I', 'SPDI' },
+    { 'CRUISE_THROTTLE', 'CRUISE' },
+  }
+  assert(param:add_table(CAN_GAINS_PARAM_TABLE_KEY, 'CANT_', 5 + 2 * #CAN_GAIN_SWAP), 'could not add CANT_ parameter table')
+  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 4, 'ACTIVE', 0), 'could not add CANT_ACTIVE parameter')
+  assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5, 'C_VALID', 0), 'could not add CANT_C_VALID parameter')
+  for n, item in ipairs(CAN_GAIN_SWAP) do
+    assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + n, 'C_' .. item[2], 0), 'could not add CANT_C_' .. item[2])
   end
-  return 'SCR_USER2', 'SCR_USER3'
-end
-
-local function loadYawGains(can)
-  local p_name, i_name = yawGainNames(can)
-  local p, i = param:get(p_name) or 0, param:get(i_name) or 0
-  if p > 0 and i > 0 then
-    local gain_multiplier = getYawGainMultiplier()
-    steering_steady_pid:setGains(p * gain_multiplier, i * gain_multiplier, 0)
-  else
-    steering_steady_pid:setGains(YAW_DEFAULT_P, YAW_DEFAULT_I, 0)
+  for n, item in ipairs(CAN_GAIN_SWAP) do
+    assert(param:add_param(CAN_GAINS_PARAM_TABLE_KEY, 5 + #CAN_GAIN_SWAP + n, 'P_' .. item[2], 0), 'could not add CANT_P_' .. item[2])
   end
-  steering_steady_pid:resetInternalState()
-  yaw_gain_path = can and 1 or 0
-end
-
-local function setAndSaveIfChanged(name, value)
-  if value ~= nil and param:get(name) ~= value then
-    param:set_and_save(name, value)
-  end
-end
-
---[[
-Keep ATC_* / CRUISE_THROTTLE on the gain set of the active output path.
-Only called while disarmed. With PWM only (CANT_ACTIVE = 0 and CAN never on)
-nothing is written.
---]]
-local function syncGainSet()
-  -- Give esc_can.lua time to publish ESC_STAT after boot before deciding the path
-  if millis():toint() < 6000 then
-    return
-  end
-  local can = can_selected()
-  local want = can and 1 or 0
-  local active = param:get('CANT_ACTIVE') or 0
-  if want == active then
-    if can then
-      -- QuickTune and the Circle relay write ATC_*; keep the CAN copy current
-      for _, item in ipairs(CAN_GAIN_SWAP) do
-        setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
-      end
+  local function setAndSaveIfChanged(name, value)
+    if value ~= nil and param:get(name) ~= value then
+      param:set_and_save(name, value)
     end
-  else
-    local out_prefix = (active == 1) and 'CANT_C_' or 'CANT_P_'
-    for _, item in ipairs(CAN_GAIN_SWAP) do
-      setAndSaveIfChanged(out_prefix .. item[2], param:get(item[1]))
+  end
+
+  --[[
+  Keep ATC_* / CRUISE_THROTTLE on the gain set of the active output path.
+  Only called while disarmed. With PWM only (CANT_ACTIVE = 0 and CAN never on)
+  nothing is written.
+  --]]
+  syncGainSet = function()
+    -- Give esc_can.lua time to publish ESC_STAT after boot before deciding the path
+    if millis():toint() < 6000 then
+      return
     end
-    if can and (param:get('CANT_C_VALID') or 0) == 0 then
-      for _, item in ipairs(CAN_GAIN_SWAP) do
-        setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
+    local can = can_selected()
+    local want = can and 1 or 0
+    local active = param:get('CANT_ACTIVE') or 0
+    if want == active then
+      if can then
+        -- QuickTune and the Circle relay write ATC_*; keep the CAN copy current
+        for _, item in ipairs(CAN_GAIN_SWAP) do
+          setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
+        end
       end
-      param:set_and_save('CANT_C_VALID', 1)
-      gcs:send_text(MAV_SEVERITY.WARNING, 'CAN gains: first CAN use, starting from the PWM gains; retune in CAN')
     else
-      local in_prefix = can and 'CANT_C_' or 'CANT_P_'
+      local out_prefix = (active == 1) and 'CANT_C_' or 'CANT_P_'
       for _, item in ipairs(CAN_GAIN_SWAP) do
-        setAndSaveIfChanged(item[1], param:get(in_prefix .. item[2]))
+        setAndSaveIfChanged(out_prefix .. item[2], param:get(item[1]))
       end
+      if can and (param:get('CANT_C_VALID') or 0) == 0 then
+        for _, item in ipairs(CAN_GAIN_SWAP) do
+          setAndSaveIfChanged('CANT_C_' .. item[2], param:get(item[1]))
+        end
+        param:set_and_save('CANT_C_VALID', 1)
+        gcs:send_text(MAV_SEVERITY.WARNING, 'CAN gains: first CAN use, starting from the PWM gains; retune in CAN')
+      else
+        local in_prefix = can and 'CANT_C_' or 'CANT_P_'
+        for _, item in ipairs(CAN_GAIN_SWAP) do
+          setAndSaveIfChanged(item[1], param:get(in_prefix .. item[2]))
+        end
+      end
+      param:set_and_save('CANT_ACTIVE', want)
+      gcs:send_text(MAV_SEVERITY.NOTICE, string.format('Gain set: %s loaded into ATC_*', can and 'CAN' or 'PWM'))
     end
-    param:set_and_save('CANT_ACTIVE', want)
-    gcs:send_text(MAV_SEVERITY.NOTICE, string.format('Gain set: %s loaded into ATC_*', can and 'CAN' or 'PWM'))
   end
-  if yaw_gain_path ~= want then
-    loadYawGains(can)
-  end
+
 end
 
 -- Severity for logging in GCS
@@ -344,7 +365,11 @@ The function also takes into account the trim values for the PWM outputs.
 -- @param t number - Throttle command from -1.0 to 1.0
 -- @param s number - Steering command from -1.0 to 1.0
 --]]
-local function applyControlAllocation(t, s, timeout_ms)
+local function getLuaPWMRange()
+  return 5 * math.max(0, math.min(100, throttle_max_lua_param:get()))
+end
+
+local function applyControlAllocation(t, s, timeout_ms, tune_mix)
   timeout_ms = timeout_ms or 300
   -- We assign the PWM values to the motors, which are opposite in sign for each diagonal pair
   -- MOTOR SCHEMATIC IN ROVER FRAME
@@ -353,14 +378,18 @@ local function applyControlAllocation(t, s, timeout_ms)
   -- 2 - 3
   -- Setting the PWM outputs based on the control allocation directions
   -- left for motors in the left side (1 and 2), right for the ones on the right side (0 and 3)
-  local throttle_limit_pct = math.max(0, math.min(100, throttle_max_lua_param:get()))
-  local pwm_range = 5 * throttle_limit_pct
+  local pwm_range = getLuaPWMRange()
   local pwm_aloc_l, pwm_aloc_r = funcs:allocateRightAndLeftPwmShare(t, s, pwm_range)
   local pwm_min = PWM_TRIM_VALUE - pwm_range
   local pwm_max = PWM_TRIM_VALUE + pwm_range
   local pwm_l = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE + pwm_aloc_l, pwm_min, pwm_max))
   local pwm_r = math.floor(funcs:mapMaxMin(PWM_TRIM_VALUE - pwm_aloc_r, pwm_min, pwm_max))
   if can_selected() then
+    if tune_mix then
+      local left, right = funcs:allocateRightAndLeftPwmShare(t, s, 1)
+      sendCanCommand(left, right)
+      return pwm_l, pwm_r
+    end
     -- Skid-steer sum, same as the PWM servo mix: left = throttle + steering,
     -- right = throttle - steering. Scale both sides together when the sum
     -- passes 1 so a turn while moving does not drop one stick.
@@ -387,6 +416,7 @@ Reset the yaw control state
 --]]
 local function resetYawControlState()
   yaw_target_rad = nil
+  yaw_sequence_pause_start = nil
   yaw_align_steps = 0
   yaw_settle_steps = 0
   steering_steady_pid:resetInternalState()
@@ -406,21 +436,28 @@ local function yawTickDue(last_tick_ms)
   return false, last_tick_ms
 end
 
+local function startYawVerificationHeading()
+  resetYawControlState()
+  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
+  yaw_sequence_movement_reference_rad = ahrs:get_yaw()
+  yaw_sequence_last_movement_ms = millis()
+  local timeout_s = yaw_timeout_param:get()
+  if not (timeout_s >= 1 and timeout_s <= 120) then
+    timeout_s = YAW_SEQUENCE_DEFAULT_TIMEOUT_S
+  end
+  yaw_sequence_timeout_ms = timeout_s * 1000
+  last_yaw_align_log_ms = 0
+  gcs:send_text(MAV_SEVERITY.INFO, string.format(
+    'YawTune: tentando orientar para %d° (etapa %d/%d)',
+    YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
+end
+
 local function startYawVerificationSequence()
   yaw_sequence_active = true
   yaw_sequence_index = 1
-  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
-  yaw_align_steps = 0
-  yaw_settle_steps = 0
-  last_yaw_align_log_ms = 0
-  steering_steady_pid:resetInternalState()
-  yaw_last_s_out = 0
-  yaw_last_tick_ms = 0
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: tentando orientar: 0°, 90°, 180°')
   gcs:send_text(MAV_SEVERITY.NOTICE, 'YawTune: depois 270° e 360°/0°')
-  gcs:send_text(MAV_SEVERITY.INFO, string.format(
-    'YawTune: tentando orientar para %d° (etapa 1/%d)',
-    YAW_SEQUENCE_DEGREES[yaw_sequence_index], #YAW_SEQUENCE_DEGREES))
+  startYawVerificationHeading()
   if not vehicle:set_mode(DRIVING_MODES.STEERING) then
     yaw_sequence_active = false
     resetYawControlState()
@@ -443,17 +480,9 @@ local function advanceYawVerificationSequence()
     return
   end
 
-  yaw_sequence_index = yaw_sequence_index + 1
-  yaw_target_rad = math.rad(YAW_SEQUENCE_DEGREES[yaw_sequence_index])
-  yaw_align_steps = 0
-  yaw_settle_steps = 0
-  last_yaw_align_log_ms = 0
-  steering_steady_pid:resetInternalState()
-  yaw_last_s_out = 0
-  yaw_last_tick_ms = 0
-  gcs:send_text(MAV_SEVERITY.INFO, string.format(
-    'YawTune: tentando orientar para %d° (etapa %d/%d)',
-    YAW_SEQUENCE_DEGREES[yaw_sequence_index], yaw_sequence_index, #YAW_SEQUENCE_DEGREES))
+  resetYawControlState()
+  yaw_sequence_pause_start = millis()
+  gcs:send_text(MAV_SEVERITY.INFO, "YawTune: aguardando 5 s")
 end
 
 --[[
@@ -610,6 +639,19 @@ local function applyPWMSteeringMode()
     return
   end
 
+  if yaw_sequence_pause_start then
+    if (millis() - yaw_sequence_pause_start):tofloat() < YAW_SEQUENCE_PAUSE_MS then
+      applyControlAllocation(0, 0)
+      return
+    end
+    yaw_sequence_index = yaw_sequence_index + 1
+    startYawVerificationHeading()
+  end
+  if yaw_target_rad == nil then
+    applyControlAllocation(0, 0)
+    return
+  end
+
   local tick_due
   tick_due, yaw_last_tick_ms = yawTickDue(yaw_last_tick_ms)
   if not tick_due then
@@ -617,31 +659,35 @@ local function applyPWMSteeringMode()
     return
   end
 
-  -- Timeout safety
-  yaw_align_steps = yaw_align_steps + 1
-  local yaw_align_max_steps = math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS)
-  if yaw_align_steps > yaw_align_max_steps then
-    applyControlAllocation(0, 0)
-    steering_steady_pid:resetInternalState()
-    yaw_settle_steps = 0
-    if yaw_sequence_active then
+  local current_yaw_rad = ahrs:get_yaw()
+  local now = millis()
+  if yaw_sequence_active then
+    local movement = funcs:yawErrorRad(current_yaw_rad, yaw_sequence_movement_reference_rad)
+    if math.abs(movement) >= YAW_SEQUENCE_MOVEMENT_RAD then
+      yaw_sequence_movement_reference_rad = current_yaw_rad
+      yaw_sequence_last_movement_ms = now
+    elseif (now - yaw_sequence_last_movement_ms):tofloat() >= yaw_sequence_timeout_ms then
       local failed_heading = YAW_SEQUENCE_DEGREES[yaw_sequence_index]
       yaw_sequence_active = false
       yaw_sequence_index = 0
       resetYawControlState()
+      applyControlAllocation(0, 0)
       vehicle:set_mode(DRIVING_MODES.HOLD)
       gcs:send_text(MAV_SEVERITY.ERROR, string.format(
-        'YawTune: timeout at %d°; sequence stopped in HOLD', failed_heading))
-    else
-      vehicle:set_mode(DRIVING_MODES.AUTO)
+        'YawTune: %.1fs without movement at %d deg; HOLD', yaw_sequence_timeout_ms / 1000, failed_heading))
+      return
     end
+  elseif yaw_align_steps >= math.floor(YAW_ALIGN_TIMEOUT_MS / UPDATE_PERIOD_MS) then
+    applyControlAllocation(0, 0)
+    resetYawControlState()
+    vehicle:set_mode(DRIVING_MODES.AUTO)
     return
+  else
+    yaw_align_steps = yaw_align_steps + 1
   end
 
-  -- Current yaw from AHRS (rad) and error to target
-  local current_yaw_rad = ahrs:get_yaw()
   local err = funcs:yawErrorRad(current_yaw_rad, yaw_target_rad)
-  local now_ms = millis():toint()
+  local now_ms = now:toint()
   if now_ms - last_yaw_align_log_ms >= YAW_ALIGN_LOG_INTERVAL_MS then
     last_yaw_align_log_ms = now_ms
     gcs:send_text(MAV_SEVERITY.INFO, string.format(
@@ -666,6 +712,7 @@ local function applyPWMSteeringMode()
       advanceYawVerificationSequence()
     else
       -- Set HOLD mode so the vehicle stops for the external ROS photo routine
+      resetYawControlState()
       vehicle:set_mode(DRIVING_MODES.HOLD)
     end
     return
@@ -673,6 +720,14 @@ local function applyPWMSteeringMode()
 
   -- Rotate in place with pid output
   local s_out = steering_steady_pid:compute(err, UPDATE_DT)
+  if math.abs(err) > YAW_THRESH_RAD and math.abs(yaw_rate) <= YAW_RATE_THRESH_RAD_S and s_out * err > 0 then
+    local pwm_range = getLuaPWMRange()
+    local min_offset = throttle_min_lua_param:get() - PWM_TRIM_VALUE
+    if pwm_range > 0 and min_offset > 0 then
+      local min_command = math.min(1, min_offset / pwm_range)
+      s_out = s_out < 0 and math.min(s_out, -min_command) or math.max(s_out, min_command)
+    end
+  end
   if math.abs(s_out) < YAW_DEADBAND then
     s_out = 0
   end
@@ -729,33 +784,51 @@ Switch high starts the relay test around the current yaw; switch low aborts/rear
 --]]
 local function runYawAutotune()
   if autotune_done then return false end
-  local can = can_selected()
-  if can and autotune.status ~= "idle" then
-    local tick_due
-    tick_due, yaw_tune_last_tick_ms = yawTickDue(yaw_tune_last_tick_ms)
-    if not tick_due then
-      applyControlAllocation(0, yaw_tune_last_s_out)
-      return true
-    end
+  local tick_due
+  tick_due, yaw_tune_last_tick_ms = yawTickDue(yaw_tune_last_tick_ms)
+  if not tick_due then
+    applyControlAllocation(0, yaw_tune_last_s_out)
+    return true
   end
-  if autotune.status == "idle" then
-    autotune_target_rad = ahrs:get_yaw()
-    local relay_pct = yaw_max_out_param:get()
-    if can then
-      relay_pct = param:get('CANT_YAW_OUT') or 10
-      yaw_tune_last_tick_ms = millis():toint()
+  local starting = autotune.status == "idle"
+  local max_error = yaw_max_error_param:get()
+  local max_error_rad = math.rad(max_error)
+  local hysteresis = starting and math.rad(yaw_max_angle_param:get()) or autotune.hyst_rad
+  if not (hysteresis >= math.rad(1) and hysteresis <= math.rad(89) and
+          max_error >= 5 and max_error <= 90 and hysteresis < max_error_rad) then
+    gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: require MAX_ANG < MAX_ANG_ERR (5-90)")
+    autotune_done = true
+    return false
+  end
+  if starting then
+    local min_output = yaw_min_out_param:get()
+    local max_output = yaw_max_out_param:get()
+    if not (min_output >= 1 and min_output <= max_output and max_output <= 100) then
+      gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: require 1 <= MIN_OUT <= MAX_OUT <= 100")
+      autotune_done = true
+      return false
     end
-    autotune.relay = math.max(0.05, math.min(0.45, relay_pct / 100))
+    local max_cycles = yaw_max_cycle_param:get()
+    if not (max_cycles >= 3 and max_cycles <= 60 and max_cycles % 1 == 0) then
+      gcs:send_text(MAV_SEVERITY.ERROR, "YawTune: MAX_CYCLE must be an integer from 3 to 60")
+      autotune_done = true
+      return false
+    end
+    autotune_target_rad = ahrs:get_yaw()
+    autotune.relay = max_output / 100
+    autotune.hyst_rad = hysteresis
+    autotune.cycles = max_cycles - autotune.skip_cycles
     autotune:start()
     yaw_tune_last_progress = 0
     yaw_tune_last_log_s = -1
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
       "YawTune: started; target %.1f deg, max error %.1f deg, max output %.0f%%",
-      math.deg(autotune_target_rad), yaw_max_angle_param:get(), autotune.relay * 100))
+      math.deg(autotune_target_rad), max_error, autotune.relay * 100))
+    gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: relay switches at +/- %.1f deg", math.deg(hysteresis)))
   end
   local err = funcs:yawErrorRad(ahrs:get_yaw(), autotune_target_rad)
   local yaw_rate = ahrs:get_gyro():z()
-  autotune.max_amp_rad = math.rad(yaw_max_angle_param:get())
+  autotune.max_amp_rad = max_error_rad
   local s_out, status = autotune:step(err, AUTOTUNE_PERIOD_MS / 1000.0)
   yaw_tune_last_s_out = s_out
   applyControlAllocation(0, s_out)
@@ -772,19 +845,14 @@ local function runYawAutotune()
     local gain_multiplier = getYawGainMultiplier()
     local effective_p = r.P * gain_multiplier
     local effective_i = r.I * gain_multiplier
-    local p_name, i_name = yawGainNames(can)
-    param:set_and_save(p_name, r.P)
-    param:set_and_save(i_name, r.I)
+    param:set_and_save('SCR_USER2', r.P)
+    param:set_and_save('SCR_USER3', r.I)
     steering_steady_pid:setGains(effective_p, effective_i, 0)
     steering_steady_pid:resetInternalState()
-    yaw_gain_path = can and 1 or 0
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
       "YawTune: saved base P=%.3f I=%.3f; using P=%.3f I=%.3f (x%.2f)",
       r.P, r.I, effective_p, effective_i, gain_multiplier))
-    if can then
-      gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: CAN gains saved in CANT_YAW_P/I")
-    end
     if param:get(TUNE_SELECT_PARAM) == TUNE_MODE.YAW then
       param:set_and_save(TUNE_SELECT_PARAM, TUNE_MODE.NORMAL)
       gcs:send_text(MAV_SEVERITY.NOTICE, "YawTune: SCR_USER1 set to 0 (normal)")
@@ -849,6 +917,8 @@ local function update()
     yaw_sequence_index = 0
     resetYawControlState()
     gcs:send_text(MAV_SEVERITY.WARNING, 'YawTune: heading sequence aborted (mode changed)')
+  elseif yaw_target_rad ~= nil and vehicle_mode ~= DRIVING_MODES.STEERING then
+    resetYawControlState()
   end
   local selector = param:get(TUNE_SELECT_PARAM)
   if not selector_armed_reported then
@@ -865,6 +935,7 @@ local function update()
     end
     autotune:reset()
     autotune_done = false
+    yaw_tune_last_tick_ms, yaw_tune_last_s_out = 0, 0
   elseif selector == TUNE_MODE.YAW then
     circle_tune:reset("selector changed")
     runYawAutotune()
@@ -878,7 +949,7 @@ local function update()
     local native_steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
     local steering, allow_output = circle_tune:update(throttle, native_steering, throttle_max_lua_param:get())
     if allow_output then
-      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60)
+      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60, true)
       if steering then
         circle_tune:log_sample(throttle, steering, pwm_l, pwm_r)
       end
@@ -918,7 +989,7 @@ local function update()
 end
 
 gcs:send_text(MAV_SEVERITY.NOTICE, string.format(
-  "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG=%.1f deg, YAWT_MAX_OUT=%.0f%%",
-  VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_angle_param:get(), yaw_max_out_param:get()))
+  "Control allocation loaded; vehicle type=%.1f, SCR_USER1=%.1f, YAWT_MAX_ANG_ERR=%.1f deg, YAWT_MAX_OUT=%.0f%%",
+  VEHICLE_TYPE or -1, param:get(TUNE_SELECT_PARAM) or -1, yaw_max_error_param:get(), yaw_max_out_param:get()))
 return update, 3000 -- run immediately before starting to reschedule
 -------------------------------------------------------------------------------
