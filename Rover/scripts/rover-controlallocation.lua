@@ -1154,18 +1154,20 @@ local function update()
     applyPWMSteeringMode()
     return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.AUTO then
+    -- Same actuator rate as the Circle where QuickTune identified ATC_*:
+    -- at 200 ms the PWM path adds ~0.2 s of delay and the tuned loops oscillate.
     applyPWMAutoMode()
-    return update, modePeriod(200)
+    return update, CircleTune.PERIOD_MS
   elseif vehicle_mode == DRIVING_MODES.SIMPLE then
     applyPWMInternalControl()
-    return update, modePeriod(200)
+    return update, CircleTune.PERIOD_MS
   elseif vehicle_mode == DRIVING_MODES.CIRCLE then
     -- Keep the same actuator update period used to identify the steering loop.
     applyPWMInternalControl(60)
     return update, CircleTune.PERIOD_MS
   elseif vehicle_mode == DRIVING_MODES.ACRO or vehicle_mode == DRIVING_MODES.RTL then
     applyPWMInternalControl()
-    return update, modePeriod(200)
+    return update, CircleTune.PERIOD_MS
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
