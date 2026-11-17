@@ -143,6 +143,7 @@ local S = {
   YAW_RAMP_STEP = 0.05,   -- raise by 5 % of the output range per step
   YAW_TUNE_TIMEOUT_S = 60, -- relay measuring time, as in modules/autotune.lua
   YAW_MOVE_RATE = math.rad(5), -- turn rate that counts as the rover really turning
+  YAW_DEADBAND_CAN = 0.005,    -- 0.6 rpm at ESC_RPM 120: below the CAN stall-boost minimum
   yaw_still_lvl = nil,     -- last ramp output that left the rover still
   yaw_move_lvl = nil,      -- first ramp output that turned it
 }
@@ -786,7 +787,10 @@ local function applyPWMSteeringMode()
       s_out = s_out < 0 and math.min(s_out, -min_command) or math.max(s_out, min_command)
     end
   end
-  if math.abs(s_out) < YAW_DEADBAND then
+  -- The deadband keeps a PWM ESC from chattering. On CAN the command is a wheel
+  -- speed target that esc_can.lua can follow down to about 1 rpm, and 0.02
+  -- (2.4 rpm) zeroed every command for heading errors under about 6 degrees.
+  if math.abs(s_out) < (can_selected() and S.YAW_DEADBAND_CAN or YAW_DEADBAND) then
     s_out = 0
   end
   yaw_last_s_out = s_out

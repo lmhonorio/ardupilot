@@ -72,7 +72,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611h",
+  VERSION = "v2611i",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -91,6 +91,12 @@ local K = {
   SAT_HOLD_MS = 100,
   SLIP_MS = 100,
   MOVING_RPM = 5,
+  -- Smallest speed target the stall boost acts on, and the side command below
+  -- which a stopped side coasts at 0 A
+  STALL_MIN_RPM = 1,
+  REST_CMD = 0.004,
+  -- Share of the stall boost removed once the wheel breaks free
+  STALL_RELEASE = 0.7,
   HOLD_MODE = 4,
   WHEEL_TUNE_SELECTOR = 4,
   BRK_SELECTOR = 5,
@@ -244,6 +250,7 @@ local function reset_esc(i)
     wheel_rpm = 0,
     current_a = 0,
     integrator = 0,
+    boost = 0,
     last_error = 0,
     ref_rpm = 0,
     ref_f = 0,
@@ -568,6 +575,7 @@ local function reset_control()
     local fb = esc[i]
     fb.current_a = 0
     fb.integrator = 0
+    fb.boost = 0
     fb.last_error = 0
     fb.ref_rpm = 0
     fb.ref_f = 0
@@ -800,8 +808,20 @@ local function wheel_pi(i, target, dt, k)
   -- or the scrub of a pivot turn) gets its integrator raised at ESC_STALL A/s
   -- until it breaks away. The plain integrator needed about 1 s to reach the
   -- 10-12 A a pivot takes, and the yaw loop saw that as dead time.
-  if k.stall > 0 and math.abs(target) >= K.MOVING_RPM and math.abs(fb.wheel_rpm) < K.MOVING_RPM then
-    fb.integrator = constrain(fb.integrator + (target > 0 and 1 or -1) * k.stall * dt, -k.imax, k.imax)
+  -- Stalled means the wheel has made under half its target and under 5 rpm,
+  -- so a slow target (a yaw correction of a few degrees asks for 1-3 rpm)
+  -- also breaks free, while a wheel that is accelerating normally is left alone.
+  if k.stall > 0 and math.abs(target) >= K.STALL_MIN_RPM and
+      math.abs(fb.wheel_rpm) < math.min(K.MOVING_RPM, 0.5 * math.abs(target)) then
+    local add = (target > 0 and 1 or -1) * k.stall * dt
+    local before = fb.integrator
+    fb.integrator = constrain(fb.integrator + add, -k.imax, k.imax)
+    fb.boost = (fb.boost or 0) + (fb.integrator - before)
+  elseif fb.boost ~= nil and fb.boost ~= 0 then
+    -- Broke free: moving friction is below the breakaway current, so hand
+    -- back part of the boost or the wheel jumps well past a slow target
+    fb.integrator = constrain(fb.integrator - K.STALL_RELEASE * fb.boost, -k.imax, k.imax)
+    fb.boost = 0
   end
   local derivative = 0
   if dt > 0 then
@@ -1021,6 +1041,7 @@ end
 function M.clear_wheel_pi()
   for i = 1, K.MAX_FB do
     esc[i].integrator = 0
+    esc[i].boost = 0
     esc[i].last_error = 0
     esc[i].ref_rpm = 0
   end
@@ -1043,6 +1064,7 @@ function M.tune_reset_window(zero_ref)
   else
     for i = 1, K.MAX_FB do
       esc[i].integrator = 0
+      esc[i].boost = 0
       esc[i].last_error = 0
     end
   end
@@ -1224,6 +1246,7 @@ function M.verify_begin(k)
     local fb = esc[w]
     fb.last_error = 0
     fb.integrator = 0
+    fb.boost = 0
     if M.on(w) and tune.lo_i ~= nil then
       fb.integrator = constrain(tune.lo_i[w] - tune.tff[w] * tune.lo_rpm[w], -k.imax, k.imax)
     end
@@ -1713,10 +1736,13 @@ function M.run_control()
         local s = side_of(i)
         local sd = side[s]
         profile_wheel(i, goals[s], dt)
-        local at_rest = math.abs(sd.interp_value) < 0.01 and math.abs(fb.ref_rpm) < K.MOVING_RPM
+        -- Below 0.004 (0.5 rpm at ESC_RPM 120) the side is at rest; a slow yaw
+        -- correction (1-3 rpm) must still be driven, not coasted
+        local at_rest = math.abs(sd.interp_value) < K.REST_CMD and math.abs(fb.ref_rpm) < K.MOVING_RPM
             and math.abs(fb.wheel_rpm) < K.MOVING_RPM
         if at_rest then
           fb.integrator = 0
+          fb.boost = 0
           fb.last_error = 0
           fb.ref_f = 0
         end
@@ -1754,6 +1780,7 @@ function M.run_control()
       if fb.detected then
         local sd = side[side_of(i)]
         fb.integrator = 0
+        fb.boost = 0
         fb.last_error = 0
         fb.target_rpm = 0
         fb.saturated = false
