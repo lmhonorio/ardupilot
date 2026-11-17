@@ -1,5 +1,7 @@
 # Manual passo a passo — parâmetros e autotuning (CAN + PWM)
 
+Índice da pasta: [README](README.md).
+
 Guia operacional. Ordem obrigatória: primeiro a malha de roda, depois os PIDs de cima. Cada autotune volta `SCR_USER1` para 0 sozinho ao terminar com sucesso.
 
 ---

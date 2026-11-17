@@ -1,6 +1,7 @@
 -- ESC CAN driver for DJI C620 / M3508 on stock ArduPilot Rover.
 -- Copy to APM/scripts on the SD card together with rover-controlallocation.lua
 -- and modules/autotune.lua. No custom firmware is required.
+-- Full behavior, parameters and state: Rover/docs/esc_can.md.
 --
 -- CAN_Px_DRIVER = 1 or 2, CAN_Px_BITRATE = 1000000, CAN_Dx_PROTOCOL = 10 (Scripting)
 --
@@ -20,7 +21,10 @@
 -- ESC_REV      bitmask, bit 0 = ESC1 ... reverses that motor
 -- ESC_OPT      bit 0 log DJIC, bit 1 hold zero rpm while disarmed,
 --              bit 2 desaturation (keep the left/right ratio when a side saturates)
--- ESC_BRK      0 = never push current against the spin, 1 = brake up to ESC_BRKCUR
+-- ESC_BRK      0 = current window is always ±ESC_CUR (opposing current allowed).
+--              1 = while holding or speeding up above 5 wheel rpm, opposing
+--              current is capped at ESC_BRKCUR % of ESC_CUR. Slowing, stopping
+--              or reversing opens the full ±ESC_CUR window.
 -- ESC_ACC      reference acceleration limit, wheel rpm/s, both ways (0 = none = fully reactive).
 --              Keep at 0 for stick/mission command with no artificial ramp.
 -- ESC_BRKCUR   braking current limit, % of ESC_CUR

@@ -1,5 +1,7 @@
 # Autotuning do Rover (CAN + PWM) — guia completo
 
+Índice da pasta: [README](README.md).
+
 Guia único para instalar, configurar, sintonizar e operar em **MANUAL** e **AUTO** o rover 4 motores em modelo diferencial (par esquerdo / par direito com o mesmo comando).
 
 Ordem obrigatória: **primeiro a malha de roda (CAN), depois os PIDs de cima**. Cada autotune bem-sucedido volta `SCR_USER1` para **0** sozinho.
