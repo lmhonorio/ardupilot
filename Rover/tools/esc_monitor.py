@@ -12,8 +12,12 @@ e as mensagens STATUSTEXT (por exemplo "ESC: ESC 2 lost ...").
 Mostra um grafico ao vivo e grava tudo em CSV. O MAVLink e decodificado aqui
 mesmo (sem pymavlink); o grafico usa matplotlib.
 
+Por padrao escuta UDP 14550 e, do mesmo socket, manda heartbeat para o
+HereLink em 192.168.43.1:14552: o controle so transmite para um cliente que
+ja falou com ele (--kick none desliga, --kick HOST:PORTA muda o destino).
+
 Exemplos:
-  python esc_monitor.py                              # escuta UDP 14550
+  python esc_monitor.py                              # escuta UDP 14550 e chama o HereLink
   python esc_monitor.py --conn tcp:192.168.43.1:5760 # TCP no controle HereLink
   python esc_monitor.py --conn udp:0.0.0.0:14551     # porta encaminhada pelo Mission Planner
   python esc_monitor.py --no-plot                    # so console + CSV
@@ -130,7 +134,9 @@ def decode(msgid, payload):
                 "name": name.split(b"\0", 1)[0].decode("ascii", "replace")}
     if msgid == MSG_STATUSTEXT:
         return {"severity": payload[0],
-                "text": payload[1:51].split(b"\0", 1)[0].decode("ascii", "replace")}
+                # ArduPilot text is UTF-8 (e.g. the degree sign); a 50-byte chunk can
+                # cut a character in half, so undecodable bytes are replaced
+                "text": payload[1:51].split(b"\0", 1)[0].decode("utf-8", "replace")}
     if msgid == MSG_HEARTBEAT:
         _, mav_type, autopilot, base_mode, _, _ = struct.unpack("<IBBBBB", payload[:9])
         return {"type": mav_type, "autopilot": autopilot,
@@ -141,8 +147,16 @@ def decode(msgid, payload):
 # ---------------------------------------------------------------------------
 # Transport: UDP listen, UDP out, or TCP client
 # ---------------------------------------------------------------------------
+HERELINK_KICK = "192.168.43.1:14552"
+
+
 class Link:
-    def __init__(self, conn):
+    def __init__(self, conn, kick=HERELINK_KICK):
+        self.kick = None
+        if kick and kick.lower() != "none" and conn.startswith("udp:"):
+            khost, _, kport = kick.rpartition(":")
+            if kport.isdigit():
+                self.kick = (khost, int(kport))
         kind, _, rest = conn.partition(":")
         host, _, port = rest.rpartition(":")
         if not port.isdigit():
@@ -188,8 +202,13 @@ class Link:
         try:
             if self.kind == "tcp":
                 self.sock.sendall(data)
-            elif self.peer is not None:
+                return
+            if self.peer is not None:
                 self.sock.sendto(data, self.peer)
+            # Also call the HereLink MAVLink port: it only streams to a client
+            # it has heard from (sent from this socket, so replies come back here)
+            if self.kick is not None and self.kick != self.peer:
+                self.sock.sendto(data, self.kick)
         except OSError:
             pass
 
@@ -386,6 +405,12 @@ def run_plot(store, stop, window_s):
 
 
 def main():
+    # A console that cannot show a character prints "?" instead of failing
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description="Monitor ao vivo das correntes dos motores CAN via MAVLink")
     ap.add_argument("--conn", default="udp:0.0.0.0:14550",
                     help="udp:HOST:PORTA (escuta), udpout:HOST:PORTA ou tcp:HOST:PORTA (padrao: udp:0.0.0.0:14550)")
@@ -393,18 +418,24 @@ def main():
     ap.add_argument("--window", type=float, default=20.0, help="janela do grafico em segundos")
     ap.add_argument("--no-plot", action="store_true", help="sem grafico, so console e CSV")
     ap.add_argument("--duration", type=float, default=0, help="encerrar apos N segundos (0 = sem limite)")
+    ap.add_argument("--kick", default=HERELINK_KICK,
+                    help="com --conn udp, tambem manda heartbeat para HOST:PORTA para o HereLink "
+                         "comecar a transmitir (padrao %s; 'none' desliga)" % HERELINK_KICK)
     args = ap.parse_args()
 
     csv_path = args.csv or datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv")
     try:
-        link = Link(args.conn)
+        link = Link(args.conn, args.kick)
     except (OSError, ValueError) as exc:
         sys.exit("Nao foi possivel abrir %s: %s" % (args.conn, exc))
-    print("Conectado em %s; gravando %s" % (args.conn, csv_path))
+    print("Conectado em %s; gravando %s%s" % (args.conn, csv_path,
+          ("; chamando HereLink em %s:%d" % link.kick) if link.kick else ""))
 
     store = Store(args.window)
     stop = threading.Event()
-    with open(csv_path, "w", newline="") as f:
+    # UTF-8 (with BOM so Excel reads it): the default Windows code page cannot
+    # write the degree sign, and the reader thread died on it
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(["hora_pc", "t_s", "boot_ms", "nome", "valor", "texto"])
         th = threading.Thread(target=reader, args=(link, store, writer, f, stop), daemon=True)

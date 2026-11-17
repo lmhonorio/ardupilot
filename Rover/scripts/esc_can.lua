@@ -43,6 +43,10 @@
 -- ESC_GCS_HZ   live NAMED_VALUE_FLOAT stream to the GCS, Hz (0 = off, max 20):
 --              ESCn_I measured current A, ESCn_ICMD commanded current A,
 --              ESCn_RPM wheel rpm, ESC_TGT_L / ESC_TGT_R side target rpm.
+-- ESC_STALL    stall boost, A/s (default 30, 0 = off): while a wheel has a speed
+--              target of 5 rpm or more but is not turning, its integrator rises
+--              at this rate (capped by ESC_IMAX) until it breaks away. Makes
+--              pivots and starts answer in about 0.3 s instead of about 1 s.
 -- ESC_PREF     reference prefilter on the wheel speed PI: time constant as a
 --              fraction of that wheel's Ti (= Kp/Ki). 0 = off, default 0.5.
 --              The tuned PI (symmetrical optimum) overshoots a speed step
@@ -68,7 +72,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611g",
+  VERSION = "v2611h",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -166,6 +170,7 @@ local PARAM_SPEC = {
   { 43, "GCS_HZ", 4 },
   { 44, "PREF", 0.5 },
   { 45, "WT_BW", 8 },
+  { 46, "STALL", 30 },
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
@@ -355,6 +360,7 @@ local M = {
     lmask = 0,
     gcs_hz = 0,
     pref = 0,
+    stall = 0,
   },
   scratch = {
     sum = { 0, 0 },
@@ -790,6 +796,13 @@ local function wheel_pi(i, target, dt, k)
     kff = k.kff
   end
   local err = target - fb.wheel_rpm
+  -- Stall boost: a wheel asked to move but still stopped (static friction,
+  -- or the scrub of a pivot turn) gets its integrator raised at ESC_STALL A/s
+  -- until it breaks away. The plain integrator needed about 1 s to reach the
+  -- 10-12 A a pivot takes, and the yaw loop saw that as dead time.
+  if k.stall > 0 and math.abs(target) >= K.MOVING_RPM and math.abs(fb.wheel_rpm) < K.MOVING_RPM then
+    fb.integrator = constrain(fb.integrator + (target > 0 and 1 or -1) * k.stall * dt, -k.imax, k.imax)
+  end
   local derivative = 0
   if dt > 0 then
     derivative = k.kd * (err - fb.last_error) / dt
@@ -876,6 +889,7 @@ local function read_gains(now)
   cached.lmask = math.floor(g("LMASK"))
   cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
   cached.pref = constrain(g("PREF"), 0, 2)
+  cached.stall = constrain(g("STALL"), 0, 200)
   return cached
 end
 

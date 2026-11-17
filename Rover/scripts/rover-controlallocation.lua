@@ -142,6 +142,9 @@ local S = {
   YAW_RAMP_STILL_S = 1.0, -- time below the ramp turn rate before raising the output
   YAW_RAMP_STEP = 0.05,   -- raise by 5 % of the output range per step
   YAW_TUNE_TIMEOUT_S = 60, -- relay measuring time, as in modules/autotune.lua
+  YAW_MOVE_RATE = math.rad(5), -- turn rate that counts as the rover really turning
+  yaw_still_lvl = nil,     -- last ramp output that left the rover still
+  yaw_move_lvl = nil,      -- first ramp output that turned it
 }
 assert(S.tune_select:init('SCR_USER1'), 'could not bind SCR_USER1 parameter')
 assert(S.rc3_reversed:init('RC3_REVERSED'), 'could not bind RC3_REVERSED parameter')
@@ -771,7 +774,11 @@ local function applyPWMSteeringMode()
 
   -- Rotate in place with pid output
   local s_out = steering_steady_pid:compute(err, UPDATE_DT)
-  if math.abs(err) > YAW_THRESH_RAD and math.abs(yaw_rate) <= YAW_RATE_THRESH_RAD_S and s_out * err > 0 then
+  -- PWM only: the ESC gets a raw duty, so a stalled rover needs a minimum kick.
+  -- On CAN the command is a wheel speed target and esc_can.lua breaks the
+  -- wheels free itself (ESC_STALL), so no kick there.
+  if not can_selected() and math.abs(err) > YAW_THRESH_RAD and math.abs(yaw_rate) <= YAW_RATE_THRESH_RAD_S
+      and s_out * err > 0 then
     local pwm_range = getLuaPWMRange()
     local min_offset = throttle_min_lua_param:get() - PWM_TRIM_VALUE
     if pwm_range > 0 and min_offset > 0 then
@@ -829,6 +836,34 @@ local function applyPWMInternalControl(timeout_ms)
 end
 
 --[[
+Save the measured turn breakaway as THRO_MIN_LUA. The yaw PI output for a
+small heading error is far below the output that starts the rover turning
+(about 35-40% on the ground), so without this the last degrees are left to
+the slow integrator. THRO_MIN_LUA is the kick used when the rover is stalled
+off target. The value is midway between the last ramp output that left the
+rover still and the first one that turned it.
+--]]
+function S.saveYawBreakaway()
+  if can_selected() then
+    -- On CAN the wheel speed loop breaks the rover free (ESC_STALL); the PWM
+    -- kick would only add a speed jump
+    gcs:send_text(MAV_SEVERITY.INFO, "YawTune: CAN path, breakaway left to ESC_STALL; THRO_MIN_LUA kept")
+    return
+  end
+  local still, move = S.yaw_still_lvl, S.yaw_move_lvl
+  if move == nil or still == nil then
+    gcs:send_text(MAV_SEVERITY.INFO, "YawTune: breakaway not seen (turned at the first output); THRO_MIN_LUA kept")
+    return
+  end
+  local lvl = (still + move) / 2
+  local pwm = math.floor(PWM_TRIM_VALUE + lvl * getLuaPWMRange() + 0.5)
+  pwm = math.max(PWM_TRIM_VALUE, math.min(2000, pwm))
+  param:set_and_save('THRO_MIN_LUA', pwm)
+  gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: breakaway %.0f%% (still %.0f, turns %.0f); THRO_MIN_LUA=%d",
+    lvl * 100, still * 100, move * 100, pwm))
+end
+
+--[[
 Yaw PI autotune in HOLD mode.
 Switch high starts the relay test around the current yaw; switch low aborts/rearms.
 -- @return bool - true while the autotune owns the outputs
@@ -871,6 +906,7 @@ local function runYawAutotune()
     autotune.relay = min_output / 100
     S.yaw_max_relay = max_output / 100
     S.yaw_still_s = 0
+    S.yaw_still_lvl, S.yaw_move_lvl = nil, nil
     autotune.hyst_rad = hysteresis
     autotune.cycles = max_cycles - autotune.skip_cycles
     -- Each relay cycle sweeps about 4 x the switching angle. Ask for a turn
@@ -893,6 +929,12 @@ local function runYawAutotune()
   local yaw_rate = ahrs:get_gyro():z()
   -- Output ramp: only before the first full relay cycle, so every measured
   -- cycle (the first two are discarded anyway) runs at one fixed amplitude
+  if autotune.cycle == 0 then
+    -- Breakaway: first output that really turns the rover (rate above 5 deg/s)
+    if S.yaw_move_lvl == nil and math.abs(yaw_rate) >= S.YAW_MOVE_RATE and autotune.u ~= 0 then
+      S.yaw_move_lvl = autotune.relay
+    end
+  end
   if autotune.cycle == 0 and autotune.relay < S.yaw_max_relay then
     if math.abs(yaw_rate) < S.yaw_ramp_rate then
       S.yaw_still_s = S.yaw_still_s + AUTOTUNE_PERIOD_MS / 1000.0
@@ -901,6 +943,10 @@ local function runYawAutotune()
     end
     if S.yaw_still_s >= S.YAW_RAMP_STILL_S then
       S.yaw_still_s = 0
+      -- Last output at which the rover stayed still (under 2 deg/s for the whole second)
+      if math.abs(yaw_rate) < YAW_RATE_THRESH_RAD_S and S.yaw_move_lvl == nil then
+        S.yaw_still_lvl = autotune.relay
+      end
       autotune.relay = math.min(S.yaw_max_relay, autotune.relay + S.YAW_RAMP_STEP)
       -- The relay holds its last output until the next switch; apply the new
       -- amplitude now, same direction
@@ -930,6 +976,7 @@ local function runYawAutotune()
     local effective_i = r.I * gain_multiplier
     param:set_and_save('SCR_USER2', r.P)
     param:set_and_save('SCR_USER3', r.I)
+    S.saveYawBreakaway()
     steering_steady_pid:setGains(effective_p, effective_i, 0)
     steering_steady_pid:resetInternalState()
     gcs:send_text(MAV_SEVERITY.NOTICE, string.format("YawTune: Ku=%.2f Pu=%.2fs a=%.1fdeg", r.Ku, r.Pu, math.deg(r.amp)))
