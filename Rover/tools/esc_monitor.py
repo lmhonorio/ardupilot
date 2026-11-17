@@ -256,6 +256,8 @@ def reader(link, store, csv_writer, csv_file, stop):
     seq = 0
     last_hb = 0.0
     vehicle_sys = None
+    last_value_ms = {}   # name -> boot_ms of the last value kept
+    recent_text = {}     # (severity, text) -> monotonic time seen
     while not stop.is_set():
         now = time.monotonic()
         if now - last_hb >= 1.0:
@@ -287,10 +289,23 @@ def reader(link, store, csv_writer, csv_file, stop):
             if msgid == MSG_NAMED_VALUE_FLOAT:
                 if not msg["name"].startswith("ESC"):
                     continue
+                # The HereLink can deliver every message twice (its 14550 stream
+                # and the replies to our 14552 heartbeat): same name and boot time
+                if last_value_ms.get(msg["name"]) == msg["boot_ms"]:
+                    continue
+                last_value_ms[msg["name"]] = msg["boot_ms"]
                 store.add_value(msg["name"], msg["value"])
                 csv_writer.writerow([wall, "%.3f" % store.now(), msg["boot_ms"], msg["name"],
                                      "%.4f" % msg["value"], ""])
             elif msgid == MSG_STATUSTEXT:
+                # Same duplicate path; text has no timestamp, so drop an identical
+                # line seen within the last second
+                key = (msg["severity"], msg["text"])
+                if now - recent_text.get(key, -10.0) < 1.0:
+                    continue
+                recent_text[key] = now
+                if len(recent_text) > 200:
+                    recent_text.clear()
                 sev = SEVERITY[msg["severity"]] if msg["severity"] < len(SEVERITY) else str(msg["severity"])
                 store.add_event(msg["severity"], msg["text"])
                 csv_writer.writerow([wall, "%.3f" % store.now(), "", "STATUSTEXT", msg["severity"], msg["text"]])
