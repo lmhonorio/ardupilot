@@ -72,7 +72,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611i",
+  VERSION = "v2611j",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -93,7 +93,10 @@ local K = {
   MOVING_RPM = 5,
   -- Smallest speed target the stall boost acts on, and the side command below
   -- which a stopped side coasts at 0 A
-  STALL_MIN_RPM = 1,
+  STALL_MIN_RPM = 0.5,
+  -- A wheel under this rpm counts as stalled even for a tiny target: the rpm
+  -- reading jitters about 0.4 rpm and switched the boost on and off
+  STALL_NOISE_RPM = 1,
   REST_CMD = 0.004,
   -- Share of the stall boost removed once the wheel breaks free
   STALL_RELEASE = 0.7,
@@ -812,7 +815,7 @@ local function wheel_pi(i, target, dt, k)
   -- so a slow target (a yaw correction of a few degrees asks for 1-3 rpm)
   -- also breaks free, while a wheel that is accelerating normally is left alone.
   if k.stall > 0 and math.abs(target) >= K.STALL_MIN_RPM and
-      math.abs(fb.wheel_rpm) < math.min(K.MOVING_RPM, 0.5 * math.abs(target)) then
+      math.abs(fb.wheel_rpm) < math.min(K.MOVING_RPM, math.max(K.STALL_NOISE_RPM, 0.5 * math.abs(target))) then
     local add = (target > 0 and 1 or -1) * k.stall * dt
     local before = fb.integrator
     fb.integrator = constrain(fb.integrator + add, -k.imax, k.imax)

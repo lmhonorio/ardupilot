@@ -143,8 +143,7 @@ local S = {
   YAW_RAMP_STEP = 0.05,   -- raise by 5 % of the output range per step
   YAW_TUNE_TIMEOUT_S = 60, -- relay measuring time, as in modules/autotune.lua
   YAW_MOVE_RATE = math.rad(5), -- turn rate that counts as the rover really turning
-  YAW_DEADBAND_CAN = 0.005,    -- 0.6 rpm at ESC_RPM 120: below the CAN stall-boost minimum
-  yaw_still_lvl = nil,     -- last ramp output that left the rover still
+  YAW_DEADBAND_CAN = 0.005,    -- 0.6 rpm at ESC_RPM 120: below the CAN stall-boost minimum  yaw_still_lvl = nil,     -- last ramp output that left the rover still
   yaw_move_lvl = nil,      -- first ramp output that turned it
 }
 assert(S.tune_select:init('SCR_USER1'), 'could not bind SCR_USER1 parameter')
@@ -773,7 +772,14 @@ local function applyPWMSteeringMode()
     return
   end
 
-  -- Rotate in place with pid output
+  -- Rotate in place with pid output.
+  -- Clear the integrator once the error changes sign (target passed): on a
+  -- long turn it wound up, and after the overshoot it cancelled the P term
+  -- for seconds (Ti about 12 s), leaving a 10 degree error with a zero
+  -- command (seen on CAN: target 0 rpm for 7 s at -11 to -9 degrees).
+  if steering_steady_pid.integrator * err < 0 then
+    steering_steady_pid.integrator = 0
+  end
   local s_out = steering_steady_pid:compute(err, UPDATE_DT)
   -- PWM only: the ESC gets a raw duty, so a stalled rover needs a minimum kick.
   -- On CAN the command is a wheel speed target and esc_can.lua breaks the
