@@ -22,7 +22,7 @@ local THROTTLE_CONTROL_OUTPUT_CHANNEL = 3
 local CONTROL_OUTPUT_YAW = 4
 local THROTTLE_PARAM_TABLE_KEY = 17
 local THROTTLE_PARAM_TABLE_PREFIX = 'THRO_'
-assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 2), 'could not add Lua throttle parameter table')
+assert(param:add_table(THROTTLE_PARAM_TABLE_KEY, THROTTLE_PARAM_TABLE_PREFIX, 3), 'could not add Lua throttle parameter table')
 --[[
   // @Param: THRO_MAX_LUA
   // @DisplayName: Lua maximum motor output
@@ -148,6 +148,28 @@ local S = {
 }
 assert(S.tune_select:init('SCR_USER1'), 'could not bind SCR_USER1 parameter')
 assert(S.rc3_reversed:init('RC3_REVERSED'), 'could not bind RC3_REVERSED parameter')
+--[[
+  // @Param: THRO_INV
+  // @DisplayName: Invert ArduPilot throttle
+  // @Description: 1 reverses the throttle that ArduPilot's own modes send (Auto, Circle, Acro, RTL, Simple, Circle tune) before the wheels. The manual stick path is never changed: it already takes forward as (trim - stick), the opposite of ArduPilot's throttle sign, so with 1 forward means forward in every mode. 0 keeps ArduPilot's sign.
+  // @Values: 0:ArduPilot sign,1:Inverted (match the manual stick)
+  // @User: Standard
+--]]
+assert(param:add_param(THROTTLE_PARAM_TABLE_KEY, 3, 'INV', 1), 'could not add THRO_INV parameter')
+S.thro_inv = Parameter()
+assert(S.thro_inv:init('THRO_INV'), 'could not bind THRO_INV parameter')
+
+-- Throttle from ArduPilot's controllers in the sign the wheels use. On this
+-- rover forward is negative for the motors (manual forward logged -109 rpm on
+-- all four wheels), and ArduPilot's positive throttle drove the rover backward
+-- in Circle and Auto. Steering already matches and is not touched.
+function S.apThrottle(t)
+  t = tonumber(t) or 0
+  if S.thro_inv:get() >= 0.5 then
+    return -t
+  end
+  return t
+end
 
 -- Stick deadzone for the CAN manual path: RCn_DZ when set, otherwise 20 us
 function S.stickDeadzone(name)
@@ -830,7 +852,7 @@ local function applyPWMAutoMode()
 
   -- Acquiring throttle and steering from internal control output
   -- The throttle sign is preserved so MAV_CMD_DO_SET_REVERSE can be handled natively by ArduRover.
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  local throttle = S.apThrottle(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
   applyControlAllocation(throttle, steering)
 end
@@ -840,7 +862,7 @@ Pass the ArduRover internal controllers' outputs straight to the allocation
 (used by CIRCLE/ACRO/RTL, e.g. during Rover QuickTune)
 --]]
 local function applyPWMInternalControl(timeout_ms)
-  local throttle = tonumber(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL)) or 0
+  local throttle = S.apThrottle(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
   applyControlAllocation(throttle, steering, timeout_ms)
 end
@@ -1114,7 +1136,8 @@ local function update()
     local native_steering = vehicle:get_control_output(CONTROL_OUTPUT_YAW)
     local steering, allow_output = circle_tune:update(throttle, native_steering, throttle_max_lua_param:get())
     if allow_output then
-      local pwm_l, pwm_r = applyControlAllocation(throttle, steering or native_steering, 60)
+      -- circle_tune checks the throttle in ArduPilot's sign; the wheels get the motor sign
+      local pwm_l, pwm_r = applyControlAllocation(S.apThrottle(throttle), steering or native_steering, 60)
       if steering then
         circle_tune:log_sample(throttle, steering, pwm_l, pwm_r)
       end

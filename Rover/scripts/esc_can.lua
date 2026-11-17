@@ -36,7 +36,8 @@
 -- ESC_WT_RELAY wheel autotune current, % of ESC_CUR (1..100): the current step
 --              of USER1=4 and 5. 20-30% suits the loaded rover (a step that moves
 --              it but stays below the rpm guard); less is enough in the air.
--- ESC_WT_BW    USER1=4 target bandwidth, rad/s (default 8). Higher = faster and
+-- ESC_WT_BW    USER1=4/5 target bandwidth, rad/s (default 5; on the rover 8 overshot
+--              15-188% on the first check, 6 gave 12-38%, 4.5 gave 1-7%). Higher = faster and
 --              stiffer with bigger current peaks; capped by the measured lag.
 -- ESC_WT_RPM   high plateau of USER1=4 and 5, wheel rpm. The low plateau is half.
 --              Values below 60 stay on 120, so an old saved 30 does not take over.
@@ -72,7 +73,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611j",
+  VERSION = "v2611n",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -178,7 +179,7 @@ local PARAM_SPEC = {
   { 42, "FF4", 0 },
   { 43, "GCS_HZ", 4 },
   { 44, "PREF", 0.5 },
-  { 45, "WT_BW", 8 },
+  { 45, "WT_BW", 5 },
   { 46, "STALL", 30 },
 }
 
@@ -1073,20 +1074,6 @@ function M.tune_reset_window(zero_ref)
   end
 end
 
-function M.tune_start_direction(dir)
-  tune.dir = dir
-  tune.state = "ff"
-  tune.ff_level = 1
-  tune.lo_i = nil
-  tune.lo_rpm = nil
-  tune.base = { 0, 0, 0, 0 }
-  tune.rpm = { 0, 0, 0, 0 }
-  tune.relay = nil
-  tune.plant = nil
-  tune.plants = nil
-  M.tune_reset_window(true)
-end
-
 --[[
 Wheel tune constants. SCR_USER1 = 4 runs it with every wheel on the ground;
 SCR_USER1 = 5 runs the same sequence for one wheel at a time, wheels in the
@@ -1104,6 +1091,9 @@ K.STEP_S = 0.25          -- longest current step
 K.STEP_MOVE_RPM = 4      -- a wheel this far from its start rpm is moving: fit from here
 K.STEP_MAX_DEV = 0.5     -- a wheel stops its step once it moved this fraction of the plateau
 K.STEP_MIN_N = 5         -- samples needed for a slope
+K.STEP_RETRIES = 2       -- step again at half current when a wheel had too few samples
+K.LAG_MIN = 0.02         -- lag floor for the bandwidth cap
+K.LAG_DEFAULT = 0.03     -- lag when no wheel gave a usable intercept (CAN + gearbox, measured 34 ms)
 K.STEP_NEG_LAG = 0.05    -- a fitted lag down to -50 ms is read as 0 (noise)
 K.RECOVER_S = 0.8
 K.VERIFY_HOLD_S = 1.0
@@ -1187,10 +1177,16 @@ function M.step_close()
         if finite(lag) and lag < 0 and lag > -K.STEP_NEG_LAG then
           lag = 0
         end
-        if finite(kv) and kv > 0 and finite(lag) and lag >= 0 and lag <= 0.3 then
+        -- Kv (the slope) and the lag (the intercept) are kept apart: a wheel
+        -- already drifting when the step starts gives a good slope but a
+        -- meaningless intercept (seen: n 18 kv 29 lag -0.091, then failed)
+        if finite(kv) and kv > 0 then
           f.kv[w] = f.kv[w] + kv
           f.kvn[w] = f.kvn[w] + 1
-          f.lag[w] = f.lag[w] + lag
+          if finite(lag) and lag >= 0 and lag <= 0.3 then
+            f.lag[w] = f.lag[w] + lag
+            f.lagn[w] = f.lagn[w] + 1
+          end
         end
       end
     end
@@ -1206,16 +1202,18 @@ function M.step_gains(k)
     if M.on(w) then
       if f.kvn[w] == 0 then
         return false, string.format("ESC %d no step response (n %d kv %.0f lag %.3f)",
-          w, f.dn[w], f.dkv[w], f.dlag[w])
+          w, f.dn[w], f.dkv[w], f.dlag[w]), w
       end
-      nl = nl + 1
-      lags[nl] = f.lag[w] / f.kvn[w]
+      if f.lagn[w] > 0 then
+        nl = nl + 1
+        lags[nl] = f.lag[w] / f.lagn[w]
+      end
     end
   end
-  local lag = M.median(M.head(lags, nl))
-  if lag == nil then
-    return false, "no step response"
-  end
+  -- Median of the wheels with a usable intercept, never below 20 ms: a lag
+  -- read as 0 (seen: T 0.001) lifted the bandwidth cap
+  local lag = M.median(M.head(lags, nl)) or K.LAG_DEFAULT
+  lag = math.max(lag, K.LAG_MIN)
   local bw = constrain(g("WT_BW"), 1, 50)
   if lag > 0 then
     bw = math.min(bw, 1 / (K.WC_LAG * lag))
@@ -1266,11 +1264,12 @@ function M.tune_start_direction(dir)
   tune.base = { 0, 0, 0, 0 }
   tune.rpm = { 0, 0, 0, 0 }
   tune.bw_scale = 1
+  tune.step_tries = 0
   tune.tries = 0
   -- Constructors: every list at its final size, no growth during the tune
   tune.fit = { n = { 0, 0, 0, 0 }, st = { 0, 0, 0, 0 }, sr = { 0, 0, 0, 0 }, stt = { 0, 0, 0, 0 },
     str = { 0, 0, 0, 0 }, r0 = { 0, 0, 0, 0 }, kv = { 0, 0, 0, 0 }, kvn = { 0, 0, 0, 0 },
-    lag = { 0, 0, 0, 0 }, dn = { 0, 0, 0, 0 }, dkv = { 0, 0, 0, 0 }, dlag = { 0, 0, 0, 0 },
+    lag = { 0, 0, 0, 0 }, lagn = { 0, 0, 0, 0 }, dn = { 0, 0, 0, 0 }, dkv = { 0, 0, 0, 0 }, dlag = { 0, 0, 0, 0 },
     done = { false, false, false, false } }
   tune.tkp = { 0, 0, 0, 0 }
   tune.tki = { 0, 0, 0, 0 }
@@ -1294,12 +1293,12 @@ function M.direction_done()
       row[w] = { P = tune.tkp[w], I = tune.tki[w], ff = tune.tff[w] }
     end
   end
-  if tune.dir > 0 then
-    M.tune_start_direction(-1)
+  if tune.dir == tune.first then
+    M.tune_start_direction(-tune.first)
   elseif tune.only ~= nil and M.next_wheel(tune.only) ~= nil then
     tune.only = M.next_wheel(tune.only)
     tune_message(MAV_SEVERITY.INFO, string.format("next ESC %d", tune.only))
-    M.tune_start_direction(1)
+    M.tune_start_direction(tune.first)
     -- Let the previous wheel spin down before the next one starts
     tune.state = "rest"
   else
@@ -1354,6 +1353,10 @@ function M.wheel_tune(dt, k, armed, enabled)
     tune.mode = selector()
     tune.rows = { {}, {} }
     tune.only = nil
+    -- Start with the rover's physical forward. The mixer's THRO_INV = 1 says
+    -- forward is negative wheel rpm on this rover; positive rpm (the old
+    -- "fwd") drove it backward first. Both directions are still tuned.
+    tune.first = ((param:get("THRO_INV") or 0) >= 0.5) and -1 or 1
     if tune.mode == K.BRK_SELECTOR then
       tune.only = M.next_wheel(0)
       if tune.only == nil then
@@ -1361,7 +1364,7 @@ function M.wheel_tune(dt, k, armed, enabled)
         return nil
       end
     end
-    M.tune_start_direction(1)
+    M.tune_start_direction(tune.first)
     local lo, hi = M.tune_levels(k)
     tune_message(MAV_SEVERITY.NOTICE, string.format("%s step tune %.0f/%.0f rpm, step %.1fA, BW %.1f",
       tune.only and "in the air, one wheel," or "ground", lo, hi, M.relay_amp(k), constrain(g("WT_BW"), 1, 50)))
@@ -1377,7 +1380,7 @@ function M.wheel_tune(dt, k, armed, enabled)
 
   local lo_rpm, hi_rpm = M.tune_levels(k)
   local dir = tune.dir
-  local dir_name = dir > 0 and "fwd" or "rev"
+  local dir_name = (dir == tune.first) and "fwd" or "rev"
   local cur = M.zero_currents()
   tune.t = tune.t + dt
   local target = dir * (tune.ff_level == 1 and lo_rpm or hi_rpm)
@@ -1507,7 +1510,18 @@ function M.wheel_tune(dt, k, armed, enabled)
       end
     end
     if tune.t >= K.RECOVER_S then
-      local ok, why = M.step_gains(k)
+      local ok, why, short = M.step_gains(k)
+      if not ok and short ~= nil and tune.step_tries < K.STEP_RETRIES then
+        -- A light, fast wheel reaches its rpm guard in a few loop cycles and
+        -- the fit gets too few points. Step again with half the current;
+        -- wheels already measured just add to their average.
+        tune.step_tries = tune.step_tries + 1
+        tune.step_i = tune.step_i * 0.5
+        tune_message(MAV_SEVERITY.INFO, string.format("%s ESC %d too fast for the step; again at %.1fA",
+          dir_name, short, tune.step_i))
+        M.step_begin(1)
+        return cur
+      end
       if not ok then
         tune_fail(why)
         return M.zero_currents()
