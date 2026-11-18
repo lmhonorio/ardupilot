@@ -152,10 +152,18 @@ python Rover/tools/mav_param.py WP_SPEED ESC_RPM       # ler parâmetros
 python Rover/tools/mav_param.py ESC_IMAX=15            # gravar e confirmar
 ```
 
+- O monitor (desde 18/11) também pede atitude, posição, NAV_CONTROLLER_OUTPUT, PID_TUNING, servos, RC e
+  missão a `--rate` Hz (padrão 10, só até reiniciar a placa), baixa todos os parâmetros no início
+  (linhas `PARAM:<nome>` no CSV + arquivo `.parm`) e registra mudanças de parâmetro e de modo (`MODE`).
+  PID_TUNING precisa `GCS_PID_MASK = 3`.
+- Análise: `python Rover/tools/esc_monitor.py analyze esc_log_X.csv --plot` (relatório por modo + PNG
+  `esc_log_X_analise.png`; `--from/--to` para um trecho). Aponta zigue-zague (período/amplitude
+  do xtrack), atraso e ganho do yaw rate, saturação e atraso das rodas.
 - Os dois programas usam a porta UDP 14550: fechar o monitor antes de usar o `mav_param.py`.
 - A HereLink só começa a transmitir depois de receber heartbeat em `192.168.43.1:14552`.
   As mensagens podem chegar duplicadas; o monitor descarta as repetidas.
-- No CSV (`hora_pc, t_s, boot_ms, nome, valor, texto`) os campos são:
+- No CSV (`hora_pc, t_s, boot_ms, nome, valor, texto`) os campos são (ESCn_T = temperatura do motor, 1 Hz; BAT_V/BAT_I = bateria do ArduPilot, desde 18/11).
+  `ESCn_I` é corrente de torque/fase do motor (C620), NÃO corrente de bateria; a análise estima a da bateria por P = Kt·I·ω + R·I² (M3508: Kt 0,3 N·m/A, R 0,194 Ω):
   - `ESC1..4_RPM`, `ESC1..4_I`, `ESC1..4_ICMD`: rpm, corrente e corrente comandada de cada roda;
   - `ESC_TGT_L` / `ESC_TGT_R`: rpm alvo de cada lado;
   - `STATUSTEXT`: mensagens de texto da controladora.

@@ -43,7 +43,8 @@
 --              Values below 60 stay on 120, so an old saved 30 does not take over.
 -- ESC_GCS_HZ   live NAMED_VALUE_FLOAT stream to the GCS, Hz (0 = off, max 20):
 --              ESCn_I measured current A, ESCn_ICMD commanded current A,
---              ESCn_RPM wheel rpm, ESC_TGT_L / ESC_TGT_R side target rpm.
+--              ESCn_RPM wheel rpm, ESC_TGT_L / ESC_TGT_R side target rpm,
+--              ESCn_T motor temperature deg C (1 Hz).
 -- ESC_STALL    stall boost, A/s (default 30, 0 = off): while a wheel has a speed
 --              target of 5 rpm or more but is not turning, its integrator rises
 --              at this rate (capped by ESC_IMAX) until it breaks away. Makes
@@ -127,10 +128,10 @@ local K = {
   TELEM_CURRENT = 1 << 3,
   TELEM_MOTOR_TEMP = 1 << 1,
   GCS_NAMES = {
-    { "ESC1_I", "ESC1_ICMD", "ESC1_RPM" },
-    { "ESC2_I", "ESC2_ICMD", "ESC2_RPM" },
-    { "ESC3_I", "ESC3_ICMD", "ESC3_RPM" },
-    { "ESC4_I", "ESC4_ICMD", "ESC4_RPM" },
+    { "ESC1_I", "ESC1_ICMD", "ESC1_RPM", "ESC1_T" },
+    { "ESC2_I", "ESC2_ICMD", "ESC2_RPM", "ESC2_T" },
+    { "ESC3_I", "ESC3_ICMD", "ESC3_RPM", "ESC3_T" },
+    { "ESC4_I", "ESC4_ICMD", "ESC4_RPM", "ESC4_T" },
   },
 }
 
@@ -346,6 +347,7 @@ local M = {
   telem = nil,
   latest = {},
   gcs_ms = 0,
+  gcs_temp_ms = 0,
   c620_seen = false,
   c620_ms = 0,
   prearm_ms = 0,
@@ -1981,6 +1983,11 @@ function M.send_gcs()
     return
   end
   M.gcs_ms = now
+  -- Motor temperature (C620 feedback byte 6, deg C) once per second: it moves slowly
+  local temp = now - M.gcs_temp_ms >= 1000
+  if temp then
+    M.gcs_temp_ms = now
+  end
   for i = 1, K.NUM_ESC do
     local fb = esc[i]
     if fb.detected then
@@ -1989,6 +1996,9 @@ function M.send_gcs()
       gcs:send_named_float(names[1], direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
       gcs:send_named_float(names[2], fb.current_a)
       gcs:send_named_float(names[3], fb.wheel_rpm)
+      if temp then
+        gcs:send_named_float(names[4], fb.temperature)
+      end
     end
   end
   gcs:send_named_float("ESC_TGT_L", side[1].target_rpm or 0)
