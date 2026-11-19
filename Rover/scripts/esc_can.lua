@@ -11,6 +11,8 @@
 --
 -- ESC_CAN      0 = PWM (driver silent), 1 = CAN. Change only while disarmed.
 -- ESC_MODE     0 = per-wheel speed PI, 1 = current follows the command
+-- ESC_RPM_AUX  1 = configured RPM helpers; 0 = bypass ramp, prefilter, brake
+--              window, stall boost and side desaturation. PID and hard limits stay active.
 -- ESC_RPM      wheel rpm at command 1.0
 -- ESC_GEAR     rotor-to-wheel ratio (M3508 P19 = 19.2032)
 -- ESC_CUR      current limit, ampere
@@ -74,7 +76,7 @@
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611n",
+  VERSION = "v2611o",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -182,6 +184,16 @@ local PARAM_SPEC = {
   { 44, "PREF", 0.5 },
   { 45, "WT_BW", 5 },
   { 46, "STALL", 30 },
+  -- Append only: existing parameter slots must keep their saved meaning.
+  --[[
+    // @Param: ESC_RPM_AUX
+    // @DisplayName: RPM control auxiliary features
+    // @Description: Enable configured RPM reference ramp, prefilter, opposing-current restriction, stall boost and side desaturation. Zero bypasses these helpers without changing their saved settings. PID, absolute current limits, anti-windup and safety stops remain active. Also applies to wheel autotune verification. Effective within 50 ms.
+    // @Values: 0:Disabled,1:Enabled
+    // @Range: 0 1
+    // @User: Standard
+  --]]
+  { 47, "RPM_AUX", 1 },
 }
 
 local MAV_SEVERITY = { CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6 }
@@ -472,7 +484,7 @@ local function ensure_params()
     local now = now_ms()
     if now - last_driver_warn >= 5000 then
       last_driver_warn = now
-      gcs:send_text(MAV_SEVERITY.WARNING, "ESC: reboot so ESC_P1..FF4 can be added")
+      gcs:send_text(MAV_SEVERITY.WARNING, "ESC: reboot to resize ESC_ parameter table")
     end
     return false
   end
@@ -922,6 +934,15 @@ local function read_gains(now)
   cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
   cached.pref = constrain(g("PREF"), 0, 2)
   cached.stall = constrain(g("STALL"), 0, 200)
+  -- Override the effective cache only; preserve the individual saved settings.
+  -- Keep logging/zero-rpm hold bits of ESC_OPT and all hard current/safety limits.
+  if g("RPM_AUX") < 0.5 then
+    cached.acc = 0
+    cached.pref = 0
+    cached.brake = false
+    cached.stall = 0
+    cached.opt = cached.opt & (~4)
+  end
   return cached
 end
 
@@ -1556,9 +1577,9 @@ function M.wheel_tune(dt, k, armed, enabled)
       if M.on(i + 1) then
         profile_wheel(i, ref_goal, dt)
         local ref = fb.ref_rpm
-        if k.pref > 0 then
-          ref = prefilter(fb, ref, dt, (tune.tkp[i + 1] / tune.tki[i + 1]) * k.pref)
-        end
+        -- tf=0 passes through and tracks filter state while bypassed, so
+        -- re-enabling the helpers cannot resume an old reference.
+        ref = prefilter(fb, ref, dt, (tune.tkp[i + 1] / tune.tki[i + 1]) * k.pref)
         cur[i + 1] = wheel_pi(i, ref, dt, kt)
         if tune.vphase == "meas" then
           local r = dir * fb.wheel_rpm
@@ -1780,9 +1801,7 @@ function M.run_control()
           fb.current_a = 0
         else
           local ref = fb.ref_rpm
-          if k.pref > 0 then
-            ref = prefilter(fb, ref, dt, wheel_ti(i, k) * k.pref)
-          end
+          ref = prefilter(fb, ref, dt, wheel_ti(i, k) * k.pref)
           fb.current_a = wheel_pi(i, ref, dt, k)
         end
         if fb.saturated then
