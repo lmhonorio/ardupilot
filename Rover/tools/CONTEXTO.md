@@ -36,6 +36,7 @@ Atualizado em 18/11/2026. Último commit: `b56b8e33f8`.
 | `Rover/scripts/rover-quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
 | `Rover/scripts/modules/` | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua` (`PERIOD_MS` = 25), `functions.lua` |
 | `Rover/tools/esc_monitor.py` | Monitor no PC: gráfico, console e CSV, via HereLink |
+| `Rover/tools/mission_editor.py` | Interface: baixa a missão do rover, edita o rumo (Alt) de cada waypoint numa bússola (0 = norte), avisa conflitos com a ré, envia de volta e abre/salva .waypoints |
 | `Rover/tools/mav_param.py` | Ler e gravar parâmetros pela HereLink (sem pymavlink) |
 | `Rover/docs/` | Documentação: `esc_can.md`, `Controle-CAN.md`, `Autotunning.md`, `Manual-Tuning-CAN.md` |
 
@@ -101,6 +102,9 @@ Quando o rover chega a um `NAV_WAYPOINT`, o **campo de altitude (z)** define o r
 
 O Mission Planner pode preencher a altitude com algo como 927,5, e o rover então gira para 207,5°.
 **Na missão, colocar Alt = -1 nos waypoints de passagem.**
+
+Ré em missão: `DO_SET_REVERSE` (P1 1/0). Toda troca de modo zera a ré, e o alinhamento (AUTO→STEERING→AUTO)
+não repete o `DO_SET_REVERSE`: waypoint antes dele e todos os de ré com Alt = -1. Ver `Rover/docs/Missoes-AUTO.md`.
 
 ## Limites do Lua do ArduPilot (já causaram problemas)
 
