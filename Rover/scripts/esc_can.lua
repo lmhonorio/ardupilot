@@ -348,6 +348,12 @@ local M = {
   latest = {},
   gcs_ms = 0,
   gcs_temp_ms = 0,
+  -- One NAMED_VALUE_FLOAT per loop. A burst of all four motors overflows the
+  -- MAVLink queue and the later wheels arrive at a fraction of ESC_GCS_HZ.
+  gcs_q_name = {},
+  gcs_q_val = {},
+  gcs_q_n = 0,
+  gcs_q_i = 1,
   c620_seen = false,
   c620_ms = 0,
   prearm_ms = 0,
@@ -1973,9 +1979,23 @@ function M.push_telem()
 end
 
 -- Live per-motor values for the GCS (Mission Planner: Quick tab or Tuning graph)
+local function gcs_push(name, value)
+  local n = M.gcs_q_n + 1
+  M.gcs_q_n = n
+  M.gcs_q_name[n] = name
+  M.gcs_q_val[n] = value
+end
+
 function M.send_gcs()
   local hz = M.gains.gcs_hz
   if hz <= 0 or not latched_can then
+    M.gcs_q_n = 0
+    return
+  end
+  -- Finish the previous sample before taking another, one message per loop.
+  if M.gcs_q_i <= M.gcs_q_n then
+    gcs:send_named_float(M.gcs_q_name[M.gcs_q_i], M.gcs_q_val[M.gcs_q_i])
+    M.gcs_q_i = M.gcs_q_i + 1
     return
   end
   local now = now_ms()
@@ -1983,6 +2003,8 @@ function M.send_gcs()
     return
   end
   M.gcs_ms = now
+  M.gcs_q_n = 0
+  M.gcs_q_i = 1
   -- Motor temperature (C620 feedback byte 6, deg C) once per second: it moves slowly
   local temp = now - M.gcs_temp_ms >= 1000
   if temp then
@@ -1993,16 +2015,16 @@ function M.send_gcs()
     if fb.detected then
       -- Constant names: no new strings on every send
       local names = K.GCS_NAMES[i]
-      gcs:send_named_float(names[1], direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
-      gcs:send_named_float(names[2], fb.current_a)
-      gcs:send_named_float(names[3], fb.wheel_rpm)
+      gcs_push(names[1], direction(i - 1) * fb.current_raw / K.RAW_PER_AMP)
+      gcs_push(names[2], fb.current_a)
+      gcs_push(names[3], fb.wheel_rpm)
       if temp then
-        gcs:send_named_float(names[4], fb.temperature)
+        gcs_push(names[4], fb.temperature)
       end
     end
   end
-  gcs:send_named_float("ESC_TGT_L", side[1].target_rpm or 0)
-  gcs:send_named_float("ESC_TGT_R", side[2].target_rpm or 0)
+  gcs_push("ESC_TGT_L", side[1].target_rpm or 0)
+  gcs_push("ESC_TGT_R", side[2].target_rpm or 0)
 end
 
 function M.send_telem()

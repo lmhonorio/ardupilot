@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRIN</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <img class="logo argo" src="/argo.png" alt="Argo Energia">
+  <nav id="nav" aria-label="Páginas"></nav>
+  <img class="logo grin" src="/grin.png" alt="GRIN">
+</header>
+<section class="status" aria-label="Estado do rover">
+  <div>
+    <span>Ligação</span>
+    <strong id="link">—</strong>
+  </div>
+  <div>
+    <span>Modo</span>
+    <strong id="mode">—</strong>
+  </div>
+  <div class="estado">
+    <span>Estado</span>
+    <strong id="armed">—</strong>
+    <em id="problem"></em>
+  </div>
+</section>
+<p id="note" class="note"></p>
+<main id="view"></main>
+<button type="button" id="theme">Escuro</button>
+<script src="/app.js"></script>
+</body>
+</html>
