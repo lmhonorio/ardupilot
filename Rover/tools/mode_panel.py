@@ -14,9 +14,12 @@ Feche o esc_monitor.py antes: os dois escutam a UDP 14550.
 
 import argparse
 import collections
+import csv
+import datetime
 import json
 import math
 import os
+import re
 import struct
 import sys
 import threading
@@ -44,6 +47,8 @@ CRC_EXTRA = {
 
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_COMPONENT_ARM_DISARM = 400
+MAV_CMD_PREFLIGHT_STORAGE = 245
+MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN = 246
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
 MAV_TYPE_GCS = 6
@@ -98,6 +103,41 @@ SERIES = {
     "BAT_I",
 }
 READOUT = ("VFR_gspd", "NAV_xtrack", "BAT_V", "BAT_I")
+
+
+def is_can_log(name):
+    """Wheel CAN values written to the CSV: current, rpm and temperature."""
+    if name in ("ESC_TGT_L", "ESC_TGT_R"):
+        return True
+    return name.startswith("ESC") and name[3:4].isdigit() and name.endswith(("_I", "_ICMD", "_RPM", "_T"))
+
+
+class CanLog:
+    """Same long CSV as esc_monitor, only the CAN motor values."""
+
+    def __init__(self, path, t0):
+        self.path = path
+        self.t0 = t0
+        self.lock = threading.Lock()
+        self.file = open(path, "w", newline="", encoding="utf-8-sig")
+        self.writer = csv.writer(self.file)
+        self.writer.writerow(["hora_pc", "t_s", "boot_ms", "nome", "valor", "texto"])
+        self.file.flush()
+        self.rows = 0
+
+    def write(self, name, value, boot_ms):
+        wall = datetime.datetime.now().isoformat(timespec="milliseconds")
+        t_s = "%.3f" % (time.monotonic() - self.t0)
+        with self.lock:
+            self.writer.writerow([wall, t_s, boot_ms if boot_ms is not None else "", name, "%.4f" % float(value), ""])
+            self.rows += 1
+            if self.rows % 40 == 0:
+                self.file.flush()
+
+    def close(self):
+        with self.lock:
+            self.file.flush()
+            self.file.close()
 
 GROUPS = [
     {"id": "direcao", "title": "Direção", "params": [
@@ -256,9 +296,12 @@ PROCESSES = [
      "text": "Tira o rover de qualquer ensaio. Não muda o modo de voo. Também serve para abortar.",
      "done": "SCR_USER1 = 0."},
 ]
+# Selector value that is only valid in this flight mode. 0 is always allowed.
+ENSAIO_REQUIRES = {1: "CIRCLE", 2: "HOLD", 3: "CIRCLE", 4: "HOLD", 5: "HOLD"}
 PROCESS_BY_ID = {item["id"]: item for item in PROCESSES}
 PARAM_NAMES = tuple(param["name"] for group in GROUPS for param in group["params"])
 PARAM_OK = set(PARAM_NAMES)
+PARAM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,15}$")
 
 
 def x25_crc(data, crc=0xFFFF):
@@ -305,8 +348,8 @@ class Encoder:
     def param_read_name(self, sysid, compid, name):
         return self.pack(MSG_PARAM_REQUEST_READ, struct.pack("<hBB16s", -1, sysid, compid, name.encode()))
 
-    def param_set(self, sysid, compid, name, value):
-        payload = struct.pack("<fBB16sB", float(value), sysid, compid, name.encode()[:16], 9)
+    def param_set(self, sysid, compid, name, value, ptype=9):
+        payload = struct.pack("<fBB16sB", float(value), sysid, compid, name.encode()[:16], int(ptype) & 255)
         return self.pack(MSG_PARAM_SET, payload)
 
     def arm(self, sysid, compid, arm):
@@ -386,6 +429,14 @@ class Vehicle:
         self.text = ""
         self.messages = collections.deque(maxlen=400)
         self.status_parts = {}   # id -> [severity, {seq: text}, monotonic]
+        self.revert = None
+        self.reset_inputs = False
+        self.load = None
+        self.last_ack = None
+        self.want_refresh = False
+        self.param_seen = {}
+        self.param_type = {}
+        self.param_epoch = 0
         self.params = {}
         self.latest = {}
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=500))
@@ -427,7 +478,7 @@ def add_value(vehicle, name, value):
             vehicle.series[name].append((t, value))
 
 
-def reader(link, vehicle, stop, tx, enc):
+def reader(link, vehicle, stop, tx, enc, log):
     parser = mon.MavlinkParser()
     last_hb = 0.0
     last_streams = -100.0
@@ -447,6 +498,19 @@ def reader(link, vehicle, stop, tx, enc):
                 for msgid, factor in mon.STREAMS.items():
                     link.send(enc.set_interval(sysid, compid, msgid, RATE_HZ * factor))
         service_jobs(link, vehicle, tx, enc)
+        service_load(link, vehicle, tx, enc)
+        with vehicle.lock:
+            refresh = bool(vehicle.want_refresh and vehicle.sysid is not None)
+            if refresh:
+                vehicle.want_refresh = False
+                vehicle.params.clear()
+                vehicle.param_seen.clear()
+                vehicle.param_type.clear()
+                vehicle.list_sent = True
+                refresh_sys, refresh_comp = vehicle.sysid, vehicle.compid or 1
+        if refresh:
+            with tx:
+                link.send(enc.param_list(refresh_sys, refresh_comp))
         if sysid is not None and now - last_param >= 2.0:
             last_param = now
             with vehicle.lock:
@@ -509,12 +573,18 @@ def reader(link, vehicle, stop, tx, enc):
                 continue
             if msgid == mon.MSG_COMMAND_ACK:
                 with vehicle.lock:
+                    vehicle.last_ack = (msg["command"], msg["result"], time.monotonic())
                     fail_job(vehicle, msg["command"], msg["result"])
             elif msgid == mon.MSG_PARAM_VALUE:
                 with vehicle.lock:
                     vehicle.params[msg["name"]] = msg["value"]
+                    vehicle.param_seen[msg["name"]] = time.monotonic()
+                    if msg.get("type"):
+                        vehicle.param_type[msg["name"]] = int(msg["type"])
             elif msgid == mon.MSG_NAMED_VALUE_FLOAT:
                 add_value(vehicle, msg["name"], msg["value"])
+                if log is not None and is_can_log(msg["name"]):
+                    log.write(msg["name"], msg["value"], msg.get("boot_ms", ""))
             elif "values" in msg:
                 for name, value in msg["values"]:
                     add_value(vehicle, name, value)
@@ -575,6 +645,10 @@ def job_label(job):
         return job["name"]
     if kind == "param":
         return "%s = %s" % (job["name"], ("%.6g" % job["value"]))
+    if kind == "command":
+        return job["name"]
+    if kind == "wait":
+        return "espera"
     return "armar" if job["arm"] else "desarmar"
 
 
@@ -586,22 +660,98 @@ def job_done(job):
         return "%s aceito" % job["name"]
     if kind == "param":
         return "%s = %s" % (job["name"], ("%.6g" % job["value"]))
+    if kind == "command":
+        return job["name"]
+    if kind == "wait":
+        return "espera"
     return "armação aceita" if job["arm"] else "desarme aceito"
 
 
-def enqueue(vehicle, jobs, done):
+def param_blocked(vehicle, name, value):
+    if name != "SCR_USER1":
+        return None
+    sel = int(round(value))
+    need = ENSAIO_REQUIRES.get(sel)
+    current = mode_name(vehicle.mode)
+    if need and current != need:
+        return "SCR_USER1=%d exige %s. A placa está em %s." % (sel, need, current or "?")
+    return None
+
+
+def remember_state(vehicle, jobs):
+    params = {}
+    for job in jobs:
+        if job["kind"] == "param" and job["name"] in vehicle.params:
+            params[job["name"]] = vehicle.params[job["name"]]
+    vehicle.revert = {
+        "mode": vehicle.mode,
+        "mode_name": mode_name(vehicle.mode),
+        "params": params,
+    }
+
+
+def enqueue(vehicle, jobs, done, remember=True, sev=None):
     with vehicle.lock:
         if vehicle.sysid is None:
             vehicle.note = "sem rover"
             return False
+        if vehicle.load is not None:
+            push_message(vehicle, 4, "carga do arquivo interrompida")
+            vehicle.load = None
+        if remember:
+            remember_state(vehicle, jobs)
+        else:
+            vehicle.revert = None
         vehicle.jobs.clear()
         for job in jobs:
             job["deadline"] = None
             job["sent"] = 0.0
+            job["opened"] = time.monotonic()
             vehicle.jobs.append(job)
-        vehicle.jobs.append({"kind": "note", "text": done, "deadline": None, "sent": 0.0})
+        note = {"kind": "note", "text": done, "deadline": None, "sent": 0.0}
+        if sev is not None:
+            note["sev"] = sev
+        vehicle.jobs.append(note)
         vehicle.note = "pedindo %s" % job_label(jobs[0])
+        print("[debug] pedido: %s (modo atual %s)" % (
+            ", ".join(job_label(job) for job in jobs), mode_name(vehicle.mode)), flush=True)
     return True
+
+
+def give_up(vehicle, reason, sev=4):
+    """Stop the pending change and command the previous mode. Caller holds the lock."""
+    stayed = mode_name(vehicle.mode) or "?"
+    text = "%s Continua em %s." % (reason, stayed)
+    vehicle.note = text
+    push_message(vehicle, sev, text)
+    vehicle.reset_inputs = True
+    print("[debug] " + text, flush=True)
+    rev = vehicle.revert
+    vehicle.revert = None
+    vehicle.jobs.clear()
+    back = []
+    if rev and rev.get("mode") is not None and rev["mode"] != vehicle.mode:
+        back.append({"kind": "mode", "name": rev["mode_name"] or str(rev["mode"]), "number": rev["mode"]})
+    for name, old in (rev or {}).get("params", {}).items():
+        if old is None:
+            continue
+        got = vehicle.params.get(name)
+        if got is None or abs(got - old) > max(1e-4, abs(old) * 1e-4):
+            back.append({"kind": "param", "name": name, "value": float(old)})
+    if not back:
+        return
+    vehicle.note = "voltando para %s" % (rev.get("mode_name") or stayed)
+    push_message(vehicle, 4, vehicle.note)
+    for job in back:
+        job["deadline"] = None
+        job["sent"] = 0.0
+        vehicle.jobs.append(job)
+    vehicle.jobs.append({
+        "kind": "note",
+        "text": "voltou para %s" % (rev.get("mode_name") or stayed),
+        "deadline": None,
+        "sent": 0.0,
+    })
 
 
 def job_succeeded(vehicle, job):
@@ -617,6 +767,11 @@ def job_succeeded(vehicle, job):
         if got is None:
             return False
         return abs(got - job["value"]) <= max(1e-4, abs(job["value"]) * 1e-4)
+    if kind == "command":
+        ack = vehicle.last_ack
+        return bool(ack and ack[0] == job["command"] and ack[1] == 0 and ack[2] >= job.get("opened", 0))
+    if kind == "wait":
+        return job.get("deadline") is not None and time.monotonic() >= job["deadline"]
     return False
 
 
@@ -625,16 +780,23 @@ def fail_job(vehicle, command, result):
     if result in (0, 1, 3, 5) or not vehicle.jobs:
         return
     job = vehicle.jobs[0]
+    if job["kind"] == "command":
+        if command != job.get("command") or result in (0, 1, 5):
+            return
+        vehicle.note = "%s %s." % (job_label(job), ACK_TEXT.get(result, "resposta %d" % result))
+        push_message(vehicle, 3, vehicle.note)
+        vehicle.jobs.clear()
+        vehicle.revert = None
+        print("[debug] " + vehicle.note, flush=True)
+        return
     if job["kind"] == "mode" and command != MAV_CMD_DO_SET_MODE:
         return
     if job["kind"] == "arm" and command != MAV_CMD_COMPONENT_ARM_DISARM:
         return
     if job["kind"] not in ("mode", "arm"):
         return
-    vehicle.note = "%s %s" % (job_label(job), ACK_TEXT.get(result, "resposta %d" % result))
-    push_message(vehicle, 3, vehicle.note)
-    vehicle.jobs.clear()
-    print(vehicle.note, flush=True)
+    reason = "%s %s." % (job_label(job), ACK_TEXT.get(result, "resposta %d" % result))
+    give_up(vehicle, reason, 3)
 
 
 def send_job(link, enc, sysid, compid, job):
@@ -645,9 +807,11 @@ def send_job(link, enc, sysid, compid, job):
         time.sleep(0.01)
         link.send(enc.mode_frame(sysid, job["number"]))
     elif kind == "param":
-        link.send(enc.param_set(sysid, compid, job["name"], job["value"]))
+        link.send(enc.param_set(sysid, compid, job["name"], job["value"], job.get("type", 9)))
     elif kind == "arm":
         link.send(enc.arm(sysid, compid, job["arm"]))
+    elif kind == "command":
+        link.send(enc.command_long(sysid, compid, job["command"], job.get("p1", 0)))
 
 
 def service_jobs(link, vehicle, tx, enc):
@@ -657,29 +821,43 @@ def service_jobs(link, vehicle, tx, enc):
             return
         job = vehicle.jobs[0]
         if job_succeeded(vehicle, job):
+            if job.get("command") == MAV_CMD_PREFLIGHT_STORAGE:
+                vehicle.want_refresh = True
             vehicle.jobs.popleft()
             if vehicle.jobs and vehicle.jobs[0]["kind"] != "note":
                 vehicle.note = "pedindo %s" % job_label(vehicle.jobs[0])
             elif vehicle.jobs:
-                vehicle.note = vehicle.jobs.popleft()["text"]
+                done = vehicle.jobs.popleft()
+                vehicle.note = done["text"]
+                if done.get("sev") is not None:
+                    push_message(vehicle, done["sev"], done["text"])
                 print(vehicle.note, flush=True)
             else:
                 vehicle.note = job_done(job)
                 print(vehicle.note, flush=True)
             return
         if job["deadline"] is None:
-            job["deadline"] = now + COMMAND_WAIT_S
+            span = job["seconds"] if job["kind"] == "wait" else COMMAND_WAIT_S
+            job["deadline"] = now + span
+            if job["kind"] == "wait":
+                return
         elif now > job["deadline"]:
-            vehicle.note = "sem resposta: %s" % job_label(job)
-            push_message(vehicle, 4, vehicle.note)
-            print(vehicle.note, flush=True)
-            vehicle.jobs.clear()
+            if job["kind"] == "command":
+                reason = "Sem resposta ao pedir %s." % job_label(job)
+                vehicle.note = reason
+                push_message(vehicle, 4, reason)
+                vehicle.jobs.clear()
+                vehicle.revert = None
+                print("[debug] " + reason, flush=True)
+                return
+            give_up(vehicle, "Sem resposta ao pedir %s." % job_label(job), 4)
             return
         if now - job["sent"] < COMMAND_RETRY_S:
             return
         job["sent"] = now
         sysid, compid = vehicle.sysid, vehicle.compid or 1
         outgoing = job
+        print("[debug] enviando %s" % job_label(job), flush=True)
     with tx:
         send_job(link, enc, sysid, compid, outgoing)
 
@@ -689,13 +867,286 @@ def ask_mode(link, vehicle, tx, enc, name, number):
 
 
 def set_param(link, vehicle, tx, enc, name, value, quiet=False):
-    text = "%s = %s" % (name, ("%.6g" % value))
-    return enqueue(vehicle, [{"kind": "param", "name": name, "value": float(value)}], text)
+    with vehicle.lock:
+        reason = param_blocked(vehicle, name, value)
+        if reason:
+            vehicle.note = reason
+            vehicle.reset_inputs = True
+            push_message(vehicle, 4, reason)
+            print("[debug] bloqueado: " + reason, flush=True)
+            return False
+        ptype = int(vehicle.param_type.get(name, 9))
+    text = "%s = %s" % (name, ("%.6g" % float(value)))
+    return enqueue(vehicle, [{
+        "kind": "param", "name": name, "value": float(value), "type": ptype,
+    }], text)
 
 
 def set_arm(link, vehicle, tx, enc, arm):
     done = "armação aceita" if arm else "desarme aceito"
     return enqueue(vehicle, [{"kind": "arm", "arm": bool(arm)}], done)
+
+
+def values_close(got, value):
+    return got is not None and abs(got - value) <= max(1e-4, abs(value) * 1e-4)
+
+
+def _refuse_if_busy(vehicle, action):
+    """Caller holds the lock. Armed changes and a missing link stop the action."""
+    if vehicle.armed:
+        vehicle.note = "desarme antes de %s" % action
+        push_message(vehicle, 4, vehicle.note)
+        return True
+    if vehicle.sysid is None:
+        vehicle.note = "sem rover"
+        return True
+    return False
+
+
+def refresh_params(vehicle):
+    with vehicle.lock:
+        if vehicle.sysid is None:
+            vehicle.note = "sem rover"
+            return False
+        if vehicle.load is not None:
+            push_message(vehicle, 4, "carga do arquivo interrompida")
+            vehicle.load = None
+        vehicle.want_refresh = True
+        vehicle.param_epoch += 1
+        vehicle.note = "lendo parâmetros de novo"
+        push_message(vehicle, 6, "atualizando a lista de parâmetros")
+    return True
+
+
+def confirm_stored(vehicle):
+    """Kept so an old page still gets a clear answer."""
+    return start_write(vehicle, {})
+
+
+def ask_reset(link, vehicle, tx, enc):
+    """Mission Planner sets FORMAT_VERSION to 0, waits, then reboots.
+
+    The running values stay until the board starts again and sees the
+    format mismatch, which is what loads the firmware defaults.
+    """
+    with vehicle.lock:
+        if _refuse_if_busy(vehicle, "voltar ao padrão de fábrica"):
+            return False
+        if vehicle.load is not None:
+            push_message(vehicle, 4, "gravação interrompida")
+            vehicle.load = None
+        jobs = [{
+            "kind": "param",
+            "name": "FORMAT_VERSION",
+            "value": 0.0,
+            "type": int(vehicle.param_type.get("FORMAT_VERSION", 4)),
+        }]
+        if "SYSID_SW_MREV" in vehicle.params:
+            jobs.append({
+                "kind": "param",
+                "name": "SYSID_SW_MREV",
+                "value": 0.0,
+                "type": int(vehicle.param_type.get("SYSID_SW_MREV", 4)),
+            })
+        jobs.append({"kind": "wait", "seconds": 1.0})
+        jobs.append({
+            "kind": "command",
+            "command": MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
+            "p1": 1.0,
+            "name": "reiniciar",
+        })
+    return enqueue(
+        vehicle, jobs, "reiniciando no padrão de fábrica", remember=False, sev=4)
+
+
+def start_write(vehicle, changes):
+    """Send the edited values, the way Mission Planner's Write Params does."""
+    with vehicle.lock:
+        if vehicle.sysid is None:
+            vehicle.note = "sem rover"
+            return False
+        if vehicle.jobs or vehicle.load is not None:
+            vehicle.note = "espere o comando atual terminar"
+            push_message(vehicle, 4, vehicle.note)
+            return False
+        pairs = []
+        if isinstance(changes, dict):
+            for name, raw in changes.items():
+                if not isinstance(name, str) or not PARAM_NAME.match(name):
+                    continue
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(value):
+                    continue
+                pairs.append((name, value))
+        if len(pairs) > 4000:
+            vehicle.note = "muitos parâmetros"
+            push_message(vehicle, 4, vehicle.note)
+            return False
+        if not pairs:
+            vehicle.note = "nenhum parâmetro alterado"
+            push_message(vehicle, 6, vehicle.note)
+            return True
+        vehicle.load = {
+            "pairs": pairs,
+            "i": 0,
+            "fails": 0,
+            "name": None,
+            "deadline": 0.0,
+            "sent": 0.0,
+            "verb": "gravando",
+            "refresh": False,
+        }
+        vehicle.note = "gravando %d parâmetros" % len(pairs)
+        push_message(vehicle, 6, vehicle.note)
+    return True
+
+
+def ask_reboot(link, vehicle, tx, enc):
+    with vehicle.lock:
+        if _refuse_if_busy(vehicle, "reiniciar"):
+            return False
+    return enqueue(
+        vehicle,
+        [{"kind": "command", "command": MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, "p1": 1.0, "name": "reiniciar"}],
+        "reinício aceito",
+        remember=False,
+        sev=6,
+    )
+
+
+def parse_parm(text):
+    ordered = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        line = line.split("#", 1)[0].strip()
+        if "," in line:
+            name, val = line.split(",", 1)
+            val = val.split(",")[0]
+        else:
+            bits = line.split()
+            if len(bits) < 2:
+                continue
+            name, val = bits[0], bits[1]
+        name = name.strip()
+        if not PARAM_NAME.match(name):
+            continue
+        try:
+            value = float(val.strip())
+        except ValueError:
+            continue
+        if not math.isfinite(value):
+            continue
+        ordered[name] = value
+    return list(ordered.items())
+
+
+def parm_text(params):
+    lines = ["# parametros do rover"]
+    for name in sorted(params):
+        lines.append("%s,%.7g" % (name, params[name]))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def start_load(vehicle, pairs):
+    with vehicle.lock:
+        if _refuse_if_busy(vehicle, "carregar o arquivo"):
+            return False
+        if not pairs:
+            vehicle.note = "arquivo sem parâmetros"
+            push_message(vehicle, 4, vehicle.note)
+            return False
+        if len(pairs) > 4000:
+            vehicle.note = "arquivo grande demais"
+            push_message(vehicle, 4, vehicle.note)
+            return False
+        if vehicle.jobs:
+            vehicle.note = "espere o comando atual terminar"
+            push_message(vehicle, 4, vehicle.note)
+            return False
+        vehicle.load = {
+            "pairs": pairs,
+            "i": 0,
+            "fails": 0,
+            "name": None,
+            "deadline": 0.0,
+            "sent": 0.0,
+            "verb": "carregando",
+            "refresh": True,
+        }
+        vehicle.note = "carregando %d parâmetros" % len(pairs)
+        push_message(vehicle, 6, vehicle.note)
+    return True
+
+
+def service_load(link, vehicle, tx, enc):
+    """Send one PARAM_SET from a loaded file. Values already on the board are skipped."""
+    now = time.monotonic()
+    send = None
+    with vehicle.lock:
+        load = vehicle.load
+        if not load or vehicle.jobs or vehicle.sysid is None:
+            return
+        total = len(load["pairs"])
+        verb = load.get("verb") or "carregando"
+        while load["i"] < total:
+            name, value = load["pairs"][load["i"]]
+            if load["name"] != name:
+                reason = param_blocked(vehicle, name, value)
+                if reason:
+                    load["fails"] += 1
+                    load["i"] += 1
+                    load["name"] = None
+                    push_message(vehicle, 4, reason)
+                    print("[debug] bloqueado: " + reason, flush=True)
+                    continue
+                if values_close(vehicle.params.get(name), value):
+                    load["i"] += 1
+                    load["name"] = None
+                    if load["i"] % 25 == 0:
+                        vehicle.note = "%s %d de %d" % (verb, load["i"], total)
+                    continue
+                load["name"] = name
+                load["sent"] = now
+                load["deadline"] = now + 2.0
+                send = (vehicle.sysid, vehicle.compid or 1, name, value,
+                        int(vehicle.param_type.get(name, 9)))
+                break
+            echoed = vehicle.param_seen.get(name, 0.0) >= load["sent"]
+            if echoed and values_close(vehicle.params.get(name), value):
+                load["i"] += 1
+                load["name"] = None
+                if load["i"] % 25 == 0:
+                    vehicle.note = "%s %d de %d" % (verb, load["i"], total)
+                continue
+            if now <= load["deadline"]:
+                return
+            if not values_close(vehicle.params.get(name), value):
+                load["fails"] += 1
+                print("[debug] não gravou %s" % name, flush=True)
+            load["i"] += 1
+            load["name"] = None
+        if send is None and load["i"] >= total:
+            fails = load["fails"]
+            done = total - fails
+            if verb == "gravando":
+                msg = "gravados %d, falhou %d" % (done, fails) if fails else "%d parâmetros gravados" % done
+            else:
+                msg = "arquivo carregado: %d ok, %d sem resposta" % (done, fails)
+            vehicle.note = msg
+            push_message(vehicle, 4 if fails else 6, msg)
+            vehicle.load = None
+            if load.get("refresh"):
+                vehicle.want_refresh = True
+                vehicle.param_epoch += 1
+            return
+    if send is not None:
+        with tx:
+            link.send(enc.param_set(*send))
 
 
 def run_process(link, vehicle, tx, enc, proc):
@@ -716,8 +1167,12 @@ def snapshot(link, vehicle):
         note = vehicle.note
         text = vehicle.text
         messages = list(vehicle.messages)
-        params = {name: vehicle.params[name] for name in PARAM_NAMES if name in vehicle.params}
+        params = dict(vehicle.params)
         latest = {name: vehicle.latest[name] for name in READOUT if name in vehicle.latest}
+        blocked = []
+        reset_inputs = vehicle.reset_inputs
+        vehicle.reset_inputs = False
+        param_epoch = vehicle.param_epoch
     alive = seen and (time.monotonic() - last) < 3.0
     if not seen:
         link_text = "escutando UDP %d" % link.addr[1]
@@ -736,6 +1191,9 @@ def snapshot(link, vehicle):
         "messages": messages,
         "params": params,
         "latest": latest,
+        "blocked_modes": blocked,
+        "reset_inputs": reset_inputs,
+        "param_epoch": param_epoch,
     }
 
 
@@ -804,20 +1262,22 @@ def make_handler(link, vehicle, tx, enc):
         def log_message(self, fmt, *args):
             return
 
-        def _send(self, code, ctype, body):
+        def _send(self, code, ctype, body, extra=None):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for key, value in extra or ():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 
-        def _read_json(self):
+        def _read_json(self, limit=8000):
             try:
                 n = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 return None
-            if n < 0 or n > 8000:
+            if n < 0 or n > limit:
                 return None
             raw = self.rfile.read(n) if n else b"{}"
             try:
@@ -839,6 +1299,13 @@ def make_handler(link, vehicle, tx, enc):
                 code, ctype, body = json_body(catalog())
                 self._send(code, ctype, body)
                 return
+            if path == "/params.parm":
+                with vehicle.lock:
+                    body = parm_text(vehicle.params)
+                self._send(200, "text/plain; charset=utf-8", body, (
+                    ("Content-Disposition", 'attachment; filename="rover.parm"'),
+                ))
+                return
             rel = "index.html" if path == "/" else path.lstrip("/").replace("\\", "/")
             if not rel or ".." in rel.split("/"):
                 self._send(404, "text/plain; charset=utf-8", b"")
@@ -857,6 +1324,26 @@ def make_handler(link, vehicle, tx, enc):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/params/load":
+                data = self._read_json(400000)
+                text = data.get("text") if isinstance(data, dict) else None
+                if not isinstance(text, str):
+                    self._send(400, "application/json", b'{"ok":false}')
+                    return
+                ok = start_load(vehicle, parse_parm(text))
+                code, ctype, body = json_body({"ok": ok, "note": snapshot(link, vehicle)["note"]}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/params/write":
+                data = self._read_json(400000)
+                changes = data.get("changes") if isinstance(data, dict) else None
+                if not isinstance(changes, dict):
+                    self._send(400, "application/json", b'{"ok":false}')
+                    return
+                ok = start_write(vehicle, changes)
+                code, ctype, body = json_body({"ok": ok, "note": snapshot(link, vehicle)["note"]}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
             data = self._read_json()
             if data is None:
                 self._send(400, "application/json", b'{"ok":false}')
@@ -874,7 +1361,7 @@ def make_handler(link, vehicle, tx, enc):
                     value = float(data.get("value"))
                 except (TypeError, ValueError):
                     value = None
-                if name not in PARAM_OK or value is None or not math.isfinite(value):
+                if not name or not PARAM_NAME.match(name) or value is None or not math.isfinite(value):
                     self._send(400, "application/json", b'{"ok":false}')
                     return
                 ok = set_param(link, vehicle, tx, enc, name, value)
@@ -889,6 +1376,14 @@ def make_handler(link, vehicle, tx, enc):
                     self._send(400, "application/json", b'{"ok":false}')
                     return
                 ok = run_process(link, vehicle, tx, enc, proc)
+            elif path == "/params/refresh":
+                ok = refresh_params(vehicle)
+            elif path == "/params/store":
+                ok = start_write(vehicle, data.get("changes") if isinstance(data, dict) else {})
+            elif path == "/params/reset":
+                ok = ask_reset(link, vehicle, tx, enc)
+            elif path == "/params/reboot":
+                ok = ask_reboot(link, vehicle, tx, enc)
             else:
                 self._send(404, "text/plain; charset=utf-8", b"")
                 return
@@ -923,6 +1418,8 @@ def main(argv=None):
                          "(padrao %s; 'none' desliga)" % HERELINK_KICK)
     ap.add_argument("--http", type=int, default=HTTP_PORT,
                     help="porta da pagina neste computador e no celular na mesma rede (padrao %d)" % HTTP_PORT)
+    ap.add_argument("--csv", default=None,
+                    help="CSV de corrente, rpm e temperatura CAN (padrao: esc_log_DATA.csv)")
     args = ap.parse_args(argv)
 
     try:
@@ -935,16 +1432,20 @@ def main(argv=None):
     stop = threading.Event()
     tx = threading.Lock()
     enc = Encoder()
-    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc), daemon=True).start()
+    csv_path = args.csv or datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv")
+    log = CanLog(csv_path, vehicle.t0)
+    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc, log), daemon=True).start()
 
     try:
         httpd = LocalServer(("0.0.0.0", args.http), make_handler(link, vehicle, tx, enc))
     except OSError as exc:
         stop.set()
+        log.close()
         link.sock.close()
         print("Nao foi possivel abrir a pagina na porta %d: %s" % (args.http, exc), file=sys.stderr)
         return 1
 
+    print("CSV CAN (corrente, rpm, temperatura): %s" % csv_path, flush=True)
     print("Neste computador: http://127.0.0.1:%d  (GCS %d)" % (args.http, GCS_SYSID), flush=True)
     for ip in lan_addresses():
         print("No celular, mesma rede: http://%s:%d" % (ip, args.http), flush=True)
@@ -956,6 +1457,7 @@ def main(argv=None):
     finally:
         stop.set()
         httpd.server_close()
+        log.close()
         try:
             link.sock.close()
         except OSError:

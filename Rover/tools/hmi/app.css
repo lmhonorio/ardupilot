@@ -250,6 +250,32 @@ button.apply {
 .card p { margin: 0; }
 .card .sets { color: var(--muted); font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
 .card button { align-self: flex-start; margin-top: 6px; }
+#paramsearch {
+  width: min(100%, 420px);
+  min-height: 42px;
+  margin: 8px 0 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.param.dirty { box-shadow: inset 3px 0 0 var(--orange); }
+.paramcount { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.paramtools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.paramtools button.cmd { width: auto; }
+h2.section {
+  margin: 22px 0 0;
+  padding-top: 8px;
+  font-size: 15px;
+  color: var(--orange);
+  border-top: 1px solid var(--line);
+}
 h1.page {
   margin: 12px 0 4px;
   font-size: 13px;

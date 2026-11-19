@@ -2,11 +2,7 @@ const PAGES = [
   ["logs", "Logs"],
   ["mensagens", "Mensagens"],
   ["modos", "Modos"],
-  ["direcao", "Direção"],
-  ["velocidade", "Velocidade"],
-  ["motores", "Motores"],
-  ["missao", "Missão"],
-  ["script", "Script"],
+  ["parametros", "Parâmetros"],
   ["ensaios", "Ensaios"],
 ];
 
@@ -100,6 +96,7 @@ function fmt(v, digits) {
 
 function pageId() {
   const id = (location.hash || "#logs").slice(1);
+  if (["direcao", "velocidade", "motores", "missao", "script"].includes(id)) return "parametros";
   return PAGES.some(([k]) => k === id) ? id : "logs";
 }
 
@@ -142,8 +139,8 @@ function armButton() {
 
 function paint() {
   if (confirm && confirm.el && Date.now() >= confirm.until) {
-    confirm.el.textContent = "Preparar";
-    confirm.el.className = "cmd proc";
+    confirm.el.textContent = confirm.label || "Preparar";
+    confirm.el.className = confirm.className || "cmd proc";
     confirm = null;
   }
   const alive = !!state.alive;
@@ -172,23 +169,43 @@ function paint() {
   const last = document.getElementById("lasttext");
   if (last) last.textContent = state.text || "";
   paintMessages();
+  takeEpoch();
+  if (page === "parametros") paintParams();
   for (const el of document.querySelectorAll("[data-live]")) {
     const input = el.parentElement.querySelector("input");
-    const value = state.params ? state.params[el.dataset.live] : undefined;
+    const name = el.dataset.live;
+    const value = state.params ? state.params[name] : undefined;
+    const article = el.closest("article");
     el.textContent = "na placa " + fmt(value);
-    if (input && document.activeElement !== input && value != null && input.dataset.touched !== "1") {
-      input.value = fmt(value);
+    if (name in pending && value != null && closeValue(value, pending[name])) {
+      delete pending[name];
+    }
+    if (name in pending) {
+      if (input && document.activeElement !== input) input.value = fmt(pending[name]);
+      if (input) input.dataset.touched = "1";
+      if (article) article.classList.add("dirty");
+    } else if (article) {
+      article.classList.remove("dirty");
+      if (input && document.activeElement !== input && value != null && input.dataset.touched !== "1") {
+        input.value = fmt(value);
+      }
     }
   }
+  const blocked = new Set(state.blocked_modes || []);
   for (const btn of document.querySelectorAll("button.mode")) {
-    btn.disabled = !state.seen;
+    btn.disabled = !state.seen || blocked.has(btn.dataset.mode);
     btn.classList.toggle("on", alive && btn.dataset.mode === state.mode);
+  }
+  if (state.reset_inputs) {
+    pending = {};
+    for (const input of document.querySelectorAll("input[data-touched]")) input.dataset.touched = "";
   }
   for (const btn of document.querySelectorAll("button.apply, button.proc")) {
     if (btn.id === "armbtn") continue;
     const pending = confirm && confirm.el === btn && Date.now() < confirm.until;
     if (!pending) btn.disabled = !state.seen;
   }
+  paintTools();
 }
 
 function drawChart(canvas, spec, data) {
@@ -493,30 +510,332 @@ function onArm() {
 function renderModes() {
   const buttons = (catalog.modes || []).map((m) =>
     `<button type="button" class="mode" data-mode="${m.name}">${m.name}</button>`).join("");
-  view.innerHTML = `<h1 class="page">Modos</h1><p class="last">O interruptor do rádio não se mexe. O modo na placa muda daqui; se você trocar a posição do interruptor, ele assume de novo.</p><div class="modes">${buttons}</div>`;
+  view.innerHTML = `<h1 class="page">Modos</h1><p class="last">O interruptor do rádio não se mexe. Qualquer modo pode ser escolhido. Se a placa recusar, volta o modo anterior.</p><div class="modes">${buttons}</div>`;
 }
 
-function renderGroup(id) {
-  const group = (catalog.groups || []).find((g) => g.id === id);
-  if (!group) { view.textContent = ""; return; }
-  const rows = group.params.map((p) => `
-    <article class="param">
-      <div>
-        <h2>${p.name}</h2>
-        <div class="ctrl">
-          <input type="number" step="${p.step}" inputmode="decimal" autocomplete="off" aria-label="${p.name}">
-          <span class="unit">${p.unit || ""}</span>
-          <button type="button" class="apply" data-param="${p.name}">Aplicar</button>
-          <span class="live" data-live="${p.name}">na placa —</span>
-        </div>
-      </div>
-      <p class="desc">${p.desc}</p>
-    </article>`).join("");
-  view.innerHTML = `<h1 class="page">${group.title}</h1>${rows}`;
-  for (const input of view.querySelectorAll("input")) {
-    input.addEventListener("wheel", (ev) => ev.preventDefault(), { passive: false });
-    input.addEventListener("input", () => { input.dataset.touched = "1"; });
+function renderParametros() {
+  view.innerHTML = `
+    <h1 class="page">Parâmetros</h1>
+    <div class="paramtools">
+      <button type="button" class="cmd tool" data-tool="store">Gravar na placa</button>
+      <button type="button" class="cmd tool" data-tool="refresh">Atualizar</button>
+      <button type="button" class="cmd tool" data-tool="reset" data-danger="1">Padrão de fábrica</button>
+      <button type="button" class="cmd tool" data-tool="load">Carregar arquivo</button>
+      <button type="button" class="cmd tool" data-tool="save">Salvar arquivo</button>
+      <button type="button" class="cmd tool" data-tool="reboot" data-danger="1">Reiniciar</button>
+      <input id="parmfile" type="file" accept=".parm,.param,.txt" hidden>
+    </div>
+    <p class="last">Carregar arquivo só coloca os valores na tela. Grave na placa para enviar o que mudou. Padrão de fábrica zera a memória e reinicia.</p>
+    <p class="paramcount" id="parambanner"></p>
+    <input id="paramsearch" type="search" placeholder="Buscar pelo nome" autocomplete="off" value="">
+    <p class="paramcount" id="paramcount"></p>
+    <div id="paramsections"></div>`;
+  const search = document.getElementById("paramsearch");
+  search.addEventListener("input", () => {
+    paramQuery = search.value;
+    paramSig = "";
+    paintParams();
+  });
+  const file = document.getElementById("parmfile");
+  file.addEventListener("change", () => {
+    const chosen = file.files && file.files[0];
+    if (!chosen) return;
+    chosen.text().then((text) => {
+      file.value = "";
+      stageParm(text);
+    });
+  });
+  paramSig = "";
+  paintParams();
+}
+
+const SECTION_ORDER = [
+  ["direcao", "Direção"],
+  ["velocidade", "Velocidade"],
+  ["motores", "Motores"],
+  ["missao", "Missão"],
+  ["script", "Script"],
+];
+let paramQuery = "";
+let paramSig = "";
+let pending = {};
+let paramEpoch = null;
+
+const PARM_SKIP = new Set([
+  "SYSID_SW_MREV", "WP_TOTAL", "CMD_TOTAL", "FENCE_TOTAL", "SYS_NUM_RESETS",
+  "ARSPD_OFFSET", "GND_ABS_PRESS", "GND_TEMP", "CMD_INDEX", "LOG_LASTFILE", "FORMAT_VERSION",
+]);
+
+function closeValue(a, b) {
+  return Math.abs(a - b) <= Math.max(1e-4, Math.abs(b) * 1e-4);
+}
+
+function parmNumber(value) {
+  if (Math.abs(value - Math.round(value)) < 1e-6) return String(Math.round(value));
+  return String(Math.round(value * 1e7) / 1e7);
+}
+
+function parseParmText(text) {
+  const ordered = [];
+  const seen = new Set();
+  for (const raw of text.split(/\r?\n/)) {
+    let line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("//")) continue;
+    line = line.split("#")[0].trim();
+    let name, val;
+    if (line.includes(",")) {
+      const parts = line.split(",");
+      name = parts[0];
+      val = parts[1];
+    } else {
+      const bits = line.split(/\s+/);
+      if (bits.length < 2) continue;
+      name = bits[0];
+      val = bits[1];
+    }
+    name = name.trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,15}$/.test(name)) continue;
+    const value = Number(val);
+    if (!Number.isFinite(value)) continue;
+    if (seen.has(name)) {
+      const at = ordered.findIndex((pair) => pair[0] === name);
+      if (at >= 0) ordered.splice(at, 1);
+    }
+    seen.add(name);
+    ordered.push([name, value]);
   }
+  return ordered;
+}
+
+function noteText(text) {
+  const note = document.getElementById("note");
+  if (note) note.textContent = text;
+}
+
+function stageParm(text) {
+  const pairs = parseParmText(text);
+  const known = state.params || {};
+  let changed = 0;
+  const missing = [];
+  for (const [name, value] of pairs) {
+    if (PARM_SKIP.has(name)) continue;
+    if (!(name in known)) {
+      missing.push(name);
+      continue;
+    }
+    if (closeValue(known[name], value)) {
+      delete pending[name];
+      continue;
+    }
+    pending[name] = value;
+    changed += 1;
+  }
+  applyPending();
+  let msg = changed
+    ? changed + " alterações na tela. Grave na placa para enviar."
+    : "arquivo igual ao que está na placa";
+  if (missing.length) {
+    const shown = missing.slice(0, 8).join(", ");
+    msg += " Sem este nome: " + shown + (missing.length > 8 ? "…" : "");
+  }
+  const banner = document.getElementById("parambanner");
+  if (banner) banner.textContent = msg;
+}
+
+function applyPending() {
+  for (const input of document.querySelectorAll("#paramsections input")) {
+    const name = input.getAttribute("aria-label");
+    const article = input.closest("article");
+    if (name in pending) {
+      if (document.activeElement !== input) input.value = fmt(pending[name]);
+      input.dataset.touched = "1";
+      if (article) article.classList.add("dirty");
+    }
+  }
+}
+
+function takeEpoch() {
+  if (state.param_epoch == null) return;
+  if (paramEpoch === null) {
+    paramEpoch = state.param_epoch;
+    return;
+  }
+  if (state.param_epoch !== paramEpoch) {
+    paramEpoch = state.param_epoch;
+    pending = {};
+    paramSig = "";
+    const banner = document.getElementById("parambanner");
+    if (banner) banner.textContent = "";
+  }
+}
+
+function paramMeta() {
+  const meta = {};
+  const groupOf = {};
+  for (const group of catalog.groups || []) {
+    for (const param of group.params) {
+      meta[param.name] = param;
+      groupOf[param.name] = group.id;
+    }
+  }
+  return { meta, groupOf };
+}
+
+function paintTools() {
+  const hasParams = !!(state.params && Object.keys(state.params).length);
+  for (const btn of document.querySelectorAll("button.tool")) {
+    const pendingClick = confirm && confirm.el === btn && Date.now() < confirm.until;
+    const action = btn.dataset.tool;
+    if (action === "save" || action === "load") {
+      btn.disabled = !hasParams;
+      continue;
+    }
+    if (action === "store" || action === "refresh") {
+      btn.disabled = !state.seen;
+      continue;
+    }
+    const needsDisarm = btn.dataset.danger === "1";
+    btn.disabled = !state.seen || (!!state.armed && needsDisarm && !pendingClick);
+  }
+}
+
+function saveParm() {
+  const params = state.params || {};
+  const names = Object.keys(params).sort();
+  const lines = names.map((name) => {
+    const value = name in pending ? pending[name] : params[name];
+    return name + "," + parmNumber(value);
+  });
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/plain" });
+  const a = document.createElement("a");
+  const stamp = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const name = `rover_${stamp.getFullYear()}${p(stamp.getMonth() + 1)}${p(stamp.getDate())}_${p(stamp.getHours())}${p(stamp.getMinutes())}${p(stamp.getSeconds())}.parm`;
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+function runTool(action) {
+  if (action === "save") {
+    saveParm();
+    return;
+  }
+  if (action === "load") {
+    const input = document.getElementById("parmfile");
+    if (input) input.click();
+    return;
+  }
+  if (action === "store") {
+    const changes = Object.assign({}, pending);
+    post("/params/write", { changes });
+    return;
+  }
+  post("/params/" + action, {});
+}
+
+function toolNeedsConfirm(tool) {
+  const action = tool.dataset.tool;
+  if (tool.dataset.danger === "1") return true;
+  if ((action === "store" || action === "refresh") && Object.keys(pending).length > 0) return true;
+  return false;
+}
+
+function onTool(tool) {
+  const action = tool.dataset.tool;
+  if (toolNeedsConfirm(tool)) {
+    if (confirm && confirm.el === tool && Date.now() < confirm.until) {
+      const label = confirm.label;
+      confirm = null;
+      tool.textContent = label;
+      tool.className = "cmd tool";
+      runTool(action);
+      return;
+    }
+    confirm = {
+      kind: "tool",
+      el: tool,
+      until: Date.now() + 4000,
+      label: tool.textContent,
+      className: "cmd tool",
+    };
+    tool.textContent = "Confirmar";
+    tool.className = "cmd tool solid";
+    return;
+  }
+  runTool(action);
+}
+
+function paintParams() {
+  const box = document.getElementById("paramsections");
+  if (!box) return;
+  const q = paramQuery.trim().toLowerCase();
+  const names = Object.keys(state.params || {}).filter((name) => !q || name.toLowerCase().includes(q));
+  names.sort();
+  const sig = q + "\n" + names.join("\n");
+  const count = document.getElementById("paramcount");
+  if (count) {
+    const total = Object.keys(state.params || {}).length;
+    count.textContent = total ? `${names.length} de ${total}` : "Baixando a lista da placa…";
+  }
+  if (sig === paramSig) return;
+  paramSig = sig;
+  const { meta, groupOf } = paramMeta();
+  const buckets = {};
+  for (const name of names) {
+    const id = groupOf[name] || ("px:" + (name.includes("_") ? name.split("_")[0] : "OUTROS"));
+    if (!buckets[id]) buckets[id] = [];
+    buckets[id].push(name);
+  }
+  const sections = [];
+  for (const [id, title] of SECTION_ORDER) {
+    if (buckets[id]) {
+      sections.push({ title, names: buckets[id] });
+      delete buckets[id];
+    }
+  }
+  for (const id of Object.keys(buckets).sort()) {
+    sections.push({ title: id.startsWith("px:") ? id.slice(3) : id, names: buckets[id] });
+  }
+  box.innerHTML = sections.map((section) => `
+    <h2 class="section">${escText(section.title)}</h2>
+    ${section.names.map((name) => {
+      const info = meta[name] || { step: "any", unit: "", desc: "Parâmetro da placa." };
+      return `<article class="param">
+        <div>
+          <h2>${escText(name)}</h2>
+          <div class="ctrl">
+            <input type="number" step="${escText(info.step)}" inputmode="decimal" autocomplete="off" aria-label="${escText(name)}">
+            <span class="unit">${escText(info.unit || "")}</span>
+            <button type="button" class="apply" data-param="${escText(name)}">Aplicar</button>
+            <span class="live" data-live="${escText(name)}">na placa —</span>
+          </div>
+        </div>
+        <p class="desc">${escText(info.desc)}</p>
+      </article>`;
+    }).join("")}`).join("") || `<p class="paramcount">Nenhum parâmetro com esse nome.</p>`;
+  for (const input of box.querySelectorAll("input")) {
+    input.addEventListener("wheel", (ev) => ev.preventDefault(), { passive: false });
+    input.addEventListener("input", () => {
+      const name = input.getAttribute("aria-label");
+      const value = Number(input.value);
+      const board = state.params ? state.params[name] : undefined;
+      const article = input.closest("article");
+      if (!Number.isFinite(value) || (board != null && closeValue(board, value))) {
+        delete pending[name];
+        input.dataset.touched = "";
+        if (article) article.classList.remove("dirty");
+      } else {
+        pending[name] = value;
+        input.dataset.touched = "1";
+        if (article) article.classList.add("dirty");
+      }
+    });
+  }
+  applyPending();
 }
 
 function renderProcesses() {
@@ -546,7 +865,14 @@ view.addEventListener("click", (ev) => {
     const value = Number(input.value);
     if (!Number.isFinite(value)) return;
     input.dataset.touched = "";
+    delete pending[apply.dataset.param];
+    apply.closest("article").classList.remove("dirty");
     post("/param", { name: apply.dataset.param, value });
+    return;
+  }
+  const tool = ev.target.closest("button.tool");
+  if (tool && !tool.disabled) {
+    onTool(tool);
     return;
   }
   const proc = ev.target.closest("button.proc");
@@ -572,8 +898,8 @@ function route() {
   if (page === "logs") renderLogs();
   else if (page === "mensagens") renderMessages();
   else if (page === "modos") renderModes();
+  else if (page === "parametros") renderParametros();
   else if (page === "ensaios") renderProcesses();
-  else renderGroup(page);
   paint();
 }
 
