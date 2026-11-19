@@ -5,7 +5,7 @@ end
 local Autotune = require("autotune")
 local CircleTune = {}
 CircleTune.__index = CircleTune
-CircleTune.PERIOD_MS = 25
+-- Update timing is owned by rover-controlallocation.lua (MIXER_FREQ).
 
 local PARAM_KEY = 18
 local CIRCLE_MODE = 9

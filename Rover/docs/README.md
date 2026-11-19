@@ -39,6 +39,7 @@ Cada tabela Lua tem uma chave fixa. Não reutilizar a chave com outro prefixo.
 | `THRO_` | 17 | `rover-controlallocation.lua` |
 | `CTUN_` | 18 | `modules/circle-tune.lua` |
 | `CANT_` | 19 | `rover-controlallocation.lua` |
+| `MIXER_` | 20 | `rover-controlallocation.lua` |
 | `ESC_` | 74, ou 72 se a 74 já tiver outro prefixo | `esc_can.lua` |
 
 `ESC_CMD_L`, `ESC_CMD_R`, `ESC_CMD_SEQ` e `ESC_STAT` são ponte entre scripts, só em RAM. Não salvar.
@@ -74,6 +75,7 @@ O comportamento de cada um está em [esc_can.md](esc_can.md). Resumo:
 | `ESC_P1` `ESC_I1` `ESC_FF1` … `P4` `I4` `FF4` | 0 | Ganhos da roda. 0 usa o compartilhado |
 | `ESC_GCS_HZ` | 4 | `NAMED_VALUE_FLOAT` para a estação de solo, Hz. 0 desliga |
 | `ESC_PREF` | 0,5 | Pré-filtro da referência, fração do tempo integral. 0 desliga |
+| `ESC_RPM_AUX` | 1 | Liga os auxiliares configurados do controle de RPM. 0 contorna rampa, pré-filtro, restrição adicional de frenagem, boost de destravamento e dessaturação entre lados, preservando PID e limites absolutos de corrente. |
 
 ### `THRO_` — curso do mixer
 
@@ -81,6 +83,18 @@ O comportamento de cada um está em [esc_can.md](esc_can.md). Resumo:
 | --- | --- | --- |
 | `THRO_MAX_LUA` | 90 | Curso do PWM em torno de 1500 µs, em %. 90 dá ±450 µs |
 | `THRO_MIN_LUA` | 1500 | PWM mínimo acima do neutro para começar um alinhamento de proa parado. Vale também para baixo. 1500 desliga |
+
+### `MIXER_` — frequência de atuação
+
+| Parâmetro | Padrão | Função |
+| --- | --- | --- |
+| `MIXER_FREQ` | 50 Hz | Frequência solicitada ao mixer em AUTO, CIRCLE (incluindo CircleTune), ACRO, RTL e SIMPLE, nos caminhos CAN e PWM. Faixa efetiva: 25–200 Hz. |
+
+O script registra `MIXER_FREQ` como parâmetro dinâmico do ArduPilot, persistente quando gravado pela estação de solo. Para aparecer no **Full Parameter List** do Mission Planner, instale o `rover-controlallocation.lua` atualizado em `APM/scripts`, deixe `SCR_ENABLE = 1`, reinicie a controladora ou os scripts e use **Refresh Params** depois que o script carregar. Não é necessário recompilar o firmware. Se o script não carregar, consulte as mensagens de erro de scripting.
+
+A alteração do valor é lida a cada ciclo e muda o próximo reagendamento. O período é `1000 / MIXER_FREQ`, arredondado para milissegundos inteiros; 50 Hz solicita 20 ms e 100 Hz solicita 10 ms. Valores positivos fora da faixa são limitados a 25–200 Hz; zero, negativos e NaN usam 50 Hz. A frequência real depende da carga do scripting.
+
+O mínimo de 25 Hz mantém o intervalo nominal abaixo do limite de 50 ms do CircleTune e do timeout de 60 ms das suas saídas PWM. O parâmetro não altera o PI de alinhamento de proa (5 Hz), o controle de RPM em `esc_can.lua` (200 Hz), o período de MANUAL/HOLD nem `SCHED_LOOP_RATE`.
 
 ### `YAWT_` — autotune de yaw
 

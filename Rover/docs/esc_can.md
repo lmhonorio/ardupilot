@@ -2,7 +2,7 @@
 
 Índice da pasta: [README](README.md).
 
-Driver Lua de ESC DJI C620 / motor M3508 para o ArduPilot Rover, sem firmware modificado. Versão marcada no código: `v2611g`.
+Driver Lua de ESC DJI C620 / motor M3508 para o ArduPilot Rover, sem firmware modificado. Versão marcada no código: `v2611o`.
 
 Copia para `APM/scripts` no cartão SD junto com `rover-controlallocation.lua` e `modules/autotune.lua`. O driver fala CAN com os ESCs, fecha um PI de velocidade em cada roda e publica o estado para o mixer e para a estação de solo.
 
@@ -70,6 +70,12 @@ A máscara 0 e a máscara 0xFF são inválidas: todo mundo no mesmo lado. Em CAN
 `ESC_GEAR` é a redução rotor/roda. No M3508 com redutor P19 o valor é 19,2032. A rpm de roda é `sentido × rpm do rotor / ESC_GEAR`.
 
 ### Rampa, pré-filtro e frenagem
+
+`ESC_RPM_AUX` é a chave geral dos auxiliares da malha de RPM, com padrão 1. Com 1, cada recurso segue seu parâmetro individual. Com 0, a referência passa sem a rampa de `ESC_ACC` e sem o pré-filtro de `ESC_PREF`; a janela de corrente fica em ±`ESC_CUR` sem a restrição adicional de `ESC_BRK`; o boost de `ESC_STALL` e a dessaturação do bit 2 de `ESC_OPT` ficam desativados. P/I/D/FF, anti-windup, limites de corrente/integrador, tratamento de neutro e proteções de comando/feedback continuam ativos. Os valores individuais gravados não são alterados. O bypass também é usado na verificação em malha fechada do autotune de roda.
+
+A mudança é lida em até aproximadamente 50 ms. Ao voltar para 1, o filtro parte da referência acompanhada durante o bypass. Desligar o boost também pode aumentar o tempo para vencer atrito na partida; desativar suavização não garante menos overshoot. Para comparar o efeito no seguimento de reta, mantenha os ganhos e os outros parâmetros iguais entre os ensaios. Depois, os parâmetros individuais permitem isolar cada recurso.
+
+`ESC_RPM_AUX` ocupa a nova posição 47, sem deslocar as posições existentes. Após instalar o `esc_can.lua` atualizado, reinicie a controladora para recriar a tabela com o tamanho novo; só reiniciar o script pode deixar a tabela antiga alocada. Com o script carregado e `SCR_ENABLE = 1`, use **Refresh Params** no Mission Planner para localizar `ESC_RPM_AUX` no **Full Parameter List**. Grave o valor pela estação de solo para persistir após reboot.
 
 `ESC_ACC` limita a aceleração da referência, em rpm de roda por segundo, nos dois sentidos. 0 deixa a referência igual ao alvo no mesmo ciclo. O uso previsto no stick e na missão é 0, sem rampa artificial.
 
@@ -169,6 +175,8 @@ A tabela de parâmetros usa a chave 74 e o prefixo `ESC_`. Se a 74 já estiver o
 | 43 | `ESC_GCS_HZ` | 4 | `NAMED_VALUE_FLOAT` para a GCS, Hz. 0 desliga. Teto 20. |
 | 44 | `ESC_PREF` | 0,5 | Pré-filtro da referência, fração de Ti. 0 desliga. Teto 2. |
 | 45 | `ESC_WT_BW` | 8 | Banda desejada do autotune, rad/s. No cálculo fica entre 1 e 50 e ainda é cortada por `1 / (2,65 T)`. |
+| 46 | `ESC_STALL` | 30 | Boost de destravamento, A/s. 0 desliga. |
+| 47 | `ESC_RPM_AUX` | 1 | 0 contorna os cinco auxiliares descritos acima; 1 usa suas configurações individuais. |
 
 Os ganhos não são lidos a 200 Hz. O cache (`M.gains`) refresca a cada 50 ms. `ESC_REV`, `ESC_LMASK` e a função de cada `SERVO1`…`SERVO8` refrescam a cada 1 s.
 

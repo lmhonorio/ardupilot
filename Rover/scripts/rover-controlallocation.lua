@@ -148,6 +148,32 @@ local S = {
 }
 assert(S.tune_select:init('SCR_USER1'), 'could not bind SCR_USER1 parameter')
 assert(S.rc3_reversed:init('RC3_REVERSED'), 'could not bind RC3_REVERSED parameter')
+-- Register a visible AP_Param float (MAVLink/Full Parameter List), not a Lua-only setting.
+-- Key 20 is reserved for MIXER_; keep it stable so saved values survive reboot.
+assert(param:add_table(20, 'MIXER_', 1), 'could not add MIXER_ parameter table')
+--[[
+  // @Param: MIXER_FREQ
+  // @DisplayName: Lua mixer update frequency
+  // @Description: Requested actuator mixer frequency in AUTO, CIRCLE (including CircleTune), ACRO, RTL and SIMPLE, for CAN and PWM. Changes apply on the next update. Does not change the yaw PI or wheel RPM control rates. Limited to 25-200 Hz; actual timing depends on scripting load.
+  // @Units: Hz
+  // @Range: 25 200
+  // @Increment: 1
+  // @User: Standard
+--]]
+assert(param:add_param(20, 1, 'FREQ', 50), 'could not add MIXER_FREQ parameter')
+S.mixer_freq = Parameter()
+assert(S.mixer_freq:init('MIXER_FREQ'), 'could not bind MIXER_FREQ parameter')
+
+function S.mixerPeriod()
+  local freq = S.mixer_freq:get()
+  if freq == nil or freq ~= freq or freq <= 0 then
+    freq = 50
+  end
+  -- CircleTune requires sample intervals below 50 ms. At 25 Hz the requested
+  -- interval is 40 ms, also below its 60 ms PWM override timeout.
+  freq = math.max(25, math.min(200, freq))
+  return math.floor(1000 / freq + 0.5)
+end
 --[[
   // @Param: THRO_INV
   // @DisplayName: Invert ArduPilot throttle
@@ -1142,7 +1168,7 @@ local function update()
         circle_tune:log_sample(throttle, steering, pwm_l, pwm_r)
       end
     end
-    return update, CircleTune.PERIOD_MS
+    return update, S.mixerPeriod()
   else
     circle_tune:cancel("left Circle")
   end
@@ -1154,20 +1180,19 @@ local function update()
     applyPWMSteeringMode()
     return update, modePeriod(200)
   elseif vehicle_mode == DRIVING_MODES.AUTO then
-    -- Same actuator rate as the Circle where QuickTune identified ATC_*:
-    -- at 200 ms the PWM path adds ~0.2 s of delay and the tuned loops oscillate.
+    -- Use the same configurable actuator rate as Circle/QuickTune.
     applyPWMAutoMode()
-    return update, CircleTune.PERIOD_MS
+    return update, S.mixerPeriod()
   elseif vehicle_mode == DRIVING_MODES.SIMPLE then
     applyPWMInternalControl()
-    return update, CircleTune.PERIOD_MS
+    return update, S.mixerPeriod()
   elseif vehicle_mode == DRIVING_MODES.CIRCLE then
     -- Keep the same actuator update period used to identify the steering loop.
     applyPWMInternalControl(60)
-    return update, CircleTune.PERIOD_MS
+    return update, S.mixerPeriod()
   elseif vehicle_mode == DRIVING_MODES.ACRO or vehicle_mode == DRIVING_MODES.RTL then
     applyPWMInternalControl()
-    return update, CircleTune.PERIOD_MS
+    return update, S.mixerPeriod()
   elseif vehicle_mode == DRIVING_MODES.HOLD or vehicle_mode == DRIVING_MODES.GUIDED then
     -- Make the vehicle stop
     applyControlAllocation(0, 0)
