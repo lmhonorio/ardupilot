@@ -168,6 +168,7 @@ class MissionClient:
         n = len(items)
         last_count = 0.0
         last_activity = time.monotonic()
+        last_seq = -1
         sent = set()
         start = time.monotonic()
         while True:
@@ -179,16 +180,19 @@ class MissionClient:
                 self.link.send(self.enc.pack(MSG_MISSION_COUNT, struct.pack("<HBB", n, self.sysid, self.compid)))
             if now - last_activity > 10:
                 raise TimeoutError("envio parado no item %d" % (max(sent) + 1 if sent else 0))
-            # lossy link: the item or the next request got lost; send the last item
-            # again so the rover asks for the next one (or acks the mission)
-            if sent and now - last_activity > 1.5 and now - last_count > 1.5:
+            # ArduPilot repeats its own request when an item is lost; only the final
+            # ack can go missing for good, so after the last item resend it until acked
+            if last_seq == n - 1 and now - last_activity > 1.5 and now - last_count > 1.5:
                 last_count = now
                 last = last_seq
                 self.link.send(self.enc.pack(MSG_MISSION_ITEM_INT, items[last].payload(self.sysid, self.compid)))
             for msgid, p in self._pump():
                 if msgid in (MSG_MISSION_REQUEST_INT, MSG_MISSION_REQUEST):
                     seq = struct.unpack("<H", p[:2])[0]
-                    if seq < n:
+                    # The HereLink delivers each request twice; answering both puts a
+                    # second copy of the item out of order (the rover then acks
+                    # "invalid sequence"). Answer a repeated request only after a pause.
+                    if seq < n and not (seq == last_seq and time.monotonic() - last_activity < 0.7):
                         self.link.send(self.enc.pack(MSG_MISSION_ITEM_INT, items[seq].payload(self.sysid, self.compid)))
                         sent.add(seq)
                         last_seq = seq
@@ -196,8 +200,12 @@ class MissionClient:
                         self.log("Enviando item %d/%d" % (seq + 1, n))
                 elif msgid == MSG_MISSION_ACK and sent:
                     result = p[2]
-                    if result == 0:
+                    if result == 0 and (n - 1) in sent:
                         return
+                    if result in (0, 13):
+                        # 13 = item out of sequence: ArduPilot only reports it and keeps
+                        # asking for the item it expects, so the upload goes on
+                        continue
                     raise RuntimeError("rover recusou a missao: %s" % ACK_RESULT.get(result, result))
 
 
@@ -382,7 +390,9 @@ class App:
         self.pass_chk = ttk.Checkbutton(right, text="Passa direto (Alt = -1)", variable=self.pass_var,
                                         command=self.toggle_pass)
         self.pass_chk.pack(anchor="w")
-        ttk.Button(right, text="Todos sem rumo -> passa direto", command=self.all_pass).pack(fill="x", pady=(8, 2))
+        ttk.Button(right, text="Rumo do proximo trecho", command=self.next_leg).pack(fill="x", pady=(8, 2))
+        ttk.Button(right, text="Todos os alinhamentos -> proximo trecho", command=self.all_next_leg).pack(fill="x", pady=2)
+        ttk.Button(right, text="Todos sem rumo -> passa direto", command=self.all_pass).pack(fill="x", pady=2)
         ttk.Label(right, text="Mapa (norte para cima)").pack(anchor="w", pady=(8, 0))
         self.map = tk.Canvas(right, width=300, height=260, bg="#fafafa", highlightthickness=1,
                              highlightbackground="#ccc")
@@ -472,6 +482,42 @@ class App:
             self.set_z(-1.0)
         else:
             self.set_z(0.0)
+
+    def leg_bearing(self, i):
+        """Bearing (deg, 0 = north) from waypoint i to the next nav item with a position."""
+        a = self.items[i]
+        for b in self.items[i + 1:]:
+            if b.command in NAV_WITH_POSITION and (b.lat or b.lon):
+                dn = b.lat - a.lat
+                de = (b.lon - a.lon) * math.cos(math.radians(a.lat))
+                if abs(dn) + abs(de) < 1e-9:
+                    continue
+                return math.degrees(math.atan2(de, dn)) % 360
+        return None
+
+    def next_leg(self):
+        i = self.selected()
+        if i is None or i == 0 or self.items[i].command != CMD_WAYPOINT:
+            return
+        brg = self.leg_bearing(i)
+        if brg is None:
+            messagebox.showinfo("Rumo", "Nao ha waypoint depois deste")
+            return
+        self.set_z(round(brg, 1))
+
+    def all_next_leg(self):
+        n = 0
+        for i, it in enumerate(self.items):
+            if i and it.command == CMD_WAYPOINT and not is_pass(it.z):
+                brg = self.leg_bearing(i)
+                if brg is not None:
+                    it.z = round(brg, 1)
+                    n += 1
+        if n:
+            self.dirty = True
+        self.refresh(keep=self.selected())
+        self.on_select()
+        self.status.set("%d alinhamentos agora apontam para o proximo trecho" % n)
 
     def all_pass(self):
         n = 0

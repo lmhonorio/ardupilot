@@ -1096,7 +1096,7 @@ local function update()
     if selector == TUNE_MODE.YAW then
       gcs:send_text(MAV_SEVERITY.INFO, string.format("YawTune: SCR_USER1=2; starts in HOLD (mode %d)", vehicle_mode))
     elseif selector == TUNE_MODE.PIXHAWK then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: SCR_USER1=1; QuickTune enabled while armed (mode %d)", vehicle_mode))
+      gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune: SCR_USER1=1, mede ao armar (modo %d)", vehicle_mode))
     end
     selector_armed_reported = selector == TUNE_MODE.YAW or selector == TUNE_MODE.PIXHAWK
   end

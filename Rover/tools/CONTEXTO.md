@@ -141,6 +141,16 @@ A velocidade máxima é de cerca de 1,48 m/s com `ESC_RPM` 120 (0,99 / 0,67). O 
 - `THRO_INV` testado e funcionando, inclusive no Circle.
 - O WheelTune v2611n ainda precisa ser validado em campo, agora com `ESC_WT_BW` 5 (com 8 dava overshoot de 97–188%).
 
+- 19/11 (AUTO saindo em S dos pontos): MIS_RESTART 1, WP_PIVOT_DELAY 1, ATC_ACCEL_MAX 1, ATC_STR_RAT_FF 0,4 -> 0,3,
+  ESC_PREF 0,5 -> 0,2 (o prefiltro atrasava 0,4 s cada aceleração de roda; atraso do giro caiu de 0,5 para 0,3 s),
+  PSC_POS_P 0,4 -> 0,2, PSC_VEL_P 2 -> 1, PSC_VEL_I 0,2 -> 0 (padrão; o PSC pedia ~22 °/s de giro na arrancada).
+  Monitor: PID de direção é PID_TUNING eixo 5 (corrigido); analisador compara rumo estimado x direção GPS.
+
+- QuickTune (19/11): mensagens em português, várias linhas curtas por evento: o que a etapa mede e o mínimo que precisa
+  (giro >= 10 °/s e comando >= 5%; velocidade >= 0,5 m/s e acelerador >= 20%), progresso com tempo restante, `PARADO ha Ns`
+  com os valores atuais/mínimos e `Faca: ...`, cada ganho antes -> depois (%), CONCLUIDO / SALVO / CANCELADO.
+  O mínimo de comando de direção caiu de 10% para 5% (com FF ~0,3 um Circle de 3 m dava só 6-10% e não avançava).
+
 ## Pendências e ideias opcionais (não pedidas)
 
 - Mistura com prioridade de direção no CAN: foi descartada a pedido do usuário. O patch está fora do repositório,

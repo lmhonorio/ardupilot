@@ -169,12 +169,74 @@ local PILOT_INPUT_DELAY = 4.0       -- gains are not updated for 4 seconds after
 local FLTD_MUL = 0.5                -- ATC_STR_RAT_FLTD set to 0.5 * INS_GYRO_FILTER
 local FLTT_MUL = 0.5                -- ATC_STR_RAT_FLTT set to 0.5 * INS_GYRO_FILTER
 local STR_RAT_FF_TURNRATE_MIN = math.rad(10)    -- steering rate feedforward min vehicle turn rate (in radians/sec)
-local STR_RAT_FF_STEERING_MIN = 0.10            -- steering rate feedforward min steering output (in the range 0 to 1)
+-- 0.05, not upstream's 0.10: with ATC_STR_RAT_FF about 0.3 a 3 m Circle at 1 m/s
+-- needs only 6-10% steering and the tune never advanced (19/11 log)
+local STR_RAT_FF_STEERING_MIN = 0.05            -- steering rate feedforward min steering output (in the range 0 to 1)
 local SPEED_FF_THROTTLE_MIN = 0.20  -- speed feedforward requires throttle output (in the range 0 to 1)
 
 -- get time in seconds since boot
 function get_time()
    return millis():tofloat() * 0.001
+end
+
+-- Operator messages. A GCS line holds 50 characters, so each event is told in
+-- a few short lines: what is being measured, the live values against the
+-- minimum the tune needs, progress and time left, why it is stuck and what to
+-- change, each gain before and after, and whether it was saved.
+local UI = { valid_t = 0, last_pct = 0, last_pct_t = 0, hint_t = 0, pilot_t = 0, stage_t = 0,
+             STAGE = { ATC_STR_RAT = "1/2 direcao", ATC_SPEED = "2/2 velocidade" } }
+
+function UI.say(sev, fmt, ...)
+  gcs:send_text(sev, string.format(fmt, ...))
+end
+
+function UI.name(axis)
+  return UI.STAGE[axis] or axis
+end
+
+-- a new stage (or a restart after the sticks moved)
+function UI.reset(now)
+  UI.valid_t, UI.last_pct, UI.last_pct_t, UI.hint_t, UI.stage_t = now, 0, now, now, now
+end
+
+-- what the stage measures and what it needs
+function UI.stage_start(axis, now)
+  UI.reset(now)
+  if axis == "ATC_STR_RAT" then
+    UI.say(MAV_SEVERITY.INFO, "Tune 1/2 DIRECAO: mede giro x comando")
+    UI.say(MAV_SEVERITY.INFO, "  precisa giro>=%.0fg/s e comando>=%.0f%% por 10s",
+      math.deg(STR_RAT_FF_TURNRATE_MIN), STR_RAT_FF_STEERING_MIN * 100)
+    UI.say(MAV_SEVERITY.INFO, "  ajusta ATC_STR_RAT_FF, P e I")
+  else
+    UI.say(MAV_SEVERITY.INFO, "Tune 2/2 VELOCIDADE: mede acel x vel")
+    UI.say(MAV_SEVERITY.INFO, "  precisa acel>=%.0f%% e vel>=%.1fm/s por 10s",
+      SPEED_FF_THROTTLE_MIN * 100, SPEED_FF_SPEED_MIN:get())
+    UI.say(MAV_SEVERITY.INFO, "  ajusta CRUISE_*, ATC_SPEED_P e I")
+  end
+end
+
+-- progress: percent, time left, and the live values that are being used
+function UI.progress(axis, pct, live, now)
+  local eta = "calculando"
+  local dt = now - UI.last_pct_t
+  if dt > 0 and pct > UI.last_pct then
+    eta = string.format("falta ~%.0fs", (100 - pct) * dt / (pct - UI.last_pct))
+  end
+  UI.last_pct, UI.last_pct_t = pct, now
+  UI.say(MAV_SEVERITY.INFO, "Tune %s %.0f%% (%s)", UI.name(axis), pct, eta)
+  UI.say(MAV_SEVERITY.INFO, "  %s: medindo OK", live)
+end
+
+-- no valid samples: how long, how far it got, the live values against the
+-- minimum, and every 15 s what to change
+function UI.stalled(axis, live, hint, now)
+  UI.say(MAV_SEVERITY.WARNING, "Tune %s PARADO ha %.0fs (%.0f%% feito)", UI.name(axis), now - UI.valid_t, UI.last_pct)
+  UI.say(MAV_SEVERITY.WARNING, "  %s", live)
+  if now - UI.hint_t >= 15 then
+    UI.hint_t = now
+    UI.say(MAV_SEVERITY.WARNING, "  Faca: %s", hint)
+  end
+  UI.last_pct_t = now
 end
 
 -- local variables
@@ -264,7 +326,7 @@ function save_all_params()
       param_changed[pname] = false
     end
   end
-  gcs:send_text(MAV_SEVERITY.NOTICE, "RTun: tuning gains saved")
+  UI.say(MAV_SEVERITY.NOTICE, "Tune SALVO: ganhos novos gravados na placa")
 end
 
 -- setup filter frequencies
@@ -342,10 +404,15 @@ function advance_axis(axis)
   axes_done[axis] = true
   -- check for tune completion
   if prev_axis ~= nil and get_current_axis() == nil then
-    gcs:send_text(MAV_SEVERITY.NOTICE, string.format("RTun: Tuning DONE"))
+    UI.say(MAV_SEVERITY.NOTICE, "Tune CONCLUIDO: as 2 etapas terminaram")
+    UI.say(MAV_SEVERITY.NOTICE, "  salva sozinho em %.0fs; NAO desarme antes", RTUN_AUTO_SAVE:get())
     tune_done_time = now_sec
   end
   last_axis_change = now_sec
+  local next_axis = get_current_axis()
+  if next_axis ~= nil then
+    UI.say(MAV_SEVERITY.NOTICE, "  proxima: %s em %.0fs", UI.name(next_axis), AXIS_CHANGE_DELAY)
+  end
 end
 
 -- change a gain, log and update user
@@ -356,7 +423,10 @@ function adjust_gain(pname, value)
   param_changed[pname] = true
   P:set(value)
   write_log(pname)
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: adjusted %s %.3f -> %.3f", pname, old_value, value))
+  if math.abs(value - old_value) > 1e-4 * math.max(1, math.abs(old_value)) then
+    local pct = old_value ~= 0 and string.format(" (%+.0f%%)", (value / old_value - 1) * 100) or ""
+    UI.say(MAV_SEVERITY.INFO, "  %s %.3f -> %.3f%s", (string.gsub(pname, "^ATC_", "")), old_value, value, pct)
+  end
 end
 
 -- log parameter, current gain and current slew rate
@@ -404,16 +474,25 @@ function update_steering_ff(ff_pname)
     ff_steering_sum = ff_steering_sum + math.abs(steering_out)
     ff_turn_rate_sum = ff_turn_rate_sum + math.abs(turn_rate_rads)
     ff_turn_rate_count = ff_turn_rate_count + 1
+    UI.valid_t = now_sec
     if (update_user) then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%%; steering %.2f, turn rate %.1f deg/s", ff_pname, complete_pct, steering_out, math.deg(math.abs(turn_rate_rads))))
+      UI.progress("ATC_STR_RAT", complete_pct, string.format("giro %.0fg/s comando %.0f%%",
+        math.deg(math.abs(turn_rate_rads)), math.abs(steering_out) * 100), now_sec)
     end
   else
     if update_user then
-      if not steering_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low steering command (%d%% < %d%%); drive a controlled turn", math.floor(math.abs(steering_out) * 100), math.floor(STR_RAT_FF_STEERING_MIN * 100)))
-      elseif not turnrate_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: low turn rate (%d deg/s < %d); drive a controlled turn", math.floor(math.deg(math.abs(turn_rate_rads))), math.floor(math.deg(STR_RAT_FF_TURNRATE_MIN))))
+      local live = string.format("giro %.0f/%.0fg/s comando %.0f/%.0f%%",
+        math.deg(math.abs(turn_rate_rads)), math.deg(STR_RAT_FF_TURNRATE_MIN),
+        math.abs(steering_out) * 100, STR_RAT_FF_STEERING_MIN * 100)
+      local hint
+      if math.abs(steering_out) < 0.01 and math.abs(turn_rate_rads) < STR_RAT_FF_TURNRATE_MIN then
+        hint = "o rover nao esta virando; confira o Circle"
+      elseif not steering_ok then
+        hint = "CIRC_RADIUS menor (circulo + fechado)"
+      else
+        hint = "CIRC_RADIUS menor ou CIRC_SPEED maior"
       end
+      UI.stalled("ATC_STR_RAT", live, hint, now_sec)
     end
   end
 
@@ -483,18 +562,22 @@ function update_speed_ff(ff_pname)
     ff_throttle_sum = ff_throttle_sum + throttle_out
     ff_speed_sum = ff_speed_sum + speed
     ff_speed_count = ff_speed_count + 1
+    UI.valid_t = now_sec
     if (update_user) then
-      gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: %s %.0f%%; throttle %.2f, speed %.2f m/s", ff_pname, complete_pct, throttle_out, speed or 0))
+      UI.progress("ATC_SPEED", complete_pct, string.format("vel %.2fm/s acel %.0f%%", speed or 0, throttle_out * 100), now_sec)
     end
   else
     if update_user then
-      if not throttle_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase throttle (%d < %d)", math.floor(throttle_out * 100), math.floor(SPEED_FF_THROTTLE_MIN * 100)))
-      elseif speed == nil then
-        gcs:send_text(MAV_SEVERITY.WARNING, "RTun: waiting for valid velocity")
-      elseif not speed_ok then
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("RTun: increase speed (%3.1f < %3.1f)", speed, SPEED_FF_SPEED_MIN:get()))
+      local live, hint
+      if speed == nil then
+        live = "sem velocidade do GPS/EKF"
+        hint = "espere o GPS (fix 3D)"
+      else
+        live = string.format("vel %.1f/%.1fm/s acel %.0f/%.0f%%", speed, SPEED_FF_SPEED_MIN:get(),
+          throttle_out * 100, SPEED_FF_THROTTLE_MIN * 100)
+        hint = "CIRC_SPEED maior"
       end
+      UI.stalled("ATC_SPEED", live, hint, now_sec)
     end
   end
 
@@ -574,7 +657,7 @@ function update()
   if sw_pos == 1 and SCR_USER1:get() == 1 and vehicle:get_mode() == 0
       and get_time() > last_warning + 5 then
     gcs:send_text(MAV_SEVERITY.WARNING,
-      "RTun: QuickTune measures only; Manual needs RC steering/throttle input")
+      "Tune: em Manual so mede com stick; use Circle")
     last_warning = get_time()
   end
   if sw_pos == 0 or not arming:is_armed() then
@@ -584,7 +667,8 @@ function update()
       need_restore = false
       restore_all_params()
       restore_gcs_pid_mask()
-      gcs:send_text(MAV_SEVERITY.CRITICAL, "RTun: gains reverted")
+      UI.say(MAV_SEVERITY.CRITICAL, "Tune CANCELADO: desarmou antes de salvar")
+      UI.say(MAV_SEVERITY.CRITICAL, "  ganhos antigos de volta; arme p/ recomecar")
     end
     reset_axes_done()
     return
@@ -624,7 +708,7 @@ function update()
          if SCR_USER1:get() == 1 then
            param:set_and_save('SCR_USER1', 0)
            quicktune_started = false
-           gcs:send_text(MAV_SEVERITY.NOTICE, "RTun: done, SCR_USER1 set to 0 (normal)")
+           UI.say(MAV_SEVERITY.NOTICE, "Tune FIM: SCR_USER1=0, rover em uso normal")
          end
       end
     end
@@ -636,18 +720,26 @@ function update()
     get_all_params()
     if not quicktune_started then
       quicktune_started = true
-      gcs:send_text(MAV_SEVERITY.NOTICE, string.format("RTun: QuickTune started; armed, mode %d", vehicle:get_mode()))
+      local m = vehicle:get_mode()
+      UI.say(MAV_SEVERITY.NOTICE, "Tune INICIO no %s: 2 etapas de ~10-30s", m == 9 and "Circle" or ("modo " .. m))
+      UI.say(MAV_SEVERITY.NOTICE, "  sticks no centro; desarmar cancela tudo")
     end
   end
 
   -- return immediately if pilot has provided input recently
   if get_time() - last_pilot_input < PILOT_INPUT_DELAY then
+    if get_time() - UI.pilot_t > 5 then
+      UI.pilot_t = get_time()
+      UI.say(MAV_SEVERITY.WARNING, "Tune PAUSADO: stick fora do centro")
+      UI.say(MAV_SEVERITY.WARNING, "  solte os sticks; volta %.0fs depois", PILOT_INPUT_DELAY)
+    end
+    UI.valid_t, UI.last_pct_t = get_time(), get_time()
     return
   end
 
   -- check filters have been set for this axis
   if not filters_done[axis] then
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("RTun: starting %s tune", axis))
+    UI.stage_start(axis, get_time())
     setup_filters(axis)
   end
 
@@ -670,7 +762,7 @@ function update()
     ff_done = true
   end
   if ff_done then
-    gcs:send_text(MAV_SEVERITY.NOTICE, string.format("RTun: %s tuning done", pname))
+    UI.say(MAV_SEVERITY.NOTICE, "Tune %s OK em %.0fs (ganhos acima)", UI.name(axis), get_time() - UI.stage_t)
     advance_axis(axis)
   end
 end

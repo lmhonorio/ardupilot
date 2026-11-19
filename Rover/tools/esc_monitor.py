@@ -127,7 +127,7 @@ GCS_COMPID = 190
 ROVER_MODES = {0: "MANUAL", 1: "ACRO", 3: "STEERING", 4: "HOLD", 5: "LOITER", 6: "FOLLOW",
                7: "SIMPLE", 8: "DOCK", 9: "CIRCLE", 10: "AUTO", 11: "RTL", 12: "SMART_RTL",
                15: "GUIDED", 16: "INITIALISING"}
-PID_AXIS = {1: "PIDS", 4: "PIDV", 2: "PIDP"}   # steering rate, speed, pitch
+PID_AXIS = {5: "PIDS", 4: "PIDV", 2: "PIDP"}   # MAVLink PID_TUNING_STEER = 5, ACCZ = 4 (speed), PITCH = 2
 
 
 def x25_crc(data, crc=0xFFFF):
@@ -1098,6 +1098,27 @@ def report_segment(log, mode, a, b):
         if nb is not None and yw is not None:
             he = wrap180(nb - yw)
             print("   erro de rumo (nav_bearing - yaw): rms %.1f graus" % rms(he))
+
+    # heading estimate vs where the rover really goes (GPS course while driving):
+    # a steady offset makes the rover drift off the line and then correct (S path)
+    if log.has("GPS_cog") and log.has("ATT_yaw"):
+        tc, cog = log.get("GPS_cog", a, b)
+        if len(tc) > 5:
+            ty, yw = log.get("ATT_yaw")
+            tv, vv = log.get("VFR_gspd")
+            yaw_u = np.degrees(np.unwrap(np.radians(yw)))
+            spd = np.interp(tc, tv, vv) if len(tv) > 1 else np.ones_like(tc)
+            m = spd > 0.6
+            if m.sum() >= 8:
+                diff = wrap180(cog[m] - np.interp(tc[m], ty, yaw_u))
+                med = float(np.median(diff))
+                print("   direcao real (GPS) - rumo estimado (bussola/EKF): mediana %+.1f graus, "
+                      "faixa central %+.1f..%+.1f (%d amostras andando)" % (
+                          med, np.percentile(diff, 25), np.percentile(diff, 75), m.sum()))
+                if abs(med) >= 3:
+                    hints.append("o rover anda %.0f graus a %s de onde o rumo estimado aponta: erro de bussola "
+                                 "(interferencia dos motores/cabos, alinhamento do GPS) faz ele sair da linha e "
+                                 "corrigir em S" % (abs(med), "direita" if med > 0 else "esquerda"))
 
     # steering rate loop
     if log.has("PIDS_des"):
