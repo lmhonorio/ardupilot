@@ -13,9 +13,16 @@ Editor dos rumos de alinhamento da missao do rover (campo Alt dos waypoints).
 
 Regra do mixer (rover-controlallocation.lua): ao chegar num WAYPOINT, Alt = -1
 passa direto; qualquer outro valor para o rover e gira ate esse rumo (frente).
-O alinhamento troca o modo (AUTO -> STEERING -> AUTO) e isso DESLIGA a re
-(DO_SET_REVERSE): o waypoint antes de um DO_SET_REVERSE e os waypoints de um
-trecho de re precisam de Alt = -1. A lista marca em vermelho o que quebra essa regra.
+
+Re: marque "Chegar de re" num waypoint e o trecho que termina nele e feito de
+costas. O editor refaz os DO_SET_REVERSE sozinho (um DO_SET_REVERSE 1 antes de
+cada waypoint de re e um 0 na volta para frente). O rumo de alinhamento e o da
+FRENTE do rover: num trecho de re o "Rumo do proximo trecho" soma 180 (traseira
+para o destino).
+
+O alinhamento troca o modo e o ArduRover desliga a re; o mixer (versao de 19/11)
+religa ao voltar para AUTO pelo DO_SET_REVERSE 1 logo antes do waypoint, por
+isso cada waypoint de re tem o seu. A lista marca em vermelho a re sem esse DO.
 """
 
 import math
@@ -262,22 +269,42 @@ def analyse(items):
                 effect = "passa direto"
             else:
                 effect = "para e alinha %.0f graus" % (it.z % 360)
-                if reverse:
-                    warn = "alinhamento dentro da re: a re desliga"
-                else:
-                    # a DO_SET_REVERSE(1) after this waypoint, before the next nav command
-                    for nxt in items[idx + 1:]:
-                        if nxt.command == CMD_DO_SET_REVERSE:
-                            if nxt.p1 >= 0.5:
-                                warn = "alinha antes de DO_SET_REVERSE: a re nao liga"
-                            break
-                        if nxt.command < 100:   # next NAV command
-                            break
-                if not warn and (it.z > 360 or it.z < -1):
+                if it.z > 360 or it.z < -1:
                     warn = "Alt %.1f vira rumo %.0f graus (era altitude?)" % (it.z, it.z % 360)
+            # a reverse leg needs its own DO_SET_REVERSE 1 right before it, or a
+            # mode change (alignment) before it leaves it forward
+            if reverse and not warn:
+                prev_do = items[idx - 1].command == CMD_DO_SET_REVERSE and items[idx - 1].p1 >= 0.5
+                if not prev_do:
+                    warn = "re sem DO_SET_REVERSE logo antes: marque 'Chegar de re' de novo"
         else:
             effect = ""
         out.append(("re" if reverse else "frente", effect, warn))
+    return out
+
+
+def reverse_flags(items):
+    """Per item: True when the leg that ends at it is driven in reverse."""
+    return [d == "re" for d, _e, _w in analyse(items)]
+
+
+def rebuild_reverse(items, rev_wp):
+    """Drop every DO_SET_REVERSE and put back one DO_SET_REVERSE 1 before each
+    nav item in rev_wp (a set of items) and a 0 where it goes forward again."""
+    out = [items[0]]
+    reverse = False
+    for it in items[1:]:
+        if it.command == CMD_DO_SET_REVERSE:
+            continue
+        if it.command < 100:
+            want = it in rev_wp
+            if want or reverse != want:
+                out.append(Item(0, it.frame, CMD_DO_SET_REVERSE, 0, 1, 1.0 if want else 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+            reverse = want
+        out.append(it)
+    for i, it in enumerate(out):
+        it.seq = i
     return out
 
 
@@ -390,6 +417,12 @@ class App:
         self.pass_chk = ttk.Checkbutton(right, text="Passa direto (Alt = -1)", variable=self.pass_var,
                                         command=self.toggle_pass)
         self.pass_chk.pack(anchor="w")
+        self.rev_var = tk.BooleanVar()
+        self.rev_chk = ttk.Checkbutton(right, text="Chegar de re (trecho ate este WP de costas)",
+                                       variable=self.rev_var, command=self.toggle_reverse)
+        self.rev_chk.pack(anchor="w")
+        self.rev_info = tk.StringVar()
+        ttk.Label(right, textvariable=self.rev_info, foreground="#b35900").pack(anchor="w")
         ttk.Button(right, text="Rumo do proximo trecho", command=self.next_leg).pack(fill="x", pady=(8, 2))
         ttk.Button(right, text="Todos os alinhamentos -> proximo trecho", command=self.all_next_leg).pack(fill="x", pady=2)
         ttk.Button(right, text="Todos sem rumo -> passa direto", command=self.all_pass).pack(fill="x", pady=2)
@@ -411,6 +444,7 @@ class App:
         state = "normal" if on else "disabled"
         self.angle_entry.configure(state=state)
         self.pass_chk.configure(state=state)
+        self.rev_chk.configure(state=state)
 
     def refresh(self, keep=None):
         self.tree.delete(*self.tree.get_children())
@@ -446,6 +480,13 @@ class App:
         it = self.items[i]
         self.set_enabled_editor(True)
         self.sel_label.set("WAYPOINT %d" % i)
+        flags = reverse_flags(self.items)
+        self.rev_var.set(flags[i])
+        nxt = self.next_nav(i)
+        if nxt is not None and flags[nxt]:
+            self.rev_info.set("proximo trecho de re: rumo = traseira (+180)")
+        else:
+            self.rev_info.set("")
         if is_pass(it.z):
             self.pass_var.set(True)
             self.angle_var.set("")
@@ -483,6 +524,42 @@ class App:
         else:
             self.set_z(0.0)
 
+    def next_nav(self, i):
+        for j in range(i + 1, len(self.items)):
+            if self.items[j].command < 100:
+                return j
+        return None
+
+    def toggle_reverse(self):
+        i = self.selected()
+        if i is None or i == 0 or self.items[i].command != CMD_WAYPOINT:
+            return
+        flags = reverse_flags(self.items)
+        rev = {it for it, f in zip(self.items, flags) if f and it.command < 100}
+        cur = self.items[i]
+        want = self.rev_var.get()
+        if want:
+            rev.add(cur)
+        else:
+            rev.discard(cur)
+        # the waypoint before this leg: an alignment toward the leg turns 180 so
+        # the rear (reverse) or the front (forward) faces the destination
+        prev = None
+        for j in range(i - 1, 0, -1):
+            if self.items[j].command < 100:
+                prev = self.items[j]
+                break
+        flipped = ""
+        if prev is not None and prev.command == CMD_WAYPOINT and not is_pass(prev.z) and flags[i] != want:
+            prev.z = round((prev.z + 180) % 360, 1)
+            flipped = "; alinhamento do WP anterior virou %.0f graus" % prev.z
+        self.items = rebuild_reverse(self.items, rev)
+        self.dirty = True
+        k = self.items.index(cur)
+        self.refresh(keep=k)
+        self.on_select()
+        self.status.set("Trecho ate o WP %d agora %s%s" % (k, "de RE" if want else "de frente", flipped))
+
     def leg_bearing(self, i):
         """Bearing (deg, 0 = north) from waypoint i to the next nav item with a position."""
         a = self.items[i]
@@ -503,7 +580,15 @@ class App:
         if brg is None:
             messagebox.showinfo("Rumo", "Nao ha waypoint depois deste")
             return
-        self.set_z(round(brg, 1))
+        self.set_z(round(self.front_heading(i, brg), 1))
+
+    def front_heading(self, i, brg):
+        """Heading of the rover front for the leg after i: the leg bearing, or
+        +180 when that leg is driven in reverse (the rear faces the target)."""
+        nxt = self.next_nav(i)
+        if nxt is not None and reverse_flags(self.items)[nxt]:
+            return (brg + 180) % 360
+        return brg
 
     def all_next_leg(self):
         n = 0
@@ -511,7 +596,7 @@ class App:
             if i and it.command == CMD_WAYPOINT and not is_pass(it.z):
                 brg = self.leg_bearing(i)
                 if brg is not None:
-                    it.z = round(brg, 1)
+                    it.z = round(self.front_heading(i, brg), 1)
                     n += 1
         if n:
             self.dirty = True
