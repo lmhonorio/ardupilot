@@ -209,6 +209,8 @@ end
 
 -- RTUN_MSG = 0: one line with the progress of the whole tune. Steering is the
 -- first half and speed the second (or all of it when only one axis is tuned).
+-- Called every 5 s while a stage runs, also when it is not advancing, so the
+-- operator sees the tune is alive even with the same number.
 UI.total_shown = -1
 function UI.total(axis, pct)
   if RTUN_MSG:get() >= 1 then
@@ -220,10 +222,8 @@ function UI.total(axis, pct)
     total = (axis == "ATC_SPEED" and 50 or 0) + pct / 2
   end
   total = math.floor(total)
-  if total ~= UI.total_shown then
-    UI.total_shown = total
-    gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%%", total))
-  end
+  UI.total_shown = total
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%%", total))
 end
 
 function UI.name(axis)
@@ -267,6 +267,7 @@ end
 -- no valid samples: how long, how far it got, the live values against the
 -- minimum, and every 15 s what to change
 function UI.stalled(axis, live, hint, now)
+  UI.total(axis, UI.last_pct)
   UI.say(MAV_SEVERITY.WARNING, "Tune %s PARADO ha %.0fs (%.0f%% feito)", UI.name(axis), now - UI.valid_t, UI.last_pct)
   UI.say(MAV_SEVERITY.WARNING, "  %s", live)
   if now - UI.hint_t >= 15 then
@@ -763,7 +764,7 @@ function update()
       quicktune_started = true
       local m = vehicle:get_mode()
       UI.total_shown = -1
-      UI.say(MAV_SEVERITY.NOTICE, "Tune INICIO no %s: 2 etapas de ~10-30s", m == 9 and "Circle" or ("modo " .. m))
+      UI.always(MAV_SEVERITY.NOTICE, "Tune INICIO no %s: 2 etapas de ~10-30s", m == 9 and "Circle" or ("modo " .. m))
       UI.say(MAV_SEVERITY.NOTICE, "  sticks no centro; desarmar cancela tudo")
     end
   end

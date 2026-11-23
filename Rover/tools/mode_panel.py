@@ -1419,7 +1419,7 @@ def main(argv=None):
     ap.add_argument("--http", type=int, default=HTTP_PORT,
                     help="porta da pagina neste computador e no celular na mesma rede (padrao %d)" % HTTP_PORT)
     ap.add_argument("--csv", default=None,
-                    help="CSV de corrente, rpm e temperatura CAN (padrao: esc_log_DATA.csv)")
+                    help="CSV de corrente, rpm e temperatura CAN (padrao: Rover/tools/Logs/esc_log_DATA.csv)")
     args = ap.parse_args(argv)
 
     try:
@@ -1432,7 +1432,9 @@ def main(argv=None):
     stop = threading.Event()
     tx = threading.Lock()
     enc = Encoder()
-    csv_path = args.csv or datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs")
+    os.makedirs(log_dir, exist_ok=True)
+    csv_path = args.csv or os.path.join(log_dir, datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv"))
     log = CanLog(csv_path, vehicle.t0)
     threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc, log), daemon=True).start()
 

@@ -149,7 +149,7 @@ A velocidade máxima é de cerca de 1,48 m/s com `ESC_RPM` 120 (0,99 / 0,67). O 
   PSC_POS_P 0,4 -> 0,2, PSC_VEL_P 2 -> 1, PSC_VEL_I 0,2 -> 0 (padrão; o PSC pedia ~22 °/s de giro na arrancada).
   Monitor: PID de direção é PID_TUNING eixo 5 (corrigido); analisador compara rumo estimado x direção GPS.
 
-- QuickTune (23/11): parâmetro `RTUN_MSG` (padrão 0) mostra só `Tune NN%` (direção 0-50%, velocidade 50-100%),
+- QuickTune (23/11): parâmetro `RTUN_MSG` (padrão 0) mostra `Tune INICIO` e `Tune NN%` a cada 5 s, mesmo parado (direção 0-50%, velocidade 50-100%),
   mais `Tune 100%`, `SALVO` e `CANCELADO`; `RTUN_MSG = 1` volta todas as mensagens detalhadas abaixo.
 - QuickTune (19/11): mensagens em português, várias linhas curtas por evento: o que a etapa mede e o mínimo que precisa
   (giro >= 10 °/s e comando >= 5%; velocidade >= 0,5 m/s e acelerador >= 20%), progresso com tempo restante, `PARADO ha Ns`
