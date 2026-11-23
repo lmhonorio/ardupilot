@@ -39,6 +39,7 @@ Atualizado em 18/11/2026. Último commit: `b56b8e33f8`.
 | `Rover/tools/mission_editor.py` | Interface: baixa a missão do rover, edita o rumo (Alt) de cada waypoint numa bússola (0 = norte), marca trechos de ré (refaz os DO_SET_REVERSE), envia de volta e abre/salva .waypoints |
 | `Rover/tools/ftp_scripts.py` | Envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP): só o que mudou, repete pacotes perdidos, grava em .tmp e confere o CRC na placa antes de trocar. `--check` só compara. Use no lugar do MAVFtp do Mission Planner (falha com kErrFailErrno/BadCrc pela HereLink) |
 | `Rover/tools/mav_param.py` | Ler e gravar parâmetros pela HereLink (sem pymavlink) |
+| `Rover/tools/sd_format.py` | Formata o cartão SD da controladora pela HereLink (`MAV_CMD_STORAGE_FORMAT`). Pede confirmação (ou `--yes`) e só envia com o rover desarmado. Apaga scripts, logs e terreno; parâmetros e missão ficam |
 | `Rover/docs/` | Documentação: `esc_can.md`, `Controle-CAN.md`, `Autotunning.md`, `Manual-Tuning-CAN.md` |
 
 ### Comunicação mixer → esc_can
@@ -169,6 +170,7 @@ python Rover/tools/esc_monitor.py                      # monitor (grava esc_log_
 python Rover/tools/esc_monitor.py --no-plot            # só console e CSV
 python Rover/tools/mav_param.py WP_SPEED ESC_RPM       # ler parâmetros
 python Rover/tools/mav_param.py ESC_IMAX=15            # gravar e confirmar
+python Rover/tools/sd_format.py                        # formatar o SD (rover desarmado; pede FORMATAR)
 ```
 
 - O monitor (desde 18/11) também pede atitude, posição, NAV_CONTROLLER_OUTPUT, PID_TUNING, servos, RC e
