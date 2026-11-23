@@ -26,7 +26,7 @@ local MAV_SEVERITY = {EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTI
 
 local PARAM_TABLE_KEY = 15
 local PARAM_TABLE_PREFIX = "RTUN_"
-local PARAM_TABLE_SIZE = 12
+local PARAM_TABLE_SIZE = 13
 
 -- bind a parameter to a variable
 function bind_param(name)
@@ -153,6 +153,15 @@ local RTUN_RC_FUNC = bind_add_param('RC_FUNC', 11, 300)
 --]]
 local SPEED_FF_SPEED_MIN = bind_add_param('SPEED_MIN', 12, 0.5)
 
+--[[
+  // @Param: RTUN_MSG
+  // @DisplayName: Rover Quicktune messages
+  // @Description: 0 shows only the overall progress (Tune NN%) plus saved / cancelled. 1 shows every message: stages, live values, stalls with hints, and each gain change.
+  // @Values: 0:Progress only,1:Full
+  // @User: Standard
+--]]
+local RTUN_MSG = bind_add_param('MSG', 13, 0)
+
 -- other vehicle parameters used by this script
 local INS_GYRO_FILTER  = bind_param("INS_GYRO_FILTER")
 local GCS_PID_MASK     = bind_param("GCS_PID_MASK")
@@ -186,8 +195,35 @@ end
 local UI = { valid_t = 0, last_pct = 0, last_pct_t = 0, hint_t = 0, pilot_t = 0, stage_t = 0,
              STAGE = { ATC_STR_RAT = "1/2 direcao", ATC_SPEED = "2/2 velocidade" } }
 
+-- full messages only with RTUN_MSG = 1
 function UI.say(sev, fmt, ...)
+  if RTUN_MSG:get() >= 1 then
+    gcs:send_text(sev, string.format(fmt, ...))
+  end
+end
+
+-- always sent (saved / cancelled / overall progress)
+function UI.always(sev, fmt, ...)
   gcs:send_text(sev, string.format(fmt, ...))
+end
+
+-- RTUN_MSG = 0: one line with the progress of the whole tune. Steering is the
+-- first half and speed the second (or all of it when only one axis is tuned).
+UI.total_shown = -1
+function UI.total(axis, pct)
+  if RTUN_MSG:get() >= 1 then
+    return
+  end
+  local both = (RTUN_AXES:get() & 3) == 3
+  local total = pct
+  if both then
+    total = (axis == "ATC_SPEED" and 50 or 0) + pct / 2
+  end
+  total = math.floor(total)
+  if total ~= UI.total_shown then
+    UI.total_shown = total
+    gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%%", total))
+  end
 end
 
 function UI.name(axis)
@@ -223,6 +259,7 @@ function UI.progress(axis, pct, live, now)
     eta = string.format("falta ~%.0fs", (100 - pct) * dt / (pct - UI.last_pct))
   end
   UI.last_pct, UI.last_pct_t = pct, now
+  UI.total(axis, pct)
   UI.say(MAV_SEVERITY.INFO, "Tune %s %.0f%% (%s)", UI.name(axis), pct, eta)
   UI.say(MAV_SEVERITY.INFO, "  %s: medindo OK", live)
 end
@@ -326,7 +363,7 @@ function save_all_params()
       param_changed[pname] = false
     end
   end
-  UI.say(MAV_SEVERITY.NOTICE, "Tune SALVO: ganhos novos gravados na placa")
+  UI.always(MAV_SEVERITY.NOTICE, "Tune SALVO: ganhos novos gravados na placa")
 end
 
 -- setup filter frequencies
@@ -404,6 +441,10 @@ function advance_axis(axis)
   axes_done[axis] = true
   -- check for tune completion
   if prev_axis ~= nil and get_current_axis() == nil then
+    if RTUN_MSG:get() < 1 then
+      UI.total_shown = -1
+      UI.always(MAV_SEVERITY.NOTICE, "Tune 100%%; salva em %.0fs, NAO desarme", RTUN_AUTO_SAVE:get())
+    end
     UI.say(MAV_SEVERITY.NOTICE, "Tune CONCLUIDO: as 2 etapas terminaram")
     UI.say(MAV_SEVERITY.NOTICE, "  salva sozinho em %.0fs; NAO desarme antes", RTUN_AUTO_SAVE:get())
     tune_done_time = now_sec
@@ -667,7 +708,7 @@ function update()
       need_restore = false
       restore_all_params()
       restore_gcs_pid_mask()
-      UI.say(MAV_SEVERITY.CRITICAL, "Tune CANCELADO: desarmou antes de salvar")
+      UI.always(MAV_SEVERITY.CRITICAL, "Tune CANCELADO: desarmou antes de salvar")
       UI.say(MAV_SEVERITY.CRITICAL, "  ganhos antigos de volta; arme p/ recomecar")
     end
     reset_axes_done()
@@ -721,6 +762,7 @@ function update()
     if not quicktune_started then
       quicktune_started = true
       local m = vehicle:get_mode()
+      UI.total_shown = -1
       UI.say(MAV_SEVERITY.NOTICE, "Tune INICIO no %s: 2 etapas de ~10-30s", m == 9 and "Circle" or ("modo " .. m))
       UI.say(MAV_SEVERITY.NOTICE, "  sticks no centro; desarmar cancela tudo")
     end
