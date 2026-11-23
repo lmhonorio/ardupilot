@@ -36,7 +36,8 @@ Atualizado em 18/11/2026. Último commit: `b56b8e33f8`.
 | `Rover/scripts/rover-quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
 | `Rover/scripts/modules/` | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua` (`PERIOD_MS` = 25), `functions.lua` |
 | `Rover/tools/esc_monitor.py` | Monitor no PC: gráfico, console e CSV, via HereLink |
-| `Rover/tools/mission_editor.py` | Interface: baixa a missão do rover, edita o rumo (Alt) de cada waypoint numa bússola (0 = norte), avisa conflitos com a ré, envia de volta e abre/salva .waypoints |
+| `Rover/tools/mission_editor.py` | Interface: baixa a missão do rover, edita o rumo (Alt) de cada waypoint numa bússola (0 = norte), marca trechos de ré (refaz os DO_SET_REVERSE), envia de volta e abre/salva .waypoints |
+| `Rover/tools/ftp_scripts.py` | Envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP): só o que mudou, repete pacotes perdidos, grava em .tmp e confere o CRC na placa antes de trocar. `--check` só compara. Use no lugar do MAVFtp do Mission Planner (falha com kErrFailErrno/BadCrc pela HereLink) |
 | `Rover/tools/mav_param.py` | Ler e gravar parâmetros pela HereLink (sem pymavlink) |
 | `Rover/docs/` | Documentação: `esc_can.md`, `Controle-CAN.md`, `Autotunning.md`, `Manual-Tuning-CAN.md` |
 
@@ -103,8 +104,10 @@ Quando o rover chega a um `NAV_WAYPOINT`, o **campo de altitude (z)** define o r
 O Mission Planner pode preencher a altitude com algo como 927,5, e o rover então gira para 207,5°.
 **Na missão, colocar Alt = -1 nos waypoints de passagem.**
 
-Ré em missão: `DO_SET_REVERSE` (P1 1/0). Toda troca de modo zera a ré, e o alinhamento (AUTO→STEERING→AUTO)
-não repete o `DO_SET_REVERSE`: waypoint antes dele e todos os de ré com Alt = -1. Ver `Rover/docs/Missoes-AUTO.md`.
+Ré em missão: `DO_SET_REVERSE` (P1 1/0). Toda troca de modo zera a ré. Desde 19/11 o mixer, ao entrar em AUTO,
+reinicia do `DO_SET_REVERSE 1` que estiver logo antes do waypoint atual (`restoreReverseOnAutoEntry`), então com
+um DO 1 antes de CADA waypoint de ré o alinhamento funciona na ré. O `mission_editor.py` monta isso pela caixa
+"Chegar de ré" e gira 180° o alinhamento anterior (rumo = frente do rover). Ver `Rover/docs/Missoes-AUTO.md`.
 
 ## Limites do Lua do ArduPilot (já causaram problemas)
 
@@ -146,6 +149,8 @@ A velocidade máxima é de cerca de 1,48 m/s com `ESC_RPM` 120 (0,99 / 0,67). O 
   PSC_POS_P 0,4 -> 0,2, PSC_VEL_P 2 -> 1, PSC_VEL_I 0,2 -> 0 (padrão; o PSC pedia ~22 °/s de giro na arrancada).
   Monitor: PID de direção é PID_TUNING eixo 5 (corrigido); analisador compara rumo estimado x direção GPS.
 
+- QuickTune (23/11): parâmetro `RTUN_MSG` (padrão 0) mostra `Tune INICIO` e `Tune NN%` a cada 5 s, mesmo parado (direção 0-50%, velocidade 50-100%),
+  mais `Tune 100%`, `SALVO` e `CANCELADO`; `RTUN_MSG = 1` volta todas as mensagens detalhadas abaixo.
 - QuickTune (19/11): mensagens em português, várias linhas curtas por evento: o que a etapa mede e o mínimo que precisa
   (giro >= 10 °/s e comando >= 5%; velocidade >= 0,5 m/s e acelerador >= 20%), progresso com tempo restante, `PARADO ha Ns`
   com os valores atuais/mínimos e `Faca: ...`, cada ganho antes -> depois (%), CONCLUIDO / SALVO / CANCELADO.

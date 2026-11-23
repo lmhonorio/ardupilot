@@ -150,3 +150,8 @@ ENV/
 env.bak/
 venv.bak/
 autotest_result_*_junit.xml
+
+# Rover tools: flight logs (esc_monitor.py / mode_panel.py)
+Rover/tools/Logs/
+Rover/tools/esc_log_*
+Rover/tools/__pycache__/

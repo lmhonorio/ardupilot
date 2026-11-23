@@ -1394,7 +1394,7 @@ def main():
     ap = argparse.ArgumentParser(description="Monitor ao vivo do rover (motores CAN + navegacao) via MAVLink")
     ap.add_argument("--conn", default="udp:0.0.0.0:14550",
                     help="udp:HOST:PORTA (escuta), udpout:HOST:PORTA ou tcp:HOST:PORTA (padrao: udp:0.0.0.0:14550)")
-    ap.add_argument("--csv", default=None, help="arquivo CSV (padrao: esc_log_DATA.csv na pasta atual)")
+    ap.add_argument("--csv", default=None, help="arquivo CSV (padrao: Rover/tools/Logs/esc_log_DATA.csv)")
     ap.add_argument("--window", type=float, default=20.0, help="janela do grafico em segundos")
     ap.add_argument("--no-plot", action="store_true", help="sem grafico, so console e CSV")
     ap.add_argument("--duration", type=float, default=0, help="encerrar apos N segundos (0 = sem limite)")
@@ -1406,7 +1406,9 @@ def main():
                          "comecar a transmitir (padrao %s; 'none' desliga)" % HERELINK_KICK)
     args = ap.parse_args()
 
-    csv_path = args.csv or datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs")
+    os.makedirs(log_dir, exist_ok=True)
+    csv_path = args.csv or os.path.join(log_dir, datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv"))
     parm_path = csv_path[:-4] + ".parm" if csv_path.lower().endswith(".csv") else csv_path + ".parm"
     try:
         link = Link(args.conn, args.kick)

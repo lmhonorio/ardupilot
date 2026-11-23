@@ -40,7 +40,14 @@ Toda troca de modo no ArduRover faz `set_reversed(false)` (`Rover/mode.cpp`). O 
 AUTO → STEERING → AUTO, e ao voltar o AUTO retoma o waypoint atual (`MIS_RESTART = 0`) **sem** repetir o
 `DO_SET_REVERSE` que veio antes dele. Resultado: o trecho que deveria ser de ré é feito **de frente**.
 
-Por isso:
+**Correção de 19/11 (mixer):** ao entrar em AUTO, se houver um `DO_SET_REVERSE 1` logo antes do waypoint
+atual, o mixer reinicia a partir dele e a ré volta (mensagem `AUTO: re restaurada no WP n`). Para isso cada
+waypoint de ré precisa do seu próprio `DO_SET_REVERSE 1` logo antes. O `mission_editor.py` monta isso
+sozinho pela opção **Chegar de ré**. Com esse formato o alinhamento antes da ré ou dentro dela funciona, e
+o rumo alinhado é o da **frente** (para a traseira apontar o destino: rumo do trecho + 180).
+Observação: ao terminar o alinhamento o mixer vai para HOLD; quem volta para AUTO é a rotina externa (ROS).
+
+Sem esse formato (um único `DO_SET_REVERSE` para vários waypoints) continuam valendo as regras abaixo:
 
 1. O **waypoint imediatamente antes de um `DO_SET_REVERSE`** precisa ter **Alt = -1**
    (o alinhamento dispara logo depois do `DO_SET_REVERSE` ter rodado e o apaga).

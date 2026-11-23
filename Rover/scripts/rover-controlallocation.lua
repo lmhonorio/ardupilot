@@ -852,6 +852,38 @@ local function applyPWMSteeringMode()
 end
 
 --[[
+Every mode entry clears the driving direction (Rover mode.cpp set_reversed(false)),
+and on re-entry AUTO resumes the current waypoint without re-running the
+DO_SET_REVERSE before it. So a heading alignment (AUTO -> STEERING -> HOLD -> AUTO)
+or a pilot mode switch turned a reverse leg into a forward one. On AUTO entry,
+if a DO_SET_REVERSE sits right before the current waypoint (after the previous
+nav item), restart from it so it runs again; the mission editor puts one
+before every reverse waypoint.
+--]]
+local function restoreReverseOnAutoEntry()
+  if not S.reverse_check or mission:state() ~= MISSION_STATE.RUNNING then
+    return
+  end
+  S.reverse_check = false
+  local idx = mission:get_current_nav_index()
+  if not idx or idx < 2 then
+    return
+  end
+  for i = idx - 1, 1, -1 do
+    local item = mission:get_item(i)
+    if not item or item:command() < 100 then
+      return -- reached the previous nav item: no direction change for this leg
+    end
+    if item:command() == 194 then
+      if item:param1() >= 0.5 and mission:set_current_cmd(i) then
+        gcs:send_text(MAV_SEVERITY.INFO, string.format("AUTO: re restaurada no WP %d", idx))
+      end
+      return
+    end
+  end
+end
+
+--[[
 Perform vehicle control in Auto mode
 --]]
 local function applyPWMAutoMode()
@@ -870,6 +902,8 @@ local function applyPWMAutoMode()
     vehicle:set_mode(DRIVING_MODES.MANUAL)
     return
   end
+
+  restoreReverseOnAutoEntry()
 
   -- If we reached a waypoint, check if we need to align yaw from param4 with a valid value
   if triggerYawControlOnReachedWaypoint() then
@@ -1109,6 +1143,10 @@ local function update()
   end
 
   local vehicle_mode = vehicle:get_mode()
+  if vehicle_mode == DRIVING_MODES.AUTO and S.prev_mode ~= DRIVING_MODES.AUTO then
+    S.reverse_check = true
+  end
+  S.prev_mode = vehicle_mode
   if yaw_sequence_active and vehicle_mode ~= DRIVING_MODES.STEERING then
     yaw_sequence_active = false
     yaw_sequence_index = 0
