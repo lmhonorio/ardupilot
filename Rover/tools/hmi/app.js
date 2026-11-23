@@ -68,6 +68,10 @@ let confirm = null;
 let scriptBusy = false;
 let scriptWanted = false;
 let scriptXferTimer = null;
+let sdlogBusy = false;
+let sdlogWanted = false;
+let sdlogXferTimer = null;
+let sdlogCache = [];
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -206,16 +210,24 @@ function paint() {
     pending = {};
     for (const input of document.querySelectorAll("input[data-touched]")) input.dataset.touched = "";
   }
-  for (const btn of document.querySelectorAll("button.apply, button.proc, button.scriptact")) {
+  for (const btn of document.querySelectorAll("button.apply, button.proc, button.scriptact, button.sdlogact")) {
     if (btn.id === "armbtn") continue;
     const pending = confirm && confirm.el === btn && Date.now() < confirm.until;
-    const busy = btn.classList.contains("scriptact") && scriptBusy;
-    if (!pending) btn.disabled = !state.seen || busy;
+    const busy = (btn.classList.contains("scriptact") && scriptBusy)
+      || (btn.classList.contains("sdlogact") && sdlogBusy);
+    const needsDisarm = btn.dataset.danger === "1";
+    if (!pending) {
+      btn.disabled = !state.seen || busy || (!!state.armed && needsDisarm);
+    }
   }
   paintTools();
   if (page === "scripts" && scriptWanted && state.seen && !scriptBusy) {
     scriptWanted = false;
     loadScripts();
+  }
+  if (page === "logs" && sdlogWanted && state.seen && !sdlogBusy) {
+    sdlogWanted = false;
+    loadSdLogs();
   }
 }
 
@@ -440,6 +452,199 @@ const NUM_ROWS = [
   [1, 2, 3, 4].map((m) => `<div class="num" data-num="t${m}"><small>M${m}</small><b>—</b><small class="ref"></small></div>`).join(""),
 ];
 
+function formatLogUtc(sec) {
+  const n = Number(sec) || 0;
+  if (n <= 0) return "sem data";
+  const d = new Date(n * 1000);
+  if (Number.isNaN(d.getTime())) return "sem data";
+  const p = (x) => String(x).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+    + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+function fillSdLogList(logs, note) {
+  const list = document.getElementById("sdloglist");
+  const status = document.getElementById("sdlogstatus");
+  if (status) status.textContent = note || "";
+  if (!list) return;
+  if (!logs.length) {
+    list.innerHTML = `<p class="paramcount">${escText(note || "Nenhum log no cartão.")}</p>`;
+    return;
+  }
+  list.innerHTML = logs.map((log) => `
+    <div class="scriptrow">
+      <div class="scriptinfo">
+        <code>LOG${String(log.id).padStart(3, "0")}.BIN</code>
+        <span class="unit">${formatBytes(log.size)} · ${formatLogUtc(log.time_utc)}</span>
+      </div>
+      <div class="scriptops">
+        <button type="button" class="sdlogdl sdlogact" data-danger="1" data-id="${log.id}" data-size="${log.size}">Baixar</button>
+      </div>
+    </div>`).join("");
+}
+
+async function loadSdLogs() {
+  const status = document.getElementById("sdlogstatus");
+  if (!status) return;
+  status.textContent = "Lendo a lista de logs…";
+  sdlogBusy = true;
+  paint();
+  let data = {};
+  try {
+    data = await (await fetch("/sdlogs")).json();
+  } catch (e) {
+    data = { ok: false, logs: [], note: "sem resposta da página" };
+  }
+  sdlogBusy = false;
+  if (page !== "logs" || !document.getElementById("sdlogstatus")) {
+    paint();
+    return;
+  }
+  sdlogCache = data.logs || [];
+  fillSdLogList(sdlogCache, data.note || "");
+  paint();
+}
+
+function showSdlogXfer(show) {
+  const box = document.getElementById("sdlogxfer");
+  if (!box) return;
+  box.hidden = !show;
+  if (!show) {
+    const fill = document.getElementById("sdlogxferfill");
+    if (fill) fill.style.width = "0%";
+  }
+}
+
+function paintSdlogXfer(prog) {
+  const box = document.getElementById("sdlogxfer");
+  if (!box || !prog || !prog.active) return;
+  box.hidden = false;
+  const total = Number(prog.total) || 0;
+  const done = Number(prog.done) || 0;
+  let pct = total > 0 ? Math.min(100, Math.round((100 * done) / total)) : 0;
+  if (prog.phase === "pronto") pct = 100;
+  if (prog.phase === "listar" || prog.phase === "apagar") pct = Math.max(pct, 2);
+  const fill = document.getElementById("sdlogxferfill");
+  const label = document.getElementById("sdlogxferlabel");
+  const meta = document.getElementById("sdlogxfermeta");
+  if (fill) fill.style.width = pct + "%";
+  if (label) {
+    if (prog.action === "erase") label.textContent = "Apagando logs do cartão…";
+    else if (prog.action === "list") label.textContent = "Listando logs…";
+    else label.textContent = prog.name || "baixando";
+  }
+  const parts = [];
+  if (prog.phase === "baixar") parts.push("baixando");
+  else if (prog.phase === "listar") parts.push("listando");
+  else if (prog.phase === "apagar") parts.push("apagando");
+  else if (prog.phase === "pronto") parts.push("pronto");
+  else if (prog.phase) parts.push(prog.phase);
+  parts.push(pct + "%");
+  if (total > 0) parts.push(formatBytes(done) + " / " + formatBytes(total));
+  if (prog.eta != null && prog.phase === "baixar") parts.push("faltam ~" + formatSeconds(prog.eta));
+  else if (prog.elapsed) parts.push(formatSeconds(prog.elapsed));
+  if (meta) meta.textContent = parts.join(" · ");
+  const status = document.getElementById("sdlogstatus");
+  if (status && prog.phase === "baixar") status.textContent = "Baixando " + (prog.name || "") + "…";
+}
+
+function stopSdlogXferPoll() {
+  if (sdlogXferTimer) {
+    clearInterval(sdlogXferTimer);
+    sdlogXferTimer = null;
+  }
+}
+
+function startSdlogXferPoll() {
+  stopSdlogXferPoll();
+  showSdlogXfer(true);
+  const tick = async () => {
+    try {
+      const prog = await (await fetch("/sdlogs/progress")).json();
+      paintSdlogXfer(prog);
+    } catch (e) { /* ignore */ }
+  };
+  tick();
+  sdlogXferTimer = setInterval(tick, 250);
+}
+
+async function downloadSdLog(id, size) {
+  if (sdlogBusy) return;
+  if (state.armed) {
+    const status = document.getElementById("sdlogstatus");
+    if (status) status.textContent = "desarme antes de baixar logs do cartão";
+    return;
+  }
+  sdlogBusy = true;
+  paint();
+  startSdlogXferPoll();
+  const status = document.getElementById("sdlogstatus");
+  if (status) status.textContent = "Baixando LOG" + String(id).padStart(3, "0") + ".BIN…";
+  let note = "";
+  try {
+    const res = await fetch("/sdlogs/get", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: Number(id), size: Number(size) }),
+    });
+    const ctype = (res.headers.get("Content-Type") || "").toLowerCase();
+    if (!res.ok || ctype.includes("application/json")) {
+      let data = {};
+      try { data = await res.json(); } catch (e) { data = {}; }
+      note = data.note || "não foi possível baixar";
+    } else {
+      const blob = await res.blob();
+      const disp = res.headers.get("Content-Disposition") || "";
+      const match = /filename=\"([^\"]+)\"/i.exec(disp);
+      const name = (match && match[1]) || ("LOG" + String(id).padStart(3, "0") + ".BIN");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+      note = "baixou " + name + " (" + formatBytes(blob.size) + ")";
+    }
+  } catch (err) {
+    note = String(err && err.message ? err.message : err);
+  }
+  stopSdlogXferPoll();
+  showSdlogXfer(false);
+  sdlogBusy = false;
+  paint();
+  if (status) status.textContent = note;
+}
+
+async function eraseSdLogs() {
+  if (sdlogBusy) return;
+  if (state.armed) {
+    const status = document.getElementById("sdlogstatus");
+    if (status) status.textContent = "desarme antes de apagar logs do cartão";
+    return;
+  }
+  sdlogBusy = true;
+  paint();
+  startSdlogXferPoll();
+  const status = document.getElementById("sdlogstatus");
+  if (status) status.textContent = "Apagando logs do cartão…";
+  let data;
+  try {
+    data = await scriptPost("/sdlogs/erase", {});
+  } catch (err) {
+    data = { ok: false, note: String(err && err.message ? err.message : err) };
+  }
+  stopSdlogXferPoll();
+  showSdlogXfer(false);
+  sdlogBusy = false;
+  if (data.ok) {
+    sdlogCache = [];
+    fillSdLogList([], data.note || "logs do cartão apagados");
+  } else if (status) {
+    status.textContent = data.note || "não foi possível apagar";
+  }
+  paint();
+}
+
 function renderLogs() {
   view.innerHTML = `
     <h1 class="page">Logs</h1>
@@ -460,6 +665,23 @@ function renderLogs() {
       <button type="button" class="cmd" id="logstop">Parar</button>
       <p class="status" id="logstatus">Nada é gravado até você iniciar.</p>
     </section>
+    <section class="record sdlogs">
+      <div class="who">
+        <p>Cartão</p>
+        <strong>Dataflash da Pixhawk</strong>
+      </div>
+      <button type="button" class="cmd sdlogact" id="sdlogrefresh" data-danger="1">Atualizar</button>
+      <button type="button" class="cmd sdlogact" id="sdlogerase" data-danger="1">Apagar todos</button>
+      <p class="status" id="sdlogstatus">Desarme para listar, baixar ou apagar os .BIN do cartão.</p>
+      <div class="scriptxfer" id="sdlogxfer" hidden>
+        <div class="scriptxfer-label" id="sdlogxferlabel"></div>
+        <div class="scriptxfer-track" aria-hidden="true">
+          <div class="scriptxfer-fill" id="sdlogxferfill"></div>
+        </div>
+        <div class="scriptxfer-meta" id="sdlogxfermeta"></div>
+      </div>
+      <div id="sdloglist" class="sdloglist"></div>
+    </section>
     <div class="reads">
       <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
       <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
@@ -474,6 +696,14 @@ function renderLogs() {
     const start = document.getElementById("logstart");
     if (start && !start.disabled) start.click();
   });
+  sdlogWanted = false;
+  if (state.seen && !state.armed) loadSdLogs();
+  else if (!state.seen) {
+    sdlogWanted = true;
+    document.getElementById("sdlogstatus").textContent = "Aguardando o rover.";
+  } else {
+    document.getElementById("sdlogstatus").textContent = "Desarme para listar os logs do cartão.";
+  }
 }
 
 function formatBytes(n) {
@@ -1198,13 +1428,41 @@ async function clearStorageBak() {
   if (status) status.textContent = data.note || (data.ok ? "STRG_BAK limpa" : "não foi possível limpar");
 }
 
+async function formatSdCard() {
+  if (scriptBusy) return;
+  if (state.armed) {
+    const status = document.getElementById("scriptstatus");
+    if (status) status.textContent = "desarme antes de formatar o cartão SD";
+    return;
+  }
+  scriptBusy = true;
+  paint();
+  const status = document.getElementById("scriptstatus");
+  if (status) status.textContent = "Formatando o cartão SD…";
+  let data;
+  try {
+    data = await scriptPost("/scripts/format", {});
+  } catch (err) {
+    data = { ok: false, note: String(err && err.message ? err.message : err) };
+  }
+  scriptBusy = false;
+  paint();
+  if (status) {
+    status.textContent = data.note || (data.ok
+      ? "cartão SD formatado — reinicie a placa e reenvie os scripts"
+      : "não foi possível formatar");
+  }
+  if (data.ok) loadScripts();
+}
+
 function renderScripts() {
   view.innerHTML = `
     <h1 class="page">Scripts</h1>
-    <p class="last">Lista os .lua que estão no cartão da Pixhawk. Copiar baixa o arquivo para este computador. Excluir apaga do cartão. Adicionar envia um .lua novo ou substitui o de mesmo nome. A placa só passa a usar a lista nova depois de reiniciar. Limpar STRG_BAK apaga os backups de parâmetros na microSD sem mostrar a lista.</p>
+    <p class="last">Lista os .lua que estão no cartão da Pixhawk. Copiar baixa o arquivo para este computador. Excluir apaga do cartão. Adicionar envia um .lua novo ou substitui o de mesmo nome. A placa só passa a usar a lista nova depois de reiniciar. Limpar STRG_BAK apaga os backups de parâmetros na microSD sem mostrar a lista. Formatar SD apaga scripts, logs e terreno (parâmetros e missão ficam); desarme antes e reenvie os scripts depois.</p>
     <div class="paramtools">
       <button type="button" class="cmd scriptact" id="scriptrefresh">Atualizar</button>
       <button type="button" class="cmd scriptact" id="scriptclearbak">Limpar STRG_BAK</button>
+      <button type="button" class="cmd scriptact" id="scriptformat" data-danger="1">Formatar SD</button>
       <button type="button" class="cmd scriptact" id="scriptreboot">Reiniciar a placa</button>
     </div>
     <p class="paramcount" id="scriptstatus"></p>
@@ -1275,6 +1533,35 @@ view.addEventListener("click", (ev) => {
   }
   if (ev.target.closest("#logstop")) {
     post("/log", { action: "stop" });
+    return;
+  }
+  if (ev.target.closest("#sdlogrefresh")) {
+    const btn = ev.target.closest("#sdlogrefresh");
+    if (!btn.disabled) loadSdLogs();
+    return;
+  }
+  const sdErase = ev.target.closest("#sdlogerase");
+  if (sdErase && !sdErase.disabled) {
+    if (confirm && confirm.el === sdErase && Date.now() < confirm.until) {
+      confirm = null;
+      sdErase.textContent = "Apagar todos";
+      sdErase.className = "cmd sdlogact";
+      eraseSdLogs();
+      return;
+    }
+    confirm = {
+      el: sdErase,
+      until: Date.now() + 4000,
+      label: "Apagar todos",
+      className: "cmd sdlogact",
+    };
+    sdErase.textContent = "Apaga todos os .BIN — confirmar";
+    sdErase.className = "cmd sdlogact solid";
+    return;
+  }
+  const sdDl = ev.target.closest("button.sdlogdl");
+  if (sdDl && !sdDl.disabled) {
+    downloadSdLog(sdDl.dataset.id, sdDl.dataset.size);
     return;
   }
   const modeBtn = ev.target.closest("button.mode");
@@ -1354,6 +1641,25 @@ view.addEventListener("click", (ev) => {
     clearBak.className = "cmd scriptact solid";
     return;
   }
+  const formatSd = ev.target.closest("#scriptformat");
+  if (formatSd && !formatSd.disabled) {
+    if (confirm && confirm.el === formatSd && Date.now() < confirm.until) {
+      confirm = null;
+      formatSd.textContent = "Formatar SD";
+      formatSd.className = "cmd scriptact";
+      formatSdCard();
+      return;
+    }
+    confirm = {
+      el: formatSd,
+      until: Date.now() + 4000,
+      label: "Formatar SD",
+      className: "cmd scriptact",
+    };
+    formatSd.textContent = "Apaga o cartão — confirmar";
+    formatSd.className = "cmd scriptact solid";
+    return;
+  }
   const reboot = ev.target.closest("#scriptreboot");
   if (reboot && !reboot.disabled) {
     if (confirm && confirm.el === reboot && Date.now() < confirm.until) {
@@ -1392,6 +1698,7 @@ function route() {
   page = pageId();
   confirm = null;
   if (page !== "scripts") stopScriptXferPoll();
+  if (page !== "logs") stopSdlogXferPoll();
   renderNav();
   if (!catalog) { view.textContent = "Carregando."; return; }
   if (page === "logs") renderLogs();

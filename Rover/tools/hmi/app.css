@@ -148,6 +148,20 @@ main { padding: 8px 28px 40px; max-width: 1180px; }
 }
 .record button.cmd { min-width: 120px; min-height: 42px; }
 .record .status { flex-basis: 100%; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.record.sdlogs .sdloglist { flex-basis: 100%; }
+.record.sdlogs .scriptxfer { flex-basis: 100%; margin: 0; }
+button.cmd.sdlogact { min-width: 160px; min-height: 42px; font-size: 16px; }
+button.sdlogdl {
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 2px solid var(--blue);
+  background: var(--bg);
+  color: var(--blue);
+  font-weight: 650;
+}
+button.sdlogdl:disabled, button.sdlogact:disabled { opacity: 0.38; cursor: default; }
 button.cmd {
   min-width: 200px;
   min-height: 64px;

@@ -8,7 +8,9 @@ O CSV so abre quando a pagina pede e grava o mesmo conteudo do log do esc_monito
 telemetria, mensagens, parametros e mudancas de modo e de armamento.
 A aba Scripts lista, copia, envia e exclui os .lua de /APM/scripts e
 /APM/scripts/modules pelo MAVFtp, como o Mission Planner em Config, MAVFtp.
-Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela.
+Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela
+e formata o cartão SD (MAV_CMD_STORAGE_FORMAT), como o sd_format.py.
+A aba Logs baixa e apaga os dataflash do cartão (LOG_REQUEST_* / LOG_ERASE).
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -43,6 +45,12 @@ MSG_PARAM_SET = 23
 MSG_SET_MODE = 11
 MSG_COMMAND_LONG = 76
 MSG_FILE_TRANSFER_PROTOCOL = 110
+MSG_LOG_REQUEST_LIST = 117
+MSG_LOG_ENTRY = 118
+MSG_LOG_REQUEST_DATA = 119
+MSG_LOG_DATA = 120
+MSG_LOG_ERASE = 121
+MSG_LOG_REQUEST_END = 122
 
 CRC_EXTRA = {
     MSG_HEARTBEAT: 50,
@@ -52,6 +60,12 @@ CRC_EXTRA = {
     MSG_SET_MODE: 89,
     MSG_COMMAND_LONG: 152,
     MSG_FILE_TRANSFER_PROTOCOL: 84,
+    MSG_LOG_REQUEST_LIST: 128,
+    MSG_LOG_ENTRY: 56,
+    MSG_LOG_REQUEST_DATA: 116,
+    MSG_LOG_DATA: 134,
+    MSG_LOG_ERASE: 237,
+    MSG_LOG_REQUEST_END: 203,
 }
 
 MAV_CMD_DO_SET_MODE = 176
@@ -59,6 +73,7 @@ MAV_CMD_COMPONENT_ARM_DISARM = 400
 MAV_CMD_PREFLIGHT_STORAGE = 245
 MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN = 246
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
+MAV_CMD_STORAGE_FORMAT = 526
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
 MAV_TYPE_GCS = 6
 MAV_AUTOPILOT_INVALID = 8
@@ -69,6 +84,7 @@ GCS_SYSID = 255
 GCS_COMPID = 190
 COMMAND_WAIT_S = 4.0
 COMMAND_RETRY_S = 0.4
+SD_FORMAT_WAIT_S = 60.0
 RATE_HZ = 10.0
 WINDOW_S = 20.0
 HERELINK_KICK = "192.168.43.1:14552"
@@ -459,6 +475,21 @@ class Encoder:
         payload = bytes([0, sysid & 255, compid & 255]) + body
         return self.pack(MSG_FILE_TRANSFER_PROTOCOL, payload)
 
+    def log_request_list(self, sysid, compid, start=0, end=0xFFFF):
+        return self.pack(MSG_LOG_REQUEST_LIST, struct.pack(
+            "<HHBB", int(start) & 0xFFFF, int(end) & 0xFFFF, sysid, compid))
+
+    def log_request_data(self, sysid, compid, log_id, ofs, count):
+        return self.pack(MSG_LOG_REQUEST_DATA, struct.pack(
+            "<IIHBB", int(ofs) & 0xFFFFFFFF, int(count) & 0xFFFFFFFF,
+            int(log_id) & 0xFFFF, sysid, compid))
+
+    def log_request_end(self, sysid, compid):
+        return self.pack(MSG_LOG_REQUEST_END, struct.pack("<BB", sysid, compid))
+
+    def log_erase(self, sysid, compid):
+        return self.pack(MSG_LOG_ERASE, struct.pack("<BB", sysid, compid))
+
 
 # Same opcodes and 80-byte writes as Mission Planner's MAVFtp (rwSize).
 # The radio drops larger packets; the planner keeps this size for that reason.
@@ -482,6 +513,12 @@ FTP_TIMEOUT = 4.0
 FTP_RETRIES = 4
 FTP_CRC_TIMEOUT = 15.0
 FTP_MAX_BYTES = 400000
+LOG_DATA_CHUNK = 90
+LOG_LIST_TIMEOUT_S = 12.0
+LOG_DATA_IDLE_S = 2.0
+LOG_WINDOW_BYTES = 16 * 1024
+LOG_WINDOW_RETRIES = 6
+LOG_MAX_BYTES = 40 * 1024 * 1024
 LUA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,60}\.lua$")
 
 
@@ -941,6 +978,305 @@ class FtpClient:
         self.update_progress(done=len(data), total=len(data), phase="pronto")
 
 
+class LogError(Exception):
+    pass
+
+
+def parse_log_entry(payload):
+    """LOG_ENTRY wire order: time_utc, size, id, num_logs, last_log_num."""
+    if payload is None or len(payload) < 14:
+        return None
+    time_utc, size, log_id, num_logs, last_log_num = struct.unpack("<IIHHH", payload[:14])
+    return {
+        "id": int(log_id),
+        "num_logs": int(num_logs),
+        "last_log_num": int(last_log_num),
+        "time_utc": int(time_utc),
+        "size": int(size),
+    }
+
+
+def parse_log_data(payload):
+    """LOG_DATA wire order: ofs, id, count, data[90]."""
+    if payload is None or len(payload) < 7:
+        return None
+    ofs, log_id, count = struct.unpack("<IHB", payload[:7])
+    count = min(int(count), LOG_DATA_CHUNK, max(0, len(payload) - 7))
+    return {
+        "id": int(log_id),
+        "ofs": int(ofs),
+        "count": count,
+        "data": bytes(payload[7:7 + count]),
+    }
+
+
+class LogClient:
+    """Dataflash list / download / erase over LOG_REQUEST_* (Mission Planner path)."""
+
+    def __init__(self, link, tx, enc):
+        self.link = link
+        self.tx = tx
+        self.enc = enc
+        self.cv = threading.Condition()
+        self.entries = collections.deque()
+        self.chunks = collections.deque()
+        self.op_lock = threading.Lock()
+        self._sysid = 1
+        self._compid = 1
+        self.progress_lock = threading.Lock()
+        self.progress = {
+            "active": False,
+            "action": "",
+            "name": "",
+            "folder": "",
+            "phase": "",
+            "done": 0,
+            "total": 0,
+            "index": 0,
+            "count": 0,
+            "t0": 0.0,
+        }
+
+    def push_entry(self, entry):
+        if not entry:
+            return
+        with self.cv:
+            self.entries.append(entry)
+            self.cv.notify()
+
+    def push_data(self, packet):
+        if not packet:
+            return
+        with self.cv:
+            self.chunks.append(packet)
+            self.cv.notify()
+
+    def begin_progress(self, action, name, total=0, phase=""):
+        with self.progress_lock:
+            self.progress = {
+                "active": True,
+                "action": action,
+                "name": name or "",
+                "folder": "dataflash",
+                "phase": phase or "",
+                "done": 0,
+                "total": int(total) if total else 0,
+                "index": 1,
+                "count": 1,
+                "t0": time.monotonic(),
+            }
+
+    def update_progress(self, done=None, total=None, phase=None):
+        with self.progress_lock:
+            if not self.progress.get("active"):
+                return
+            if done is not None:
+                self.progress["done"] = int(done)
+            if total is not None:
+                self.progress["total"] = int(total)
+            if phase is not None:
+                self.progress["phase"] = phase
+
+    def end_progress(self):
+        with self.progress_lock:
+            self.progress["active"] = False
+            self.progress["phase"] = ""
+
+    def progress_snapshot(self):
+        with self.progress_lock:
+            snap = dict(self.progress)
+        if snap.get("active") and snap.get("t0"):
+            elapsed = max(0.0, time.monotonic() - snap["t0"])
+            snap["elapsed"] = round(elapsed, 1)
+            done = snap.get("done") or 0
+            total = snap.get("total") or 0
+            if done > 0 and total > done and elapsed >= 0.4:
+                rate = done / elapsed
+                snap["eta"] = round((total - done) / rate, 1) if rate > 0 else None
+            else:
+                snap["eta"] = None
+        else:
+            snap["elapsed"] = 0
+            snap["eta"] = None
+        snap.pop("t0", None)
+        return snap
+
+    def _begin(self, vehicle):
+        with vehicle.lock:
+            if vehicle.sysid is None:
+                raise LogError("sem rover")
+            if vehicle.armed:
+                raise LogError("desarme antes de mexer nos logs do cartão")
+            if vehicle.jobs or vehicle.load is not None:
+                raise LogError("espere o comando atual terminar")
+            self._sysid = vehicle.sysid
+            self._compid = vehicle.compid or 1
+
+    def _clear_queues(self):
+        with self.cv:
+            self.entries.clear()
+            self.chunks.clear()
+
+    def _send(self, frame):
+        with self.tx:
+            self.link.send(frame)
+
+    def _end_transfer(self):
+        self._send(self.enc.log_request_end(self._sysid, self._compid))
+
+    def list_logs(self):
+        self._clear_queues()
+        self.begin_progress("list", "dataflash", total=0, phase="listar")
+        self._send(self.enc.log_request_list(self._sysid, self._compid, 0, 0xFFFF))
+        found = {}
+        num_logs = None
+        last_log_num = None
+        deadline = time.monotonic() + LOG_LIST_TIMEOUT_S
+        try:
+            while time.monotonic() < deadline:
+                with self.cv:
+                    while self.entries:
+                        entry = self.entries.popleft()
+                        num_logs = entry["num_logs"]
+                        last_log_num = entry["last_log_num"]
+                        if entry["id"] == 0 and num_logs == 0:
+                            self.update_progress(done=0, total=0, phase="pronto")
+                            return []
+                        if entry["id"] >= 1:
+                            found[entry["id"]] = {
+                                "id": entry["id"],
+                                "size": entry["size"],
+                                "time_utc": entry["time_utc"],
+                            }
+                        # Board stops listing when it has sent last_log_num.
+                        if last_log_num is not None and entry["id"] == last_log_num:
+                            logs = [found[i] for i in sorted(found)]
+                            self.update_progress(done=len(logs), total=len(logs), phase="pronto")
+                            return logs
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.cv.wait(min(0.5, remaining))
+            if found:
+                logs = [found[i] for i in sorted(found)]
+                self.update_progress(done=len(logs), total=len(logs), phase="pronto")
+                return logs
+            raise LogError("sem lista de logs do rover")
+        finally:
+            self._end_transfer()
+
+    def _collect_window(self, log_id, want_ofs, want_count, received):
+        """Ask for [want_ofs, want_ofs+want_count) and fold arriving LOG_DATA into received."""
+        self._clear_queues()
+        self._send(self.enc.log_request_data(
+            self._sysid, self._compid, log_id, want_ofs, want_count))
+        end = want_ofs + want_count
+        last_rx = time.monotonic()
+        stall_deadline = time.monotonic() + max(12.0, want_count / 200.0)
+        while time.monotonic() < stall_deadline:
+            with self.cv:
+                while self.chunks:
+                    pkt = self.chunks.popleft()
+                    if pkt["id"] != log_id or pkt["count"] <= 0:
+                        continue
+                    ofs = pkt["ofs"]
+                    if ofs < want_ofs or ofs >= end:
+                        continue
+                    if ofs not in received:
+                        received[ofs] = pkt["data"]
+                    last_rx = time.monotonic()
+                    # Short last packet ends this window on the board.
+                    if pkt["count"] < LOG_DATA_CHUNK:
+                        return
+                covered = sum(
+                    len(blob) for ofs, blob in received.items()
+                    if want_ofs <= ofs < end
+                )
+                if covered >= want_count:
+                    return
+                if time.monotonic() - last_rx >= LOG_DATA_IDLE_S:
+                    return
+                self.cv.wait(0.2)
+
+    def _missing_in(self, received, start, end):
+        """Gaps inside [start, end) given chunk offsets already received."""
+        gaps = []
+        cursor = start
+        for ofs in sorted(o for o in received if start <= o < end):
+            if ofs > cursor:
+                gaps.append((cursor, ofs - cursor))
+            cursor = max(cursor, ofs + len(received[ofs]))
+        if cursor < end:
+            gaps.append((cursor, end - cursor))
+        return gaps
+
+    def download(self, log_id, size):
+        if size <= 0:
+            raise LogError("log vazio")
+        if size > LOG_MAX_BYTES:
+            raise LogError("log grande demais (%s)" % format_bytes_py(size))
+        name = "LOG%03d.BIN" % int(log_id)
+        self.begin_progress("get", name, total=size, phase="baixar")
+        received = {}
+        try:
+            # Small windows so the HereLink can lose packets without forcing a
+            # full-file retry (the board rejects a new REQUEST while busy).
+            ofs = 0
+            while ofs < size:
+                window = min(LOG_WINDOW_BYTES, size - ofs)
+                end = ofs + window
+                for _try in range(LOG_WINDOW_RETRIES):
+                    gaps = self._missing_in(received, ofs, end)
+                    if not gaps:
+                        break
+                    for gap_ofs, gap_count in gaps:
+                        self.update_progress(
+                            done=sum(len(v) for v in received.values()),
+                            total=size, phase="baixar")
+                        self._collect_window(log_id, gap_ofs, gap_count, received)
+                        self._end_transfer()
+                        time.sleep(0.12)
+                if self._missing_in(received, ofs, end):
+                    have = sum(len(v) for v in received.values())
+                    raise LogError("download incompleto em ofs %d (%d de %d bytes)" % (
+                        ofs, have, size))
+                ofs = end
+                self.update_progress(
+                    done=sum(len(v) for v in received.values()),
+                    total=size, phase="baixar")
+            have = sum(len(v) for v in received.values())
+            if have < size:
+                raise LogError("download incompleto (%d de %d bytes)" % (have, size))
+            out = bytearray(size)
+            for chunk_ofs, blob in received.items():
+                out[chunk_ofs:chunk_ofs + len(blob)] = blob
+            self.update_progress(done=size, total=size, phase="pronto")
+            return name, bytes(out)
+        finally:
+            try:
+                self._end_transfer()
+            except Exception:
+                pass
+
+    def erase(self):
+        self.begin_progress("erase", "dataflash", total=0, phase="apagar")
+        self._clear_queues()
+        self._send(self.enc.log_erase(self._sysid, self._compid))
+        # Erase has no ACK; give the board a moment and stop any transfer state.
+        time.sleep(1.0)
+        self._end_transfer()
+        self.update_progress(done=1, total=1, phase="pronto")
+
+
+def format_bytes_py(n):
+    n = int(n) or 0
+    if n < 1024:
+        return "%d B" % n
+    if n < 1048576:
+        return "%d kB" % round(n / 1024)
+    return "%.1f MB" % (n / 1048576.0)
+
+
 def script_paths(folder, name):
     directory = SCRIPT_DIRS.get(folder)
     if directory is None or not LUA_NAME.match(name or ""):
@@ -1072,6 +1408,82 @@ def storage_bak_clear(vehicle):
     with vehicle.lock:
         push_message(vehicle, 6, note)
     return failed == 0, note
+
+
+def sdlog_progress(vehicle):
+    logs = getattr(vehicle, "logs", None)
+    if logs is None:
+        return {"active": False}
+    return logs.progress_snapshot()
+
+
+def sdlog_list(vehicle):
+    logs = vehicle.logs
+    with logs.op_lock:
+        try:
+            logs._begin(vehicle)
+            items = logs.list_logs()
+        except LogError as exc:
+            logs.end_progress()
+            note = str(exc)
+            print("sdlog: " + note, flush=True)
+            return {"ok": False, "logs": [], "note": note}
+    logs.end_progress()
+    note = ("nenhum log no cartão" if not items
+            else ("%d log%s" % (len(items), "" if len(items) == 1 else "s")))
+    print("sdlog: " + note, flush=True)
+    return {"ok": True, "logs": items, "note": note}
+
+
+def sdlog_get(vehicle, log_id, size):
+    logs = vehicle.logs
+    with logs.op_lock:
+        try:
+            logs._begin(vehicle)
+            name, blob = logs.download(int(log_id), int(size))
+        except LogError as exc:
+            logs.end_progress()
+            note = str(exc)
+            print("sdlog: " + note, flush=True)
+            return False, note, None, None
+        except Exception as exc:
+            logs.end_progress()
+            note = "falha ao baixar: %s" % exc
+            print("sdlog: " + note, flush=True)
+            return False, note, None, None
+    logs.end_progress()
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        path = os.path.join(LOG_DIR, name)
+        with open(path, "wb") as handle:
+            handle.write(blob)
+        note = "baixou %s (%s) em logs/%s" % (name, format_bytes_py(len(blob)), name)
+    except OSError as exc:
+        note = "baixou %s (%s); nao gravou em disco: %s" % (
+            name, format_bytes_py(len(blob)), exc)
+    print("sdlog: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return True, note, name, blob
+
+
+def sdlog_erase(vehicle):
+    logs = vehicle.logs
+    with logs.op_lock:
+        try:
+            logs._begin(vehicle)
+            logs.erase()
+        except LogError as exc:
+            logs.end_progress()
+            note = str(exc)
+            print("sdlog: " + note, flush=True)
+            return False, note
+    logs.end_progress()
+    note = "logs do cartão apagados"
+    print("sdlog: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 4, note)
+    return True, note
 
 
 class Link:
@@ -1251,6 +1663,12 @@ def reader(link, vehicle, stop, tx, enc):
                 continue
             if msgid == mon.MSG_FILE_TRANSFER_PROTOCOL:
                 vehicle.ftp.push(payload)
+                continue
+            if msgid == MSG_LOG_ENTRY:
+                vehicle.logs.push_entry(parse_log_entry(payload))
+                continue
+            if msgid == MSG_LOG_DATA:
+                vehicle.logs.push_data(parse_log_data(payload))
                 continue
             if msgid != mon.MSG_HEARTBEAT:
                 key = (msgid, payload)
@@ -1547,7 +1965,10 @@ def send_job(link, enc, sysid, compid, job):
     elif kind == "arm":
         link.send(enc.arm(sysid, compid, job["arm"]))
     elif kind == "command":
-        link.send(enc.command_long(sysid, compid, job["command"], job.get("p1", 0)))
+        link.send(enc.command_long(
+            sysid, compid, job["command"],
+            job.get("p1", 0), job.get("p2", 0), job.get("p3", 0),
+            job.get("p4", 0), job.get("p5", 0), job.get("p6", 0), job.get("p7", 0)))
 
 
 def service_jobs(link, vehicle, tx, enc):
@@ -1573,7 +1994,10 @@ def service_jobs(link, vehicle, tx, enc):
                 print(vehicle.note, flush=True)
             return
         if job["deadline"] is None:
-            span = job["seconds"] if job["kind"] == "wait" else COMMAND_WAIT_S
+            if job["kind"] == "wait":
+                span = job["seconds"]
+            else:
+                span = job.get("seconds", COMMAND_WAIT_S)
             job["deadline"] = now + span
             if job["kind"] == "wait":
                 return
@@ -1588,6 +2012,13 @@ def service_jobs(link, vehicle, tx, enc):
                 return
             give_up(vehicle, "Sem resposta ao pedir %s." % job_label(job), 4)
             return
+        # Long tasks (SD format) ACK with IN_PROGRESS first; keep waiting for
+        # ACCEPTED and do not re-send (a second request is TEMPORARILY_REJECTED).
+        if job["kind"] == "command":
+            ack = vehicle.last_ack
+            if (ack and ack[0] == job["command"] and ack[2] >= job.get("opened", 0)
+                    and ack[1] == 5):
+                return
         if now - job["sent"] < COMMAND_RETRY_S:
             return
         job["sent"] = now
@@ -1771,6 +2202,71 @@ def ask_reboot(link, vehicle, tx, enc):
         remember=False,
         sev=6,
     )
+
+
+def ask_sd_format(link, vehicle, tx, enc):
+    """Wipe the FC microSD (scripts, logs, terrain). Params and mission stay.
+
+    Same MAV_CMD_STORAGE_FORMAT path as Rover/tools/sd_format.py. Blocks until
+    the board ACKs ACCEPTED, fails, or the wait times out.
+    """
+    with vehicle.lock:
+        if _refuse_if_busy(vehicle, "formatar o cartão SD"):
+            return False, vehicle.note
+        if vehicle.jobs or vehicle.load is not None:
+            vehicle.note = "espere o comando atual terminar"
+            push_message(vehicle, 4, vehicle.note)
+            return False, vehicle.note
+        opened = time.monotonic()
+    ok = enqueue(
+        vehicle,
+        [{
+            "kind": "command",
+            "command": MAV_CMD_STORAGE_FORMAT,
+            "p1": 1.0,
+            "p2": 1.0,
+            "name": "formatar SD",
+            "seconds": SD_FORMAT_WAIT_S,
+        }],
+        "cartão SD formatado — reinicie a placa e reenvie os scripts",
+        remember=False,
+        sev=4,
+    )
+    if not ok:
+        with vehicle.lock:
+            return False, vehicle.note
+
+    deadline = time.monotonic() + SD_FORMAT_WAIT_S + 5.0
+    while time.monotonic() < deadline:
+        with vehicle.lock:
+            pending = any(
+                (j.get("kind") == "command" and j.get("command") == MAV_CMD_STORAGE_FORMAT)
+                or j.get("kind") == "note"
+                for j in vehicle.jobs
+            )
+            note = vehicle.note
+            ack = vehicle.last_ack
+        if not pending:
+            success = bool(
+                ack and ack[0] == MAV_CMD_STORAGE_FORMAT
+                and ack[1] == 0 and ack[2] >= opened
+            )
+            return success, note
+        time.sleep(0.2)
+
+    with vehicle.lock:
+        note = vehicle.note or "sem confirmação do rover"
+        pending = any(
+            j.get("kind") == "command" and j.get("command") == MAV_CMD_STORAGE_FORMAT
+            for j in vehicle.jobs
+        )
+        if pending:
+            vehicle.jobs.clear()
+            vehicle.revert = None
+            note = "Sem resposta ao pedir formatar SD."
+            vehicle.note = note
+            push_message(vehicle, 4, note)
+    return False, note
 
 
 def parse_parm(text):
@@ -2066,6 +2562,14 @@ def make_handler(link, vehicle, tx, enc):
                 code, ctype, body = json_body(script_progress(vehicle))
                 self._send(code, ctype, body)
                 return
+            if path == "/sdlogs":
+                code, ctype, body = json_body(sdlog_list(vehicle))
+                self._send(code, ctype, body)
+                return
+            if path == "/sdlogs/progress":
+                code, ctype, body = json_body(sdlog_progress(vehicle))
+                self._send(code, ctype, body)
+                return
             if path == "/params.parm":
                 with vehicle.lock:
                     body = parm_text(vehicle.params)
@@ -2096,6 +2600,42 @@ def make_handler(link, vehicle, tx, enc):
                 ok, note = storage_bak_clear(vehicle)
                 code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
                 self._send(code, ctype, body)
+                return
+            if path == "/scripts/format":
+                self._read_json(8000)
+                ok, note = ask_sd_format(link, vehicle, tx, enc)
+                code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/sdlogs/erase":
+                self._read_json(8000)
+                ok, note = sdlog_erase(vehicle)
+                code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/sdlogs/get":
+                data = self._read_json(8000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    log_id = int(data.get("id"))
+                    size = int(data.get("size"))
+                except (TypeError, ValueError):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                if log_id < 1 or size < 0:
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                ok, note, name, blob = sdlog_get(vehicle, log_id, size)
+                if not ok or blob is None:
+                    code, ctype, body = json_body({"ok": False, "note": note}, 409)
+                    self._send(code, ctype, body)
+                    return
+                filename = name or ("LOG%03d.BIN" % log_id)
+                self._send(200, "application/octet-stream", blob, (
+                    ("Content-Disposition", 'attachment; filename="%s"' % filename),
+                ))
                 return
             if path in ("/scripts/put", "/scripts/remove", "/scripts/get"):
                 data = self._read_json(900000 if path == "/scripts/put" else 8000)
@@ -2234,7 +2774,7 @@ def main(argv=None):
     ap.add_argument("--http", type=int, default=HTTP_PORT,
                     help="porta da pagina neste computador e no celular na mesma rede (padrao %d)" % HTTP_PORT)
     ap.add_argument("--csv", default=None,
-                    help="CSV de corrente, rpm e temperatura CAN (padrao: Rover/tools/Logs/esc_log_DATA.csv)")
+                    help="inicia ja um CSV em Rover/tools/logs com base esc_log_ (vazio = data/hora)")
     args = ap.parse_args(argv)
 
     try:
@@ -2247,11 +2787,20 @@ def main(argv=None):
     stop = threading.Event()
     tx = threading.Lock()
     enc = Encoder()
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs")
-    os.makedirs(log_dir, exist_ok=True)
-    csv_path = args.csv or os.path.join(log_dir, datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv"))
-    log = CanLog(csv_path, vehicle.t0)
-    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc, log), daemon=True).start()
+    vehicle.ftp = FtpClient(link, tx, enc)
+    vehicle.logs = LogClient(link, tx, enc)
+    if args.csv:
+        filename = log_filename(args.csv)
+        if filename is None:
+            print("Nome de CSV invalido: %s" % args.csv, file=sys.stderr)
+            return 1
+        ok, note = vehicle.recorder.start(filename)
+        print(note, flush=True)
+        if not ok:
+            return 1
+    else:
+        print("CSV parado. Inicie pela pagina de logs.", flush=True)
+    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc), daemon=True).start()
 
     try:
         httpd = LocalServer(("0.0.0.0", args.http), make_handler(link, vehicle, tx, enc))
