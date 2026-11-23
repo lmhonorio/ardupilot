@@ -3,6 +3,7 @@ const PAGES = [
   ["mensagens", "Mensagens"],
   ["modos", "Modos"],
   ["parametros", "Parâmetros"],
+  ["scripts", "Scripts"],
   ["ensaios", "Ensaios"],
 ];
 
@@ -56,6 +57,7 @@ const CHARTS = [
 ];
 
 let catalog = null;
+let paramDocs = {};
 let state = {};
 let telem = { t: 0, window: 20, series: {} };
 let telemAt = 0;
@@ -63,6 +65,9 @@ let shown = {};
 let frameAt = 0;
 let page = "logs";
 let confirm = null;
+let scriptBusy = false;
+let scriptWanted = false;
+let scriptXferTimer = null;
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -166,6 +171,7 @@ function paint() {
   const note = document.getElementById("note");
   if (document.activeElement !== note) note.textContent = state.note || "";
   armButton();
+  paintRecording();
   const last = document.getElementById("lasttext");
   if (last) last.textContent = state.text || "";
   paintMessages();
@@ -200,12 +206,17 @@ function paint() {
     pending = {};
     for (const input of document.querySelectorAll("input[data-touched]")) input.dataset.touched = "";
   }
-  for (const btn of document.querySelectorAll("button.apply, button.proc")) {
+  for (const btn of document.querySelectorAll("button.apply, button.proc, button.scriptact")) {
     if (btn.id === "armbtn") continue;
     const pending = confirm && confirm.el === btn && Date.now() < confirm.until;
-    if (!pending) btn.disabled = !state.seen;
+    const busy = btn.classList.contains("scriptact") && scriptBusy;
+    if (!pending) btn.disabled = !state.seen || busy;
   }
   paintTools();
+  if (page === "scripts" && scriptWanted && state.seen && !scriptBusy) {
+    scriptWanted = false;
+    loadScripts();
+  }
 }
 
 function drawChart(canvas, spec, data) {
@@ -439,6 +450,16 @@ function renderLogs() {
       </div>
       <button type="button" class="cmd" id="armbtn">Armar</button>
     </div>
+    <section class="record">
+      <div class="who">
+        <p>CSV</p>
+        <strong>Telemetria, mensagens e parâmetros</strong>
+      </div>
+      <input id="logname" type="text" maxlength="60" placeholder="opcional → esc_log_…" autocomplete="off" spellcheck="false">
+      <button type="button" class="cmd" id="logstart">Iniciar</button>
+      <button type="button" class="cmd" id="logstop">Parar</button>
+      <p class="status" id="logstatus">Nada é gravado até você iniciar.</p>
+    </section>
     <div class="reads">
       <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
       <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
@@ -446,6 +467,37 @@ function renderLogs() {
     </div>
     <p class="last" id="lasttext"></p>
     ${CHARTS.map((c, i) => `<section class="chart"><h2>${c.title} (${c.unit})</h2><div class="nums">${NUM_ROWS[i]}</div><div class="legend"></div><canvas data-chart="${i}"></canvas></section>`).join("")}`;
+  const name = document.getElementById("logname");
+  name.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    ev.preventDefault();
+    const start = document.getElementById("logstart");
+    if (start && !start.disabled) start.click();
+  });
+}
+
+function formatBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return Math.round(n / 1024) + " kB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function paintRecording() {
+  const status = document.getElementById("logstatus");
+  if (!status) return;
+  const rec = state.recording || {};
+  const start = document.getElementById("logstart");
+  const stop = document.getElementById("logstop");
+  const input = document.getElementById("logname");
+  if (start) start.disabled = !!rec.active;
+  if (stop) stop.disabled = !rec.active;
+  if (input) input.disabled = !!rec.active;
+  if (rec.active) {
+    status.textContent = "Gravando " + rec.name + " · " + rec.rows + " linhas · " + formatBytes(rec.bytes);
+  } else {
+    status.textContent = "Nada é gravado até você iniciar. Vazio → esc_log_AAAAAMMDD_HHMMSS.csv na pasta logs.";
+  }
 }
 
 function latestProblem() {
@@ -457,7 +509,7 @@ function latestProblem() {
 const SEV_NAME = ["Emergência", "Alerta", "Crítico", "Erro", "Aviso", "Nota", "Info", "Debug"];
 
 function escText(s) {
-  return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c]));
 }
 
 function sevClass(sev) {
@@ -527,7 +579,7 @@ function renderParametros() {
     </div>
     <p class="last">Carregar arquivo só coloca os valores na tela. Grave na placa para enviar o que mudou. Padrão de fábrica zera a memória e reinicia.</p>
     <p class="paramcount" id="parambanner"></p>
-    <input id="paramsearch" type="search" placeholder="Buscar pelo nome" autocomplete="off" value="">
+    <input id="paramsearch" type="search" placeholder="Buscar pelo nome ou descrição" autocomplete="off" value="">
     <p class="paramcount" id="paramcount"></p>
     <div id="paramsections"></div>`;
   const search = document.getElementById("paramsearch");
@@ -681,6 +733,19 @@ function paramMeta() {
   return { meta, groupOf };
 }
 
+function paramInfo(name, meta) {
+  if (meta[name]) return meta[name];
+  const doc = paramDocs[name];
+  if (doc) {
+    return {
+      step: doc.s || "any",
+      unit: doc.u || "",
+      desc: doc.d || "Parâmetro da placa.",
+    };
+  }
+  return { step: "any", unit: "", desc: "Parâmetro da placa." };
+}
+
 function paintTools() {
   const hasParams = !!(state.params && Object.keys(state.params).length);
   for (const btn of document.querySelectorAll("button.tool")) {
@@ -773,7 +838,13 @@ function paintParams() {
   const box = document.getElementById("paramsections");
   if (!box) return;
   const q = paramQuery.trim().toLowerCase();
-  const names = Object.keys(state.params || {}).filter((name) => !q || name.toLowerCase().includes(q));
+  const { meta, groupOf } = paramMeta();
+  const names = Object.keys(state.params || {}).filter((name) => {
+    if (!q) return true;
+    if (name.toLowerCase().includes(q)) return true;
+    const info = paramInfo(name, meta);
+    return (info.desc || "").toLowerCase().includes(q);
+  });
   names.sort();
   const sig = q + "\n" + names.join("\n");
   const count = document.getElementById("paramcount");
@@ -783,7 +854,6 @@ function paintParams() {
   }
   if (sig === paramSig) return;
   paramSig = sig;
-  const { meta, groupOf } = paramMeta();
   const buckets = {};
   for (const name of names) {
     const id = groupOf[name] || ("px:" + (name.includes("_") ? name.split("_")[0] : "OUTROS"));
@@ -803,7 +873,7 @@ function paintParams() {
   box.innerHTML = sections.map((section) => `
     <h2 class="section">${escText(section.title)}</h2>
     ${section.names.map((name) => {
-      const info = meta[name] || { step: "any", unit: "", desc: "Parâmetro da placa." };
+      const info = paramInfo(name, meta);
       return `<article class="param">
         <div>
           <h2>${escText(name)}</h2>
@@ -838,6 +908,350 @@ function paintParams() {
   applyPending();
 }
 
+function bytesToBase64(bytes) {
+  let bin = "";
+  const step = 4096;
+  for (let i = 0; i < bytes.length; i += step) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  }
+  return btoa(bin);
+}
+
+function fillScriptColumn(folder, files, note, blocked) {
+  const list = document.getElementById(folder + "-list");
+  const hint = document.getElementById(folder + "-note");
+  const count = document.getElementById(folder + "-count");
+  if (hint) hint.textContent = note || "";
+  if (count) {
+    count.textContent = files.length
+      ? (files.length === 1 ? "1 script" : files.length + " scripts")
+      : "";
+  }
+  if (!list) return;
+  if (!files.length) {
+    list.innerHTML = (note || blocked) ? "" : `<p class="paramcount">Nenhum script nesta pasta.</p>`;
+    return;
+  }
+  list.innerHTML = files.map((file) => `
+    <div class="scriptrow">
+      <div class="scriptinfo">
+        <code>${escText(file.name)}</code>
+        <span class="unit">${formatBytes(file.size)}</span>
+      </div>
+      <div class="scriptops">
+        <button type="button" class="scriptcopy scriptact" data-folder="${escText(folder)}" data-name="${escText(file.name)}">Copiar</button>
+        <button type="button" class="scriptdel scriptact" data-folder="${escText(folder)}" data-name="${escText(file.name)}">Excluir</button>
+      </div>
+    </div>`).join("");
+}
+
+function base64ToBytes(text) {
+  const bin = atob(text);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function saveScriptFile(name, bytes) {
+  const blob = new Blob([bytes], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+async function loadScripts() {
+  const status = document.getElementById("scriptstatus");
+  if (!status) return "";
+  status.textContent = "Lendo o cartão…";
+  scriptBusy = true;
+  paint();
+  let data = {};
+  try {
+    data = await (await fetch("/scripts")).json();
+  } catch (e) {
+    data = { note: "sem resposta da página" };
+  }
+  scriptBusy = false;
+  if (page !== "scripts" || !document.getElementById("scriptstatus")) {
+    paint();
+    return "";
+  }
+  fillScriptColumn("scripts", data.scripts || [], data.scripts_note || "", data.note);
+  fillScriptColumn("modules", data.modules || [], data.modules_note || "", data.note);
+  status.textContent = data.note || "";
+  paint();
+  return data.note || "";
+}
+
+async function scriptPost(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  try {
+    return await res.json();
+  } catch (e) {
+    return { ok: false, note: "sem resposta da página" };
+  }
+}
+
+async function reloadScripts(sticky) {
+  await loadScripts();
+  const status = document.getElementById("scriptstatus");
+  if (sticky && status && page === "scripts") status.textContent = sticky;
+}
+
+function formatSeconds(n) {
+  n = Math.max(0, Number(n) || 0);
+  if (n < 10) return n.toFixed(1) + " s";
+  return Math.round(n) + " s";
+}
+
+function scriptPhaseLabel(phase) {
+  if (phase === "preparar" || phase === "criar") return "abrindo o arquivo";
+  if (phase === "enviar") return "enviando";
+  if (phase === "crc") return "conferindo CRC";
+  if (phase === "pronto") return "pronto";
+  if (phase === "listar") return "listando pasta";
+  if (phase === "apagar") return "apagando";
+  return phase || "enviando";
+}
+
+function showScriptXfer(show) {
+  const box = document.getElementById("scriptxfer");
+  if (!box) return;
+  box.hidden = !show;
+  if (!show) {
+    const fill = document.getElementById("scriptxferfill");
+    if (fill) fill.style.width = "0%";
+  }
+}
+
+function paintScriptXfer(prog) {
+  const box = document.getElementById("scriptxfer");
+  if (!box || !prog || !prog.active) return;
+  box.hidden = false;
+  const total = Number(prog.total) || 0;
+  const done = Number(prog.done) || 0;
+  const clearing = prog.action === "clear";
+  let pct = total > 0 ? Math.min(100, Math.round((100 * done) / total)) : 0;
+  if (prog.phase === "crc") pct = Math.max(pct, 97);
+  if (prog.phase === "pronto") pct = 100;
+  if (prog.phase === "preparar" || prog.phase === "criar") pct = Math.max(pct, 2);
+  if (prog.phase === "listar") pct = Math.max(pct, 2);
+  const fill = document.getElementById("scriptxferfill");
+  const label = document.getElementById("scriptxferlabel");
+  const meta = document.getElementById("scriptxfermeta");
+  if (fill) fill.style.width = pct + "%";
+  let which;
+  if (clearing) {
+    which = total > 0
+      ? `Limpando STRG_BAK (${done} de ${total})`
+      : "Limpando STRG_BAK…";
+  } else {
+    which = (prog.count > 1)
+      ? `Arquivo ${prog.index} de ${prog.count}: ${prog.name || ""}`
+      : (prog.name || "enviando");
+  }
+  if (label) label.textContent = which;
+  const parts = [scriptPhaseLabel(prog.phase), pct + "%"];
+  if (total > 0) {
+    parts.push(clearing ? (done + " / " + total) : (formatBytes(done) + " / " + formatBytes(total)));
+  }
+  if (prog.eta != null && (prog.phase === "enviar" || prog.phase === "apagar")) {
+    parts.push("faltam ~" + formatSeconds(prog.eta));
+  } else if (prog.elapsed) {
+    parts.push(formatSeconds(prog.elapsed));
+  }
+  if (meta) meta.textContent = parts.join(" · ");
+  const status = document.getElementById("scriptstatus");
+  if (status && clearing) {
+    status.textContent = which;
+  } else if (status && prog.phase === "enviar") {
+    status.textContent = "Enviando " + (prog.name || "") + "…";
+  } else if (status && prog.phase === "crc") {
+    status.textContent = "Conferindo " + (prog.name || "") + "…";
+  }
+}
+
+function stopScriptXferPoll() {
+  if (scriptXferTimer) {
+    clearInterval(scriptXferTimer);
+    scriptXferTimer = null;
+  }
+}
+
+function startScriptXferPoll() {
+  stopScriptXferPoll();
+  showScriptXfer(true);
+  const tick = async () => {
+    try {
+      const prog = await (await fetch("/scripts/progress")).json();
+      paintScriptXfer(prog);
+    } catch (e) { /* ignore poll errors while upload runs */ }
+  };
+  tick();
+  scriptXferTimer = setInterval(tick, 200);
+}
+
+async function onScriptFiles(input) {
+  const folder = input.dataset.folder;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!files.length || scriptBusy) return;
+  scriptBusy = true;
+  paint();
+  startScriptXferPoll();
+  const status = document.getElementById("scriptstatus");
+  let sticky = "";
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (status) status.textContent = "Enviando " + file.name + " (" + (i + 1) + " de " + files.length + ")…";
+    paintScriptXfer({
+      active: true,
+      action: "put",
+      name: file.name,
+      folder,
+      phase: "preparar",
+      done: 0,
+      total: file.size,
+      index: i + 1,
+      count: files.length,
+      elapsed: 0,
+      eta: null,
+    });
+    if (file.size > 400000) {
+      sticky = file.name + " é grande demais";
+      break;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const data = await scriptPost("/scripts/put", {
+      folder,
+      name: file.name,
+      data: bytesToBase64(bytes),
+      index: i + 1,
+      count: files.length,
+    });
+    if (!data.ok) {
+      sticky = data.note || "não foi possível enviar";
+      break;
+    }
+    sticky = data.note || "";
+  }
+  stopScriptXferPoll();
+  showScriptXfer(false);
+  scriptBusy = false;
+  await reloadScripts(sticky);
+}
+
+async function copyScript(folder, name) {
+  scriptBusy = true;
+  paint();
+  const status = document.getElementById("scriptstatus");
+  if (status) status.textContent = "Copiando " + name + "…";
+  const data = await scriptPost("/scripts/get", { folder, name });
+  scriptBusy = false;
+  paint();
+  if (!data.ok || !data.data) {
+    if (status) status.textContent = data.note || "não foi possível copiar";
+    return;
+  }
+  try {
+    saveScriptFile(data.name || name, base64ToBytes(data.data));
+    if (status) status.textContent = data.note || (name + " copiado");
+  } catch (e) {
+    if (status) status.textContent = "não foi possível salvar " + name;
+  }
+}
+
+async function removeScript(folder, name) {
+  scriptBusy = true;
+  paint();
+  const status = document.getElementById("scriptstatus");
+  if (status) status.textContent = "Excluindo " + name + "…";
+  const data = await scriptPost("/scripts/remove", { folder, name });
+  scriptBusy = false;
+  await reloadScripts(data.note || (data.ok ? "" : "não foi possível excluir"));
+}
+
+async function clearStorageBak() {
+  if (scriptBusy) return;
+  scriptBusy = true;
+  paint();
+  const status = document.getElementById("scriptstatus");
+  if (status) status.textContent = "Limpando STRG_BAK…";
+  startScriptXferPoll();
+  let data;
+  try {
+    data = await scriptPost("/storage/clear-bak", {});
+  } catch (err) {
+    data = { ok: false, note: String(err && err.message ? err.message : err) };
+  }
+  stopScriptXferPoll();
+  showScriptXfer(false);
+  scriptBusy = false;
+  paint();
+  if (status) status.textContent = data.note || (data.ok ? "STRG_BAK limpa" : "não foi possível limpar");
+}
+
+function renderScripts() {
+  view.innerHTML = `
+    <h1 class="page">Scripts</h1>
+    <p class="last">Lista os .lua que estão no cartão da Pixhawk. Copiar baixa o arquivo para este computador. Excluir apaga do cartão. Adicionar envia um .lua novo ou substitui o de mesmo nome. A placa só passa a usar a lista nova depois de reiniciar. Limpar STRG_BAK apaga os backups de parâmetros na microSD sem mostrar a lista.</p>
+    <div class="paramtools">
+      <button type="button" class="cmd scriptact" id="scriptrefresh">Atualizar</button>
+      <button type="button" class="cmd scriptact" id="scriptclearbak">Limpar STRG_BAK</button>
+      <button type="button" class="cmd scriptact" id="scriptreboot">Reiniciar a placa</button>
+    </div>
+    <p class="paramcount" id="scriptstatus"></p>
+    <div class="scriptxfer" id="scriptxfer" hidden>
+      <div class="scriptxfer-label" id="scriptxferlabel"></div>
+      <div class="scriptxfer-track" aria-hidden="true">
+        <div class="scriptxfer-fill" id="scriptxferfill"></div>
+      </div>
+      <div class="scriptxfer-meta" id="scriptxfermeta"></div>
+    </div>
+    <div class="scriptgrid">
+      <section class="scriptbox">
+        <div class="scripthead">
+          <div>
+            <h2>APM/scripts</h2>
+            <p class="paramcount" id="scripts-count"></p>
+          </div>
+          <button type="button" class="scriptact scriptadd" data-folder="scripts">Adicionar</button>
+          <input class="scriptfile" data-folder="scripts" type="file" accept=".lua,text/plain" multiple hidden>
+        </div>
+        <p class="paramcount" id="scripts-note"></p>
+        <div id="scripts-list"></div>
+      </section>
+      <section class="scriptbox">
+        <div class="scripthead">
+          <div>
+            <h2>APM/scripts/modules</h2>
+            <p class="paramcount" id="modules-count"></p>
+          </div>
+          <button type="button" class="scriptact scriptadd" data-folder="modules">Adicionar</button>
+          <input class="scriptfile" data-folder="modules" type="file" accept=".lua,text/plain" multiple hidden>
+        </div>
+        <p class="paramcount" id="modules-note"></p>
+        <div id="modules-list"></div>
+      </section>
+    </div>`;
+  for (const input of document.querySelectorAll("input.scriptfile")) {
+    input.addEventListener("change", () => onScriptFiles(input));
+  }
+  scriptWanted = false;
+  if (state.seen) loadScripts();
+  else {
+    scriptWanted = true;
+    document.getElementById("scriptstatus").textContent = "Aguardando o rover.";
+  }
+}
+
 function renderProcesses() {
   const cards = (catalog.processes || []).map((p) => `
     <article class="card">
@@ -852,6 +1266,15 @@ function renderProcesses() {
 view.addEventListener("click", (ev) => {
   if (ev.target.closest("#armbtn")) {
     onArm();
+    return;
+  }
+  if (ev.target.closest("#logstart")) {
+    const name = (document.getElementById("logname").value || "").trim();
+    post("/log", { action: "start", name });
+    return;
+  }
+  if (ev.target.closest("#logstop")) {
+    post("/log", { action: "stop" });
     return;
   }
   const modeBtn = ev.target.closest("button.mode");
@@ -875,6 +1298,81 @@ view.addEventListener("click", (ev) => {
     onTool(tool);
     return;
   }
+  if (ev.target.closest("#scriptrefresh")) {
+    const btn = ev.target.closest("#scriptrefresh");
+    if (!btn.disabled) loadScripts();
+    return;
+  }
+  const add = ev.target.closest("button.scriptadd");
+  if (add && !add.disabled) {
+    const input = add.parentElement.querySelector("input.scriptfile");
+    if (input) input.click();
+    return;
+  }
+  const copy = ev.target.closest("button.scriptcopy");
+  if (copy && !copy.disabled) {
+    copyScript(copy.dataset.folder, copy.dataset.name);
+    return;
+  }
+  const del = ev.target.closest("button.scriptdel");
+  if (del && !del.disabled) {
+    if (confirm && confirm.el === del && Date.now() < confirm.until) {
+      const folder = del.dataset.folder;
+      const name = del.dataset.name;
+      confirm = null;
+      del.textContent = "Excluir";
+      del.className = "scriptdel scriptact";
+      removeScript(folder, name);
+      return;
+    }
+    confirm = {
+      el: del,
+      until: Date.now() + 4000,
+      label: "Excluir",
+      className: "scriptdel scriptact",
+    };
+    del.textContent = "Confirmar";
+    del.className = "scriptdel scriptact solid";
+    return;
+  }
+  const clearBak = ev.target.closest("#scriptclearbak");
+  if (clearBak && !clearBak.disabled) {
+    if (confirm && confirm.el === clearBak && Date.now() < confirm.until) {
+      confirm = null;
+      clearBak.textContent = "Limpar STRG_BAK";
+      clearBak.className = "cmd scriptact";
+      clearStorageBak();
+      return;
+    }
+    confirm = {
+      el: clearBak,
+      until: Date.now() + 4000,
+      label: "Limpar STRG_BAK",
+      className: "cmd scriptact",
+    };
+    clearBak.textContent = "Confirmar";
+    clearBak.className = "cmd scriptact solid";
+    return;
+  }
+  const reboot = ev.target.closest("#scriptreboot");
+  if (reboot && !reboot.disabled) {
+    if (confirm && confirm.el === reboot && Date.now() < confirm.until) {
+      confirm = null;
+      reboot.textContent = "Reiniciar a placa";
+      reboot.className = "cmd scriptact";
+      post("/params/reboot", {});
+      return;
+    }
+    confirm = {
+      el: reboot,
+      until: Date.now() + 4000,
+      label: "Reiniciar a placa",
+      className: "cmd scriptact",
+    };
+    reboot.textContent = "Confirmar";
+    reboot.className = "cmd scriptact solid";
+    return;
+  }
   const proc = ev.target.closest("button.proc");
   if (!proc || proc.disabled) return;
   if (confirm && confirm.el === proc && Date.now() < confirm.until) {
@@ -893,12 +1391,14 @@ view.addEventListener("click", (ev) => {
 function route() {
   page = pageId();
   confirm = null;
+  if (page !== "scripts") stopScriptXferPoll();
   renderNav();
   if (!catalog) { view.textContent = "Carregando."; return; }
   if (page === "logs") renderLogs();
   else if (page === "mensagens") renderMessages();
   else if (page === "modos") renderModes();
   else if (page === "parametros") renderParametros();
+  else if (page === "scripts") renderScripts();
   else if (page === "ensaios") renderProcesses();
   paint();
 }
@@ -932,8 +1432,12 @@ function liveFrame(now) {
 requestAnimationFrame(liveFrame);
 
 window.addEventListener("hashchange", route);
-fetch("/catalog").then((r) => r.json()).then((data) => {
+Promise.all([
+  fetch("/catalog").then((r) => r.json()),
+  fetch("/param_docs.json").then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
+]).then(([data, docs]) => {
   catalog = data;
+  paramDocs = docs || {};
   if (!location.hash) location.replace("#logs");
   route();
   pollState();

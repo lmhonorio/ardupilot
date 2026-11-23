@@ -4,6 +4,11 @@ escuta a UDP, chama o HereLink e serve a pagina na rede local.
 
 A pagina que abre e a de logs, com armar e desarmar. As outras trocam modo,
 parametro ou preparam um ensaio (SCR_USER1). Nenhum ensaio arma sozinho.
+O CSV so abre quando a pagina pede e grava o mesmo conteudo do log do esc_monitor:
+telemetria, mensagens, parametros e mudancas de modo e de armamento.
+A aba Scripts lista, copia, envia e exclui os .lua de /APM/scripts e
+/APM/scripts/modules pelo MAVFtp, como o Mission Planner em Config, MAVFtp.
+Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela.
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -13,6 +18,7 @@ Feche o esc_monitor.py antes: os dois escutam a UDP 14550.
 """
 
 import argparse
+import base64
 import collections
 import csv
 import datetime
@@ -24,6 +30,7 @@ import struct
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -35,6 +42,7 @@ MSG_PARAM_REQUEST_LIST = 21
 MSG_PARAM_SET = 23
 MSG_SET_MODE = 11
 MSG_COMMAND_LONG = 76
+MSG_FILE_TRANSFER_PROTOCOL = 110
 
 CRC_EXTRA = {
     MSG_HEARTBEAT: 50,
@@ -43,6 +51,7 @@ CRC_EXTRA = {
     MSG_PARAM_SET: 168,
     MSG_SET_MODE: 89,
     MSG_COMMAND_LONG: 152,
+    MSG_FILE_TRANSFER_PROTOCOL: 84,
 }
 
 MAV_CMD_DO_SET_MODE = 176
@@ -105,39 +114,129 @@ SERIES = {
 READOUT = ("VFR_gspd", "NAV_xtrack", "BAT_V", "BAT_I")
 
 
-def is_can_log(name):
-    """Wheel CAN values written to the CSV: current, rpm and temperature."""
-    if name in ("ESC_TGT_L", "ESC_TGT_R"):
-        return True
-    return name.startswith("ESC") and name[3:4].isdigit() and name.endswith(("_I", "_ICMD", "_RPM", "_T"))
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_BASE = "esc_log"
+LOG_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,60}$")
+
+
+def log_filename(raw):
+    """Same base as esc_monitor: esc_log_YYYYMMDD_HHMMSS.csv, or esc_log_<label>.csv."""
+    name = re.sub(r"\s+", "_", (raw or "").strip())
+    if name.lower().endswith(".csv"):
+        name = name[:-4]
+    if not name:
+        return datetime.datetime.now().strftime(LOG_BASE + "_%Y%m%d_%H%M%S.csv")
+    # Accept a full esc_log_* name or only the suffix after the shared base.
+    low = name.lower()
+    if low.startswith(LOG_BASE + "_"):
+        name = name[len(LOG_BASE) + 1:]
+    elif low == LOG_BASE:
+        return datetime.datetime.now().strftime(LOG_BASE + "_%Y%m%d_%H%M%S.csv")
+    if not LOG_NAME.match(name):
+        return None
+    return "%s_%s.csv" % (LOG_BASE, name)
 
 
 class CanLog:
-    """Same long CSV as esc_monitor, only the CAN motor values."""
+    """Same columns as the esc_monitor CSV."""
 
     def __init__(self, path, t0):
         self.path = path
         self.t0 = t0
         self.lock = threading.Lock()
-        self.file = open(path, "w", newline="", encoding="utf-8-sig")
+        new = (not os.path.exists(path)) or os.path.getsize(path) == 0
+        self.file = open(path, "a", newline="", encoding="utf-8-sig" if new else "utf-8")
         self.writer = csv.writer(self.file)
-        self.writer.writerow(["hora_pc", "t_s", "boot_ms", "nome", "valor", "texto"])
-        self.file.flush()
         self.rows = 0
+        self.closed = False
+        if new:
+            self.writer.writerow(["hora_pc", "t_s", "boot_ms", "nome", "valor", "texto"])
+            self.file.flush()
 
-    def write(self, name, value, boot_ms):
+    def write(self, name, value, boot_ms="", text=""):
         wall = datetime.datetime.now().isoformat(timespec="milliseconds")
         t_s = "%.3f" % (time.monotonic() - self.t0)
+        if isinstance(value, float):
+            if name in ("GPI_lat", "GPI_lon"):
+                shown = "%.7f" % value
+            elif name.startswith("PARAM:"):
+                shown = "%.7g" % value
+            else:
+                shown = "%.4f" % value
+        else:
+            shown = str(value)
         with self.lock:
-            self.writer.writerow([wall, t_s, boot_ms if boot_ms is not None else "", name, "%.4f" % float(value), ""])
+            if self.closed:
+                return
+            self.writer.writerow([
+                wall, t_s, boot_ms if boot_ms is not None else "", name, shown, text or "",
+            ])
             self.rows += 1
             if self.rows % 40 == 0:
                 self.file.flush()
 
     def close(self):
         with self.lock:
+            if self.closed:
+                return
+            self.closed = True
             self.file.flush()
             self.file.close()
+
+
+class Recorder:
+    """One CSV at a time. Nothing is opened until start()."""
+
+    def __init__(self, t0, directory=LOG_DIR):
+        self.t0 = t0
+        self.directory = directory
+        self.lock = threading.Lock()
+        self.log = None
+
+    def status(self):
+        with self.lock:
+            log = self.log
+            if log is None:
+                return {"active": False, "name": "", "rows": 0, "bytes": 0}
+            try:
+                size = os.path.getsize(log.path)
+            except OSError:
+                size = 0
+            return {
+                "active": True,
+                "name": os.path.basename(log.path),
+                "rows": log.rows,
+                "bytes": size,
+            }
+
+    def start(self, filename):
+        os.makedirs(self.directory, exist_ok=True)
+        path = os.path.join(self.directory, filename)
+        with self.lock:
+            if self.log is not None:
+                return False, "já está gravando %s" % os.path.basename(self.log.path)
+            existed = os.path.exists(path) and os.path.getsize(path) > 0
+            self.log = CanLog(path, self.t0)
+        if existed:
+            return True, "continuando %s" % filename
+        return True, "gravando %s" % filename
+
+    def stop(self):
+        with self.lock:
+            log = self.log
+            self.log = None
+        if log is None:
+            return False, "não estava gravando"
+        rows = log.rows
+        log.close()
+        return True, "parou %s (%d linhas)" % (os.path.basename(log.path), rows)
+
+    def write(self, name, value, boot_ms="", text=""):
+        with self.lock:
+            log = self.log
+            if log is None:
+                return
+            log.write(name, value, boot_ms, text)
 
 GROUPS = [
     {"id": "direcao", "title": "Direção", "params": [
@@ -355,6 +454,625 @@ class Encoder:
     def arm(self, sysid, compid, arm):
         return self.command_long(sysid, compid, MAV_CMD_COMPONENT_ARM_DISARM, 1.0 if arm else 0.0)
 
+    def ftp(self, sysid, compid, body):
+        """FILE_TRANSFER_PROTOCOL. body is the 251-byte MAVFtp packet."""
+        payload = bytes([0, sysid & 255, compid & 255]) + body
+        return self.pack(MSG_FILE_TRANSFER_PROTOCOL, payload)
+
+
+# Same opcodes and 80-byte writes as Mission Planner's MAVFtp (rwSize).
+# The radio drops larger packets; the planner keeps this size for that reason.
+FTP_NONE = 0
+FTP_TERMINATE = 1
+FTP_RESET = 2
+FTP_LIST = 3
+FTP_OPEN_RO = 4
+FTP_READ = 5
+FTP_CREATE = 6
+FTP_WRITE = 7
+FTP_REMOVE = 8
+FTP_MKDIR = 9
+FTP_RMDIR = 10
+FTP_CRC = 14
+STORAGE_BAK_DIR = "/APM/STRG_BAK"
+FTP_ACK = 128
+FTP_NACK = 129
+FTP_CHUNK = 80
+FTP_TIMEOUT = 4.0
+FTP_RETRIES = 4
+FTP_CRC_TIMEOUT = 15.0
+FTP_MAX_BYTES = 400000
+LUA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,60}\.lua$")
+
+
+def safe_lua_name(name):
+    """A single file name from the card. No folders, so it cannot leave the directory."""
+    if not isinstance(name, str) or not name or len(name) > 80:
+        return False
+    if not name.lower().endswith(".lua"):
+        return False
+    if name in (".", "..") or "/" in name or "\\" in name or "\x00" in name:
+        return False
+    return True
+SCRIPT_DIRS = {
+    "scripts": "/APM/scripts",
+    "modules": "/APM/scripts/modules",
+}
+FTP_ERR_TEXT = {
+    1: "falhou",
+    2: "erro do cartão",
+    3: "tamanho inválido",
+    4: "sessão inválida",
+    5: "sem sessão livre",
+    6: "fim da lista",
+    7: "comando desconhecido",
+    8: "já existe",
+    9: "arquivo protegido",
+    10: "não encontrado",
+}
+FTP_ERRNO = {
+    2: "ENOENT",
+    6: "ENXIO",
+    13: "EACCES",
+    17: "EEXIST",
+    28: "ENOSPC",
+    30: "EROFS",
+}
+
+
+class FtpError(Exception):
+    def __init__(self, text, retryable=False, missing=False, invalid_session=False, eof=False):
+        super().__init__(text)
+        self.retryable = retryable
+        self.missing = missing
+        self.invalid_session = invalid_session
+        self.eof = eof
+
+
+def ftp_crc32(data):
+    """crc_crc32(0, data): the raw table CRC the flight controller reports."""
+    crc = zlib.crc32(data, 0xFFFFFFFF) & 0xFFFFFFFF
+    return crc ^ 0xFFFFFFFF
+
+
+def parse_ftp_body(payload):
+    """MAVLink FILE_TRANSFER_PROTOCOL payload, padded to 254 bytes."""
+    if payload is None or len(payload) < 15:
+        return None
+    body = payload[3:254]
+    if len(body) < 12:
+        return None
+    seq, session, opcode, size, req, _burst, _pad, offset = struct.unpack_from("<HBBBBBBI", body)
+    size = min(size, 239)
+    return {
+        "seq": seq,
+        "session": session,
+        "opcode": opcode,
+        "req": req,
+        "offset": offset,
+        "data": bytes(body[12:12 + size]),
+    }
+
+
+def parse_dir_entries(data):
+    """Fname\\tsize and Dname entries, each ended by a NUL (ArduPilot adds two)."""
+    found = []
+    for part in data.split(b"\x00"):
+        if not part:
+            continue
+        kind, body = part[:1], part[1:]
+        if kind == b"F":
+            name, sep, size = body.rpartition(b"\t")
+            if not sep:
+                continue
+            try:
+                size_n = int(size)
+            except ValueError:
+                continue
+            found.append(("F", name.decode("ascii", "replace"), size_n))
+        elif kind == b"D":
+            name = body.split(b"\t", 1)[0].decode("ascii", "replace")
+            found.append(("D", name, None))
+    return found
+
+
+def ftp_nack_error(reply):
+    data = reply["data"]
+    code = data[0] if data else 0
+    errno = data[1] if len(data) > 1 else None
+    if code == 6:
+        return FtpError("fim da lista", eof=True)
+    if code == 10 or (code == 2 and errno == 2):
+        return FtpError("não encontrado", missing=True)
+    if code == 8:
+        return FtpError("já existe")
+    if code == 4:
+        return FtpError("sessão inválida", retryable=True, invalid_session=True)
+    text = FTP_ERR_TEXT.get(code, "resposta %d" % code)
+    if code == 2 and errno is not None:
+        name = FTP_ERRNO.get(errno, "errno %d" % errno)
+        text = "%s (%s)" % (text, name)
+        if errno == 6:
+            text = "o cartão não respondeu (ENXIO)"
+    retryable = code in (1, 2, 5) or errno in (6, 11)
+    return FtpError(text, retryable=retryable)
+
+
+class FtpClient:
+    """One MAVFtp session at a time, the way Mission Planner uploads a script.
+
+    Reset the session, create the file, write 80-byte blocks, close, then
+    compare the CRC the board computes with the one of the bytes we sent.
+    """
+
+    def __init__(self, link, tx, enc):
+        self.link = link
+        self.tx = tx
+        self.enc = enc
+        self.cv = threading.Condition()
+        self.replies = collections.deque()
+        self.op_lock = threading.Lock()
+        self.ftp_seq = 0
+        self.session = 0
+        self.progress_lock = threading.Lock()
+        self.progress = {
+            "active": False,
+            "action": "",
+            "name": "",
+            "folder": "",
+            "phase": "",
+            "done": 0,
+            "total": 0,
+            "index": 0,
+            "count": 0,
+            "t0": 0.0,
+        }
+
+    def push(self, payload):
+        reply = parse_ftp_body(payload)
+        if reply is None:
+            return
+        with self.cv:
+            self.replies.append(reply)
+            self.cv.notify()
+
+    def begin_progress(self, action, name, folder="", total=0, index=1, count=1, phase=""):
+        with self.progress_lock:
+            self.progress = {
+                "active": True,
+                "action": action,
+                "name": name or "",
+                "folder": folder or "",
+                "phase": phase or "",
+                "done": 0,
+                "total": int(total) if total else 0,
+                "index": int(index) if index else 1,
+                "count": int(count) if count else 1,
+                "t0": time.monotonic(),
+            }
+
+    def update_progress(self, done=None, total=None, phase=None):
+        with self.progress_lock:
+            if not self.progress.get("active"):
+                return
+            if done is not None:
+                self.progress["done"] = int(done)
+            if total is not None:
+                self.progress["total"] = int(total)
+            if phase is not None:
+                self.progress["phase"] = phase
+
+    def end_progress(self):
+        with self.progress_lock:
+            self.progress["active"] = False
+            self.progress["phase"] = ""
+
+    def progress_snapshot(self):
+        with self.progress_lock:
+            snap = dict(self.progress)
+        if snap.get("active") and snap.get("t0"):
+            elapsed = max(0.0, time.monotonic() - snap["t0"])
+            snap["elapsed"] = round(elapsed, 1)
+            done = snap.get("done") or 0
+            total = snap.get("total") or 0
+            if done > 0 and total > done and elapsed >= 0.4:
+                rate = done / elapsed
+                snap["eta"] = round((total - done) / rate, 1) if rate > 0 else None
+            else:
+                snap["eta"] = None
+        else:
+            snap["elapsed"] = 0
+            snap["eta"] = None
+        snap.pop("t0", None)
+        return snap
+
+    def _wait(self, expect, session, timeout):
+        deadline = time.monotonic() + timeout
+        with self.cv:
+            while True:
+                while self.replies:
+                    reply = self.replies.popleft()
+                    if reply["seq"] == expect and reply["session"] == session:
+                        return reply
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.cv.wait(remaining)
+
+    def roundtrip(self, opcode, data=b"", offset=0, size=None, timeout=FTP_TIMEOUT, retries=FTP_RETRIES):
+        data = bytes(data or b"")
+        if len(data) > 239:
+            raise FtpError("bloco grande demais")
+        # ReadFile puts the byte count in size with an empty payload.
+        wire_size = len(data) if size is None else int(size)
+        if wire_size < 0 or wire_size > 239:
+            raise FtpError("tamanho inválido")
+        seq = self.ftp_seq & 0xFFFF
+        expect = (seq + 1) & 0xFFFF
+        session = self.session & 255
+        header = struct.pack("<HBBBBBBI", seq, session, opcode, wire_size, 0, 0, 0, offset & 0xFFFFFFFF)
+        body = (header + data).ljust(251, b"\0")
+        with self.cv:
+            self.replies.clear()
+        last = None
+        for _attempt in range(retries):
+            frame = self.enc.ftp(self._sysid, self._compid, body)
+            with self.tx:
+                self.link.send(frame)
+            deadline = time.monotonic() + timeout
+            reply = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                got = self._wait(expect, session, remaining)
+                if got is None:
+                    break
+                if got["req"] != opcode:
+                    continue
+                reply = got
+                break
+            if reply is None:
+                last = FtpError("sem resposta do cartão", retryable=True)
+                continue
+            self.ftp_seq = expect
+            if reply["opcode"] == FTP_NACK:
+                raise ftp_nack_error(reply)
+            if reply["opcode"] != FTP_ACK:
+                raise FtpError("resposta inesperada", retryable=True)
+            return reply
+        raise last or FtpError("sem resposta do cartão", retryable=True)
+
+    def _begin(self, vehicle):
+        with vehicle.lock:
+            if vehicle.sysid is None:
+                raise FtpError("sem rover")
+            if vehicle.jobs or vehicle.load is not None:
+                raise FtpError("espere o pedido atual terminar")
+            self._sysid = vehicle.sysid
+            self._compid = vehicle.compid or 1
+
+    def _call(self, vehicle, action):
+        with self.op_lock:
+            self._begin(vehicle)
+            try:
+                return action()
+            except FtpError as exc:
+                if not exc.retryable:
+                    raise
+                time.sleep(3.2 if exc.invalid_session else 0.4)
+                try:
+                    self.roundtrip(FTP_RESET, timeout=2.0, retries=2)
+                except FtpError:
+                    pass
+                self._begin(vehicle)
+                return action()
+
+    def reset(self):
+        self.roundtrip(FTP_RESET, timeout=2.0, retries=2)
+
+    def list_dir(self, path):
+        entries = []
+        offset = 0
+        encoded = path.encode("ascii")
+        while True:
+            try:
+                reply = self.roundtrip(FTP_LIST, encoded, offset=offset)
+            except FtpError as exc:
+                if exc.eof:
+                    break
+                raise
+            parts = [part for part in reply["data"].split(b"\x00") if part]
+            batch = parse_dir_entries(reply["data"])
+            if not parts:
+                break
+            entries.extend(batch)
+            offset += len(parts)
+            if offset > 500:
+                break
+        return entries
+
+    def list_lua(self, path):
+        files = []
+        for kind, name, size in self.list_dir(path):
+            if kind == "F" and safe_lua_name(name):
+                files.append({"name": name, "size": size})
+        files.sort(key=lambda item: item["name"].lower())
+        return files
+
+    def mkdir(self, path):
+        try:
+            self.roundtrip(FTP_MKDIR, path.encode("ascii"))
+        except FtpError as exc:
+            if "já existe" not in str(exc):
+                raise
+
+    def ensure_dir(self, path):
+        built = ""
+        for piece in path.strip("/").split("/"):
+            built += "/" + piece
+            try:
+                self.list_dir(built)
+            except FtpError as exc:
+                if not exc.missing:
+                    raise
+                self.mkdir(built)
+
+    def remove(self, path):
+        self.reset()
+        self.roundtrip(FTP_REMOVE, path.encode("ascii"))
+        self.reset()
+
+    def remove_file(self, path):
+        """RemoveFile (opcode 8), same as Mission Planner — one path per call."""
+        self.roundtrip(FTP_REMOVE, path.encode("ascii"))
+
+    def clear_storage_bak(self):
+        """List /APM/STRG_BAK and RemoveFile every STRG*.bak (and last_storage_bak).
+
+        MAVFtp has no bulk delete: Mission Planner also removes one file at a time.
+        Files are never returned to the UI — only a count.
+        """
+        self.update_progress(done=0, total=0, phase="listar")
+        self.reset()
+        try:
+            entries = self.list_dir(STORAGE_BAK_DIR)
+        except FtpError as exc:
+            if exc.missing:
+                return 0, 0, "pasta STRG_BAK já não existe"
+            raise
+        names = []
+        for kind, name, _size in entries:
+            if kind != "F":
+                continue
+            if name == "last_storage_bak":
+                names.append(name)
+            elif name.startswith("STRG") and name.endswith(".bak") and "/" not in name and "\\" not in name:
+                names.append(name)
+        total = len(names)
+        self.update_progress(done=0, total=total, phase="apagar")
+        if total == 0:
+            return 0, 0, "STRG_BAK já está vazia"
+        deleted = 0
+        failed = 0
+        for index, name in enumerate(names, start=1):
+            path = STORAGE_BAK_DIR + "/" + name
+            try:
+                self.remove_file(path)
+                deleted += 1
+            except FtpError as exc:
+                if exc.missing:
+                    deleted += 1
+                elif exc.invalid_session:
+                    try:
+                        self.reset()
+                        self.remove_file(path)
+                        deleted += 1
+                    except FtpError:
+                        failed += 1
+                else:
+                    failed += 1
+            self.update_progress(done=index, total=total, phase="apagar")
+        try:
+            self.reset()
+        except FtpError:
+            pass
+        if failed:
+            return deleted, failed, "apagou %d; %d falharam" % (deleted, failed)
+        return deleted, 0, "apagou %d arquivo%s de STRG_BAK" % (deleted, "" if deleted == 1 else "s")
+
+    def get(self, path):
+        """Read a whole file with OpenFileRO + ReadFile, then close the session."""
+        self.reset()
+        opened = self.roundtrip(FTP_OPEN_RO, path.encode("ascii"))
+        if len(opened["data"]) < 4:
+            raise FtpError("tamanho do arquivo ausente", retryable=True)
+        size = struct.unpack("<I", opened["data"][:4])[0]
+        if size > FTP_MAX_BYTES:
+            try:
+                self.roundtrip(FTP_TERMINATE, timeout=2.0, retries=2)
+            except FtpError:
+                pass
+            raise FtpError("arquivo grande demais")
+        chunks = []
+        offset = 0
+        while offset < size:
+            want = min(FTP_CHUNK, size - offset)
+            try:
+                reply = self.roundtrip(FTP_READ, b"", offset=offset, size=want)
+            except FtpError as exc:
+                if exc.eof:
+                    break
+                raise
+            block = reply["data"]
+            if not block:
+                break
+            chunks.append(block)
+            offset += len(block)
+        try:
+            self.roundtrip(FTP_TERMINATE, timeout=2.0, retries=2)
+        except FtpError:
+            self.reset()
+        data = b"".join(chunks)
+        if size and len(data) != size:
+            raise FtpError("leitura incompleta (%d de %d)" % (len(data), size), retryable=True)
+        return data
+
+    def put(self, path, data):
+        self.update_progress(done=0, total=len(data), phase="criar")
+        self.reset()
+        self.roundtrip(FTP_CREATE, path.encode("ascii"))
+        offset = 0
+        self.update_progress(done=0, total=len(data), phase="enviar")
+        while offset < len(data):
+            block = data[offset:offset + FTP_CHUNK]
+            self.roundtrip(FTP_WRITE, block, offset=offset)
+            offset += len(block)
+            self.update_progress(done=offset, total=len(data), phase="enviar")
+        self.update_progress(done=len(data), total=len(data), phase="crc")
+        self.reset()
+        reply = self.roundtrip(FTP_CRC, path.encode("ascii"), timeout=FTP_CRC_TIMEOUT, retries=2)
+        if len(reply["data"]) < 4:
+            raise FtpError("CRC sem resposta", retryable=True)
+        remote = struct.unpack("<I", reply["data"][:4])[0]
+        local = ftp_crc32(data)
+        if remote != local:
+            raise FtpError("o arquivo chegou diferente", retryable=True)
+        self.update_progress(done=len(data), total=len(data), phase="pronto")
+
+
+def script_paths(folder, name):
+    directory = SCRIPT_DIRS.get(folder)
+    if directory is None or not LUA_NAME.match(name or ""):
+        return None, None
+    return directory, directory + "/" + name
+
+
+def script_list(vehicle):
+    ftp = vehicle.ftp
+
+    def read():
+        out = {"ok": True, "scripts": [], "modules": [], "scripts_note": "", "modules_note": "", "note": ""}
+        ftp.reset()
+        for key, path in SCRIPT_DIRS.items():
+            try:
+                out[key] = ftp.list_lua(path)
+            except FtpError as exc:
+                if exc.missing:
+                    out[key + "_note"] = "pasta ainda não existe"
+                else:
+                    out[key + "_note"] = str(exc)
+                    out["ok"] = False
+        return out
+
+    try:
+        return ftp._call(vehicle, read)
+    except FtpError as exc:
+        return {
+            "ok": False, "scripts": [], "modules": [],
+            "scripts_note": "", "modules_note": "", "note": str(exc),
+        }
+
+
+def script_put(vehicle, folder, name, data, index=1, count=1):
+    directory, path = script_paths(folder, name)
+    if path is None:
+        return False, "nome inválido: use um arquivo .lua"
+    if len(data) > FTP_MAX_BYTES:
+        return False, "arquivo grande demais"
+    ftp = vehicle.ftp
+    ftp.begin_progress("put", name, folder=folder, total=len(data), index=index, count=count, phase="preparar")
+
+    def write():
+        ftp.ensure_dir(directory)
+        ftp.put(path, data)
+
+    try:
+        ftp._call(vehicle, write)
+    except FtpError as exc:
+        ftp.end_progress()
+        note = "%s: %s" % (name, exc)
+        print("script: " + note, flush=True)
+        return False, note
+    ftp.end_progress()
+    note = "%s enviado. Reinicie a placa para carregar." % name
+    print("script: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, "script enviado: %s/%s" % (folder, name))
+    return True, note
+
+
+def script_progress(vehicle):
+    ftp = getattr(vehicle, "ftp", None)
+    if ftp is None:
+        return {"active": False}
+    return ftp.progress_snapshot()
+
+
+def script_get(vehicle, folder, name):
+    directory = SCRIPT_DIRS.get(folder)
+    if directory is None or not safe_lua_name(name):
+        return False, "nome inválido", b""
+    path = directory + "/" + name
+    ftp = vehicle.ftp
+
+    def read():
+        return ftp.get(path)
+
+    try:
+        data = ftp._call(vehicle, read)
+    except FtpError as exc:
+        note = "%s: %s" % (name, exc)
+        print("script: " + note, flush=True)
+        return False, note, b""
+    note = "%s copiado" % name
+    print("script: " + note, flush=True)
+    return True, note, data
+
+
+def script_remove(vehicle, folder, name):
+    directory = SCRIPT_DIRS.get(folder)
+    if directory is None or not safe_lua_name(name):
+        return False, "nome inválido"
+    path = directory + "/" + name
+    ftp = vehicle.ftp
+
+    def delete():
+        ftp.remove(path)
+
+    try:
+        ftp._call(vehicle, delete)
+    except FtpError as exc:
+        note = "%s: %s" % (name, exc)
+        print("script: " + note, flush=True)
+        return False, note
+    note = "%s excluído. Reinicie a placa para deixar de carregar." % name
+    print("script: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, "script excluído: %s/%s" % (folder, name))
+    return True, note
+
+
+def storage_bak_clear(vehicle):
+    ftp = vehicle.ftp
+    ftp.begin_progress("clear", "STRG_BAK", folder="STRG_BAK", total=0, phase="listar")
+
+    def wipe():
+        return ftp.clear_storage_bak()
+
+    try:
+        deleted, failed, note = ftp._call(vehicle, wipe)
+    except FtpError as exc:
+        ftp.end_progress()
+        note = "STRG_BAK: %s" % exc
+        print("storage: " + note, flush=True)
+        return False, note
+    ftp.end_progress()
+    print("storage: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return failed == 0, note
+
 
 class Link:
     def __init__(self, conn, kick=HERELINK_KICK):
@@ -419,6 +1137,7 @@ class Vehicle:
     def __init__(self):
         self.lock = threading.RLock()
         self.t0 = time.monotonic()
+        self.recorder = Recorder(self.t0)
         self.sysid = None
         self.compid = None
         self.mode = None
@@ -478,12 +1197,13 @@ def add_value(vehicle, name, value):
             vehicle.series[name].append((t, value))
 
 
-def reader(link, vehicle, stop, tx, enc, log):
+def reader(link, vehicle, stop, tx, enc):
     parser = mon.MavlinkParser()
     last_hb = 0.0
     last_streams = -100.0
     last_param = 0.0
     recent = {}
+    rate_acks = set()
     while not stop.is_set():
         now = time.monotonic()
         if now - last_hb >= 1.0:
@@ -529,6 +1249,9 @@ def reader(link, vehicle, stop, tx, enc, log):
         for msgid, sysid_rx, compid_rx, payload in parser.feed(data):
             if sysid_rx == GCS_SYSID:
                 continue
+            if msgid == mon.MSG_FILE_TRANSFER_PROTOCOL:
+                vehicle.ftp.push(payload)
+                continue
             if msgid != mon.MSG_HEARTBEAT:
                 key = (msgid, payload)
                 seen = recent.get(key)
@@ -556,8 +1279,11 @@ def reader(link, vehicle, stop, tx, enc, log):
                         vehicle.note = ""
                     if was_armed is None or was_armed != msg["armed"]:
                         push_message(vehicle, 6, "ARMADO" if msg["armed"] else "DESARMADO")
+                        vehicle.recorder.write("ARMED", int(bool(msg["armed"])))
                     if was_mode != msg["mode"]:
-                        push_message(vehicle, 6, "Modo %s" % (mode_name(msg["mode"]) or msg["mode"]))
+                        label = mode_name(msg["mode"]) or str(msg["mode"])
+                        push_message(vehicle, 6, "Modo %s" % label)
+                        vehicle.recorder.write("MODE", int(msg["mode"]), "", label)
                 continue
             if msgid == mon.MSG_STATUSTEXT:
                 # Not tied to the first heartbeat. Mission Planner lists every
@@ -565,6 +1291,7 @@ def reader(link, vehicle, stop, tx, enc, log):
                 for sev, text in take_statustext(vehicle, payload):
                     with vehicle.lock:
                         push_message(vehicle, sev, text)
+                        vehicle.recorder.write("STATUSTEXT", int(sev), "", text)
                 continue
             with vehicle.lock:
                 if vehicle.sysid is not None and sysid_rx != vehicle.sysid:
@@ -575,19 +1302,28 @@ def reader(link, vehicle, stop, tx, enc, log):
                 with vehicle.lock:
                     vehicle.last_ack = (msg["command"], msg["result"], time.monotonic())
                     fail_job(vehicle, msg["command"], msg["result"])
+                    if msg["command"] == MAV_CMD_SET_MESSAGE_INTERVAL and msg["result"] not in rate_acks:
+                        rate_acks.add(msg["result"])
+                        vehicle.recorder.write("RATE_ACK", int(msg["result"]))
             elif msgid == mon.MSG_PARAM_VALUE:
                 with vehicle.lock:
-                    vehicle.params[msg["name"]] = msg["value"]
-                    vehicle.param_seen[msg["name"]] = time.monotonic()
+                    name, value = msg["name"], msg["value"]
+                    old = vehicle.params.get(name)
+                    vehicle.params[name] = value
+                    vehicle.param_seen[name] = time.monotonic()
                     if msg.get("type"):
-                        vehicle.param_type[msg["name"]] = int(msg["type"])
+                        vehicle.param_type[name] = int(msg["type"])
+                    if old is None or abs(old - value) > 1e-7 * max(1.0, abs(value)):
+                        vehicle.recorder.write("PARAM:" + name, float(value))
             elif msgid == mon.MSG_NAMED_VALUE_FLOAT:
                 add_value(vehicle, msg["name"], msg["value"])
-                if log is not None and is_can_log(msg["name"]):
-                    log.write(msg["name"], msg["value"], msg.get("boot_ms", ""))
+                if msg["name"].startswith("ESC"):
+                    vehicle.recorder.write(msg["name"], msg["value"], msg.get("boot_ms", ""))
             elif "values" in msg:
+                boot = msg.get("boot_ms", "")
                 for name, value in msg["values"]:
                     add_value(vehicle, name, value)
+                    vehicle.recorder.write(name, value, boot)
 
 
 def take_statustext(vehicle, payload):
@@ -887,6 +1623,26 @@ def set_arm(link, vehicle, tx, enc, arm):
     return enqueue(vehicle, [{"kind": "arm", "arm": bool(arm)}], done)
 
 
+def set_recording(vehicle, action, name):
+    """Open or close the CAN CSV. Caller does not hold the lock."""
+    with vehicle.lock:
+        if action == "stop":
+            ok, note = vehicle.recorder.stop()
+        elif action == "start":
+            filename = log_filename(name)
+            if filename is None:
+                vehicle.note = "use letras, números, _ ou - (base esc_log_)"
+                push_message(vehicle, 4, vehicle.note)
+                return False
+            ok, note = vehicle.recorder.start(filename)
+        else:
+            return False
+        vehicle.note = note
+        push_message(vehicle, 6 if ok else 4, note)
+        print("[debug] " + note, flush=True)
+    return ok
+
+
 def values_close(got, value):
     return got is not None and abs(got - value) <= max(1e-4, abs(value) * 1e-4)
 
@@ -1173,6 +1929,7 @@ def snapshot(link, vehicle):
         reset_inputs = vehicle.reset_inputs
         vehicle.reset_inputs = False
         param_epoch = vehicle.param_epoch
+        recording = vehicle.recorder.status()
     alive = seen and (time.monotonic() - last) < 3.0
     if not seen:
         link_text = "escutando UDP %d" % link.addr[1]
@@ -1194,6 +1951,7 @@ def snapshot(link, vehicle):
         "blocked_modes": blocked,
         "reset_inputs": reset_inputs,
         "param_epoch": param_epoch,
+        "recording": recording,
     }
 
 
@@ -1255,6 +2013,7 @@ def make_handler(link, vehicle, tx, enc):
         ".html": "text/html; charset=utf-8",
         ".css": "text/css; charset=utf-8",
         ".js": "text/javascript; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
         ".png": "image/png",
     }
 
@@ -1299,6 +2058,14 @@ def make_handler(link, vehicle, tx, enc):
                 code, ctype, body = json_body(catalog())
                 self._send(code, ctype, body)
                 return
+            if path == "/scripts":
+                code, ctype, body = json_body(script_list(vehicle))
+                self._send(code, ctype, body)
+                return
+            if path == "/scripts/progress":
+                code, ctype, body = json_body(script_progress(vehicle))
+                self._send(code, ctype, body)
+                return
             if path == "/params.parm":
                 with vehicle.lock:
                     body = parm_text(vehicle.params)
@@ -1324,6 +2091,48 @@ def make_handler(link, vehicle, tx, enc):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/storage/clear-bak":
+                self._read_json(8000)
+                ok, note = storage_bak_clear(vehicle)
+                code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path in ("/scripts/put", "/scripts/remove", "/scripts/get"):
+                data = self._read_json(900000 if path == "/scripts/put" else 8000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                folder = data.get("folder")
+                name = data.get("name")
+                if path == "/scripts/remove":
+                    ok, note = script_remove(vehicle, folder, name if isinstance(name, str) else "")
+                    code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                elif path == "/scripts/get":
+                    ok, note, blob = script_get(vehicle, folder, name if isinstance(name, str) else "")
+                    payload = {"ok": ok, "note": note}
+                    if ok:
+                        payload["name"] = name
+                        payload["data"] = base64.b64encode(blob).decode("ascii")
+                    code, ctype, body = json_body(payload, 200 if ok else 409)
+                else:
+                    raw = data.get("data")
+                    if not isinstance(name, str) or not isinstance(raw, str):
+                        self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                        return
+                    try:
+                        blob = base64.b64decode(raw, validate=True)
+                    except (ValueError, TypeError):
+                        self._send(400, "application/json", b'{"ok":false,"note":"arquivo invalido"}')
+                        return
+                    try:
+                        index = int(data.get("index") or 1)
+                        count = int(data.get("count") or 1)
+                    except (TypeError, ValueError):
+                        index, count = 1, 1
+                    ok, note = script_put(vehicle, folder, name, blob, index=index, count=count)
+                    code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
             if path == "/params/load":
                 data = self._read_json(400000)
                 text = data.get("text") if isinstance(data, dict) else None
@@ -1370,6 +2179,12 @@ def make_handler(link, vehicle, tx, enc):
                     self._send(400, "application/json", b'{"ok":false}')
                     return
                 ok = set_arm(link, vehicle, tx, enc, data["arm"])
+            elif path == "/log":
+                action = data.get("action")
+                if action not in ("start", "stop"):
+                    self._send(400, "application/json", b'{"ok":false}')
+                    return
+                ok = set_recording(vehicle, action, data.get("name") or "")
             elif path == "/process":
                 proc = PROCESS_BY_ID.get(data.get("id"))
                 if proc is None:
@@ -1419,7 +2234,7 @@ def main(argv=None):
     ap.add_argument("--http", type=int, default=HTTP_PORT,
                     help="porta da pagina neste computador e no celular na mesma rede (padrao %d)" % HTTP_PORT)
     ap.add_argument("--csv", default=None,
-                    help="CSV de corrente, rpm e temperatura CAN (padrao: esc_log_DATA.csv)")
+                    help="inicia ja um CSV em Rover/tools/logs com base esc_log_ (vazio = data/hora)")
     args = ap.parse_args(argv)
 
     try:
@@ -1432,20 +2247,29 @@ def main(argv=None):
     stop = threading.Event()
     tx = threading.Lock()
     enc = Encoder()
-    csv_path = args.csv or datetime.datetime.now().strftime("esc_log_%Y%m%d_%H%M%S.csv")
-    log = CanLog(csv_path, vehicle.t0)
-    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc, log), daemon=True).start()
+    vehicle.ftp = FtpClient(link, tx, enc)
+    if args.csv:
+        filename = log_filename(args.csv)
+        if filename is None:
+            print("Nome de CSV invalido: %s" % args.csv, file=sys.stderr)
+            return 1
+        ok, note = vehicle.recorder.start(filename)
+        print(note, flush=True)
+        if not ok:
+            return 1
+    else:
+        print("CSV parado. Inicie pela pagina de logs.", flush=True)
+    threading.Thread(target=reader, args=(link, vehicle, stop, tx, enc), daemon=True).start()
 
     try:
         httpd = LocalServer(("0.0.0.0", args.http), make_handler(link, vehicle, tx, enc))
     except OSError as exc:
         stop.set()
-        log.close()
+        vehicle.recorder.stop()
         link.sock.close()
         print("Nao foi possivel abrir a pagina na porta %d: %s" % (args.http, exc), file=sys.stderr)
         return 1
 
-    print("CSV CAN (corrente, rpm, temperatura): %s" % csv_path, flush=True)
     print("Neste computador: http://127.0.0.1:%d  (GCS %d)" % (args.http, GCS_SYSID), flush=True)
     for ip in lan_addresses():
         print("No celular, mesma rede: http://%s:%d" % (ip, args.http), flush=True)
@@ -1457,7 +2281,7 @@ def main(argv=None):
     finally:
         stop.set()
         httpd.server_close()
-        log.close()
+        vehicle.recorder.stop()
         try:
             link.sock.close()
         except OSError:

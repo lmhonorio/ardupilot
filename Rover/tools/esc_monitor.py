@@ -76,6 +76,7 @@ MSG_COMMAND_ACK = 77
 MSG_PID_TUNING = 194
 MSG_NAMED_VALUE_FLOAT = 251
 MSG_STATUSTEXT = 253
+MSG_FILE_TRANSFER_PROTOCOL = 110
 
 # msgid: (crc_extra, full base payload length)
 MSG_INFO = {
@@ -97,6 +98,8 @@ MSG_INFO = {
     MSG_PID_TUNING: (98, 25),
     MSG_NAMED_VALUE_FLOAT: (170, 18),
     MSG_STATUSTEXT: (83, 51),
+    # MAVFtp. The payload is 254 bytes; MAVLink 2 drops the trailing zeros.
+    MSG_FILE_TRANSFER_PROTOCOL: (84, 254),
 }
 CRC_EXTRA = {k: v[0] for k, v in MSG_INFO.items()}
 # MAVLink 2 trims trailing zero bytes, so pad back to the base length
