@@ -658,6 +658,10 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
   flex-direction: column;
   gap: 2px;
 }
+/* display:flex acima anula o atributo hidden sem isto */
+.missionctx[hidden] {
+  display: none !important;
+}
 .missionctx button {
   text-align: left;
   border: 0;

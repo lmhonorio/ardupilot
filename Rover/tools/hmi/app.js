@@ -87,6 +87,7 @@ let missionHeadingLayer = null;
 let missionClickMode = "add"; // add | pan
 let missionPlanMode = "map"; // map | relative
 let missionCtx = null; // {x,y,lat,lon,seq}
+let missionCtxIgnoreClick = false; // próximo clique no mapa só fecha o menu
 let missionRelOrigin = null; // {lat, lon, hdg} fixed start for relative steps
 let missionRelPreview = null; // leaflet layers
 let missionRelPreviewPt = null; // [lat, lon]
@@ -2371,12 +2372,21 @@ function ensureMissionMap() {
   missionHeadingLayer = L.layerGroup().addTo(missionMap);
 
   missionMap.on("click", async (ev) => {
-    hideMissionCtx();
+    if (missionCtx || missionCtxIgnoreClick) {
+      hideMissionCtx();
+      return;
+    }
     if (missionBusy || missionClickMode !== "add") return;
     await addMissionAt(ev.latlng.lat, ev.latlng.lng, CMD_WAYPOINT);
   });
   missionMap.on("contextmenu", (ev) => {
     L.DomEvent.preventDefault(ev.originalEvent);
+    L.DomEvent.stopPropagation(ev);
+    if (missionCtx) {
+      // segundo botão direito: sai do menu em vez de ficar preso nele
+      hideMissionCtx();
+      return;
+    }
     showMissionCtx(ev.originalEvent.clientX, ev.originalEvent.clientY, ev.latlng.lat, ev.latlng.lng, null);
   });
   missionMap.on("mousemove", (ev) => {
@@ -2455,6 +2465,10 @@ function syncMissionMapLayers() {
     marker.on("contextmenu", (ev) => {
       L.DomEvent.stopPropagation(ev);
       L.DomEvent.preventDefault(ev.originalEvent);
+      if (missionCtx && missionCtx.seq === i) {
+        hideMissionCtx();
+        return;
+      }
       missionSelected = i;
       showMissionCtx(ev.originalEvent.clientX, ev.originalEvent.clientY, it.lat, it.lon, i);
       paintMissionEditor();
@@ -2498,7 +2512,7 @@ function paintRoverOnMap() {
 }
 
 function showMissionCtx(x, y, lat, lon, seq) {
-  hideMissionCtx();
+  missionCtxIgnoreClick = false;
   missionCtx = { x, y, lat, lon, seq };
   const menu = document.getElementById("missionctx");
   if (!menu) return;
@@ -2510,9 +2524,14 @@ function showMissionCtx(x, y, lat, lon, seq) {
 }
 
 function hideMissionCtx() {
+  if (missionCtx) missionCtxIgnoreClick = true;
   missionCtx = null;
   const menu = document.getElementById("missionctx");
   if (menu) menu.hidden = true;
+  // limpa o flag após o ciclo de clique atual (pointerdown → click)
+  if (missionCtxIgnoreClick) {
+    setTimeout(() => { missionCtxIgnoreClick = false; }, 0);
+  }
 }
 
 async function onMissionCtx(act) {
@@ -2870,7 +2889,10 @@ function renderMission() {
       if (ev.key === "Enter") addRelativeStep();
     });
   }
-  document.addEventListener("click", hideMissionCtxOnOutside);
+  document.removeEventListener("pointerdown", hideMissionCtxOnOutside, true);
+  document.removeEventListener("keydown", hideMissionCtxOnKey);
+  document.addEventListener("pointerdown", hideMissionCtxOnOutside, true);
+  document.addEventListener("keydown", hideMissionCtxOnKey);
   ensureMissionMap();
   setMissionPlanMode(missionPlanMode);
   paintMissionEditor({ fit: !!missionItems.length });
@@ -2878,9 +2900,15 @@ function renderMission() {
 
 function hideMissionCtxOnOutside(ev) {
   const menu = document.getElementById("missionctx");
-  if (!menu || menu.hidden) return;
+  if (!menu || menu.hidden || !missionCtx) return;
   if (menu.contains(ev.target)) return;
+  // botão direito no mapa: o handler do Leaflet cuida (toggle)
+  if (ev.button === 2) return;
   hideMissionCtx();
+}
+
+function hideMissionCtxOnKey(ev) {
+  if (ev.key === "Escape") hideMissionCtx();
 }
 
 function renderProcesses() {
@@ -3179,7 +3207,9 @@ function route() {
   if (page !== "editor-missao") {
     stopMissionXferPoll();
     destroyMissionMap();
-    document.removeEventListener("click", hideMissionCtxOnOutside);
+    document.removeEventListener("pointerdown", hideMissionCtxOnOutside, true);
+    document.removeEventListener("keydown", hideMissionCtxOnKey);
+    hideMissionCtx();
   }
   renderNav();
   if (!catalog) { view.textContent = "Carregando."; return; }
