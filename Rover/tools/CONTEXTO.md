@@ -1,19 +1,21 @@
 # Contexto do projeto Rover (para continuar em outro chat)
 
-Repositório: `ardupilot`, branch `auto-tunning-can` (base `master`). Nada foi enviado com push.
-Atualizado em 18/11/2026. Último commit: `b56b8e33f8`.
+Repositório: `ardupilot`, branch `auto-tunning-can` (base `master`).
+Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da interface).
 
 ## Como trabalhar com o usuário
 
 - Responder em português.
 - **Só fazer commit quando o usuário pedir** ("commit", "faça o commit").
-- Alterar parâmetro no rover só com o "sim" do usuário. Usar `mav_param.py` (abaixo).
+- Alterar parâmetro no rover só com o "sim" do usuário. Pela aba Parâmetros da GRIN ou por `mav_param.py`.
 - O usuário **não quer mudar o `WP_RADIUS`** (fica 0,1).
 - Manter o modo 5 do WheelTune (`SCR_USER1=5`) e o QuickTune: os dois são usados.
-- O usuário testa em campo e cola no chat a saída do monitor ou o caminho de um CSV `esc_log_*.csv`.
-  Os CSVs ficam na raiz do repositório, fora do git.
-- Upload por MAVFTP para o SD falha (`kErrFailErrno`, `ENXIO`). Os scripts são copiados
-  à mão para `APM/scripts` no cartão SD.
+- O usuário testa em campo pela interface GRIN (`mode_panel.py`) ou pelo monitor, e cola no chat
+  a saída ou o caminho de um CSV `esc_log_*.csv`.
+  O monitor grava em `Rover/tools/Logs/`. A interface grava o CSV e os `.BIN` baixados em `Rover/tools/logs/`.
+  Os dois ficam fora do git.
+- O MAVFtp do Mission Planner falha pela HereLink (`kErrFailErrno`, `BadCrc`).
+  Os scripts entram pela aba Scripts da GRIN ou por `ftp_scripts.py`.
 
 ## Hardware
 
@@ -36,8 +38,12 @@ Atualizado em 18/11/2026. Último commit: `b56b8e33f8`.
 | `Rover/scripts/rover-quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
 | `Rover/scripts/modules/` | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua` (`PERIOD_MS` = 25), `functions.lua` |
 | `Rover/tools/esc_monitor.py` | Monitor no PC: gráfico, console e CSV, via HereLink |
-| `Rover/tools/mission_editor.py` | Interface: baixa a missão do rover, edita o rumo (Alt) de cada waypoint numa bússola (0 = norte), marca trechos de ré (refaz os DO_SET_REVERSE), envia de volta e abre/salva .waypoints |
-| `Rover/tools/ftp_scripts.py` | Envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP): só o que mudou, repete pacotes perdidos, grava em .tmp e confere o CRC na placa antes de trocar. `--check` só compara. Use no lugar do MAVFtp do Mission Planner (falha com kErrFailErrno/BadCrc pela HereLink) |
+| `Rover/tools/mode_panel.py` | Servidor da interface GRIN: MAVLink na UDP 14550 e página em `http://127.0.0.1:8765` (também no celular, mesma rede) |
+| `Rover/tools/hmi/` | Página (`index.html`, `app.js`, `app.css`, logos). O `index.html` é ignorado pelo git; entra com `git add -f` |
+| `Rover/tools/mission_core.py` | Regras e codec da missão, sem tela. Usado pela interface e pelo `mission_editor.py` |
+| `Rover/tools/mission_editor.py` | Editor Tk da missão (bússola, ré, .waypoints). A aba Missão da GRIN faz o mesmo e ainda planeja no mapa. Os dois não abrem juntos: mesma UDP |
+| `Rover/tools/param_docs.json` | Descrições dos parâmetros na aba Parâmetros (gerado por `build_param_docs.py`) |
+| `Rover/tools/ftp_scripts.py` | CLI que envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP). A aba Scripts da GRIN faz o equivalente na página |
 | `Rover/tools/mav_param.py` | Ler e gravar parâmetros pela HereLink (sem pymavlink) |
 | `Rover/tools/sd_format.py` | Formata o cartão SD da controladora pela HereLink (`MAV_CMD_STORAGE_FORMAT`). Pede confirmação (ou `--yes`) e só envia com o rover desarmado. Apaga scripts, logs e terreno; parâmetros e missão ficam |
 | `Rover/docs/` | Documentação: `esc_can.md`, `Controle-CAN.md`, `Autotunning.md`, `Manual-Tuning-CAN.md` |
@@ -110,6 +116,43 @@ reinicia do `DO_SET_REVERSE 1` que estiver logo antes do waypoint atual (`restor
 um DO 1 antes de CADA waypoint de ré o alinhamento funciona na ré. O `mission_editor.py` monta isso pela caixa
 "Chegar de ré" e gira 180° o alinhamento anterior (rumo = frente do rover). Ver `Rover/docs/Missoes-AUTO.md`.
 
+## Interface GRIN
+
+Página local, azul da Argo no claro e laranja/azul mais claros no escuro. O botão **Escuro/Claro** fica no canto inferior direito e a escolha fica no navegador. O navegador não fala MAVLink: o `mode_panel.py` escuta a UDP, manda heartbeat para a HereLink (`192.168.43.1:14552`; `--kick none` desliga) e serve a página em `0.0.0.0:8765`. O sysid do GCS é 255, o mesmo do Mission Planner. Fechar o `esc_monitor.py`, o `mav_param.py` e o `mission_editor.py` antes: os quatro usam a porta 14550.
+
+Nenhum botão de ensaio arma sozinho. Armar pede um segundo clique em 4 s. Ações que apagam (escrever missão, apagar script, apagar logs, formatar SD, limpar STRG_BAK, reiniciar, padrão de fábrica) também pedem confirmação.
+
+```bash
+py -3 Rover/tools/mode_panel.py
+py -3 Rover/tools/mode_panel.py --conn udp:0.0.0.0:14551
+py -3 Rover/tools/mode_panel.py --csv teste     # abre Rover/tools/logs/esc_log_teste.csv
+```
+
+| Aba | O que faz |
+|---|---|
+| Logs | Armar/desarmar. Grava CSV (`esc_log_*.csv` em `Rover/tools/logs`) com a mesma forma do monitor: telemetria, mensagens, parâmetros, modo e armamento. Gráficos ao vivo (20 s): corrente e comando das 4 rodas, bateria, rpm e alvos L/R, taxa de guinada (PID desejada/real e giro), desvio da trilha, temperatura dos motores. Leituras de velocidade, xtrack e bateria. Com o rover desarmado, lista, baixa e apaga os dataflash `.BIN` (`LOG_REQUEST_*` / `LOG_ERASE`). O `.BIN` baixa no navegador e também é gravado em `Rover/tools/logs`. |
+| Mensagens | `STATUSTEXT` da controladora, com a gravidade. |
+| Modos | MANUAL, ACRO, STEERING, HOLD, LOITER, SIMPLE, CIRCLE, AUTO, RTL, SMART_RTL, GUIDED. O interruptor do rádio não se mexe. Qualquer modo pode ser escolhido; se a placa recusar, volta o modo anterior. |
+| Parâmetros | Lista o que está na placa, com busca por nome ou descrição (`param_docs.json`) e grupos curtos: Direção, Velocidade, Motores, Missão, Script. Aplicar um campo grava na hora (`PARAM_SET`). Carregar `.parm` só preenche a tela; **Gravar na placa** manda o que mudou. Também atualiza a lista, salva `.parm`, reinicia e restaura o padrão de fábrica (zera a memória e reinicia). |
+| Missão | Lê e escreve a missão do rover (mesmo protocolo do `mission_editor.py`, via `mission_core.py`). Mapa Leaflet: clique cria WAYPOINT, arrastar move, botão direito insere WAYPOINT, Loiter, Loiter tempo, RTL, DO_JUMP, waypoint na posição do rover, apaga ou limpa. O Alt do WAYPOINT continua sendo **rumo** (−1 passa direto); bússola, “passa direto”, “chegar de ré” (refaz os `DO_SET_REVERSE`) e “rumo do próximo trecho”. **Rumos→trecho** alinha os waypoints ao trecho seguinte. Abre e salva `.waypoints`. Modo **Relativo**: novo ponto por distância e ângulo a partir do GPS do rover, de uma origem capturada, do último waypoint/HOME ou do waypoint selecionado. O ângulo pode ser a frente do rover (0° = frente), o norte ou o trecho. Opções: encadear a origem no ponto novo, alinhar o rumo do waypoint anterior ao trecho, e gravar o rumo do passo ou deixar −1. |
+| Scripts | MAVFtp como o Mission Planner (Config, MAVFtp): lista, copia para o PC, envia e apaga `.lua` em `/APM/scripts` e `/APM/scripts/modules`. Nome igual substitui. A placa só usa a lista nova depois de reiniciar. **Limpar STRG_BAK** apaga os backups de storage sem listá-los. **Formatar SD** (`MAV_CMD_STORAGE_FORMAT`) exige rover desarmado e apaga scripts, logs e terreno; parâmetros e missão ficam. |
+| Ensaios | Só prepara parâmetros e, quando o ensaio pede, o modo. Quem arma é o usuário. |
+
+Ensaios (`Preparar`):
+
+| Botão | Deixa |
+|---|---|
+| Calibração das rodas no chão | HOLD, `ESC_CAN` 1, `ESC_MODE` 0, `SCR_USER1` 4 |
+| Calibração com as rodas no ar | HOLD, `ESC_CAN` 1, `ESC_MODE` 0, `SCR_USER1` 5 |
+| QuickTune | CIRCLE, `RTUN_ENABLE` 1, `RTUN_AXES` 3, `SCR_USER1` 1 |
+| Relé em Circle | CIRCLE, `SCR_USER1` 3 |
+| Relé de yaw | HOLD, `SCR_USER1` 2 |
+| Voltar ao normal | só `SCR_USER1` 0; não muda o modo |
+
+`SCR_USER1` pela aba Parâmetros só entra se o modo já for o do ensaio: 1 e 3 exigem CIRCLE; 2, 4 e 5 exigem HOLD. O 0 entra em qualquer modo.
+
+O `GCS_PID_MASK` precisa ser 3 para o gráfico de guinada (PID de direção e de velocidade).
+
 ## Limites do Lua do ArduPilot (já causaram problemas)
 
 - No máximo 100 variáveis locais no corpo principal: o estado fica em tabelas (`S` no mixer, `M` e `K` no esc_can).
@@ -166,11 +209,13 @@ A velocidade máxima é de cerca de 1,48 m/s com `ESC_RPM` 120 (0,99 / 0,67). O 
 ## Ferramentas
 
 ```bash
-python Rover/tools/esc_monitor.py                      # monitor (grava esc_log_DATA.csv na pasta atual)
+py -3 Rover/tools/mode_panel.py                        # interface GRIN (página, CSV, missão, scripts, logs)
+python Rover/tools/esc_monitor.py                      # monitor (grava em Rover/tools/Logs/)
 python Rover/tools/esc_monitor.py --no-plot            # só console e CSV
 python Rover/tools/mav_param.py WP_SPEED ESC_RPM       # ler parâmetros
 python Rover/tools/mav_param.py ESC_IMAX=15            # gravar e confirmar
 python Rover/tools/sd_format.py                        # formatar o SD (rover desarmado; pede FORMATAR)
+python Rover/tools/mission_editor.py                   # editor Tk; feche a interface antes
 ```
 
 - O monitor (desde 18/11) também pede atitude, posição, NAV_CONTROLLER_OUTPUT, PID_TUNING, servos, RC e
@@ -180,7 +225,7 @@ python Rover/tools/sd_format.py                        # formatar o SD (rover de
 - Análise: `python Rover/tools/esc_monitor.py analyze esc_log_X.csv --plot` (relatório por modo + PNG
   `esc_log_X_analise.png`; `--from/--to` para um trecho). Aponta zigue-zague (período/amplitude
   do xtrack), atraso e ganho do yaw rate, saturação e atraso das rodas.
-- Os dois programas usam a porta UDP 14550: fechar o monitor antes de usar o `mav_param.py`.
+- A interface, o monitor, o `mav_param.py` e o `mission_editor.py` usam a porta UDP 14550. Só um de cada vez.
 - A HereLink só começa a transmitir depois de receber heartbeat em `192.168.43.1:14552`.
   As mensagens podem chegar duplicadas; o monitor descarta as repetidas.
 - No CSV (`hora_pc, t_s, boot_ms, nome, valor, texto`) os campos são (ESCn_T = temperatura do motor, 1 Hz; BAT_V/BAT_I = bateria do ArduPilot, desde 18/11).

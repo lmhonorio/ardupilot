@@ -580,7 +580,7 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
 .mission-mapwrap {
   position: relative;
   min-height: calc(100vh - 170px);
-  background: #1a222b;
+  background: #e7efe0;
 }
 .mission-leaflet {
   position: absolute;
@@ -607,6 +607,23 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
 }
 .mission-hint { color: var(--muted); font-family: "Segoe UI", sans-serif; }
 .mission-marker { background: transparent; border: 0; }
+.mission-leglabel {
+  background: transparent;
+  border: 0;
+}
+.mission-leglabel span {
+  display: inline-block;
+  transform: translate(-50%, -120%);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--leg, var(--line));
+  color: var(--ink);
+  font: 650 11px Consolas, "Cascadia Mono", monospace;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
 .mission-pin {
   width: 28px;
   height: 28px;
@@ -652,7 +669,7 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
 }
 .missionctx button:hover { background: var(--soft); }
 .missionctx button:disabled { opacity: 0.35; }
-.leaflet-container { font: inherit; background: #243040; }
+.leaflet-container { font: inherit; background: #e7efe0; }
 @media (max-width: 980px) {
   .missionplan {
     grid-template-columns: 1fr;

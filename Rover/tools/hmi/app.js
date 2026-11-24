@@ -1594,6 +1594,16 @@ function offsetLatLon(lat, lon, bearingDeg, distM) {
   return [φ2 * 180 / Math.PI, ((λ2 * 180 / Math.PI + 540) % 360) - 180];
 }
 
+function distMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000.0;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 function bearingBetween(lat1, lon1, lat2, lon2) {
   const φ1 = lat1 * Math.PI / 180;
   const φ2 = lat2 * Math.PI / 180;
@@ -1963,6 +1973,52 @@ async function newMission() {
   else paint();
 }
 
+/** Missão de teste: quadrado sideM×sideM a partir do GPS, alinhado à frente do rover. */
+async function makeSquareTestMission(sideM = 1) {
+  if (missionBusy) return;
+  const gps = gpsLatLon();
+  const status = document.getElementById("missionstatus");
+  if (!gps) {
+    if (status) status.textContent = "precisa do GPS do rover para montar o quadrado";
+    return;
+  }
+  if (missionDirty && !window.confirm("Substituir a missão local pelo quadrado de teste?")) return;
+  const hdg = gpsHdg();
+  const base = Number.isFinite(hdg) ? hdg : 0;
+  const side = Math.max(0.2, Number(sideM) || 1);
+  const p0 = gps;
+  const p1 = offsetLatLon(p0[0], p0[1], base, side);
+  const p2 = offsetLatLon(p1[0], p1[1], base + 90, side);
+  const p3 = offsetLatLon(p2[0], p2[1], base + 180, side);
+  const p4 = offsetLatLon(p3[0], p3[1], base + 270, side);
+
+  const home = makeMissionItem(CMD_WAYPOINT, p0[0], p0[1], { z: 0 });
+  home.current = 1;
+  home.frame = 0;
+  home.name = "WAYPOINT";
+  // Quatro cantos; Alt = −1 (passa direto). Fecha perto do HOME.
+  const corners = [p1, p2, p3, p4].map((p) => makeMissionItem(CMD_WAYPOINT, p[0], p[1], { z: -1 }));
+  missionItems = [home, ...corners];
+  missionItems.forEach((it, i) => { it.seq = i; });
+  missionSelected = 1;
+  missionDirty = true;
+  missionBusy = true;
+  paint();
+  try {
+    await refreshMissionAnalyse(1);
+    paintMissionEditor({ fit: true });
+    if (status) {
+      status.textContent = `quadrado ${side.toFixed(1)} m × ${side.toFixed(1)} m `
+        + `(frente ${base.toFixed(0)}°)`
+        + (Number.isFinite(hdg) ? "" : " · sem rumo GPS, usei norte")
+        + " · revise no mapa e Escrever no rover";
+    }
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
 async function importMissionFile(file) {
   if (!file || missionBusy) return;
   const text = await file.text();
@@ -2226,10 +2282,65 @@ function roverIcon(hdg) {
   });
 }
 
+const CLEAR_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+function makeLocalGrid() {
+  const Grid = L.GridLayer.extend({
+    createTile(coords) {
+      const tile = document.createElement("canvas");
+      const size = this.getTileSize();
+      tile.width = size.x;
+      tile.height = size.y;
+      const ctx = tile.getContext("2d");
+      ctx.fillStyle = "#e7efe0";
+      ctx.fillRect(0, 0, size.x, size.y);
+      ctx.strokeStyle = "rgba(7, 62, 115, 0.16)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 32; i < size.x; i += 32) {
+        ctx.moveTo(i + 0.5, 0);
+        ctx.lineTo(i + 0.5, size.y);
+        ctx.moveTo(0, i + 0.5);
+        ctx.lineTo(size.x, i + 0.5);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(7, 62, 115, 0.4)";
+      ctx.beginPath();
+      ctx.moveTo(0.5, 0);
+      ctx.lineTo(0.5, size.y);
+      ctx.moveTo(0, 0.5);
+      ctx.lineTo(size.x, 0.5);
+      ctx.stroke();
+      if (this._map) {
+        const nw = this._map.unproject(L.point(coords.x * size.x, coords.y * size.y), coords.z);
+        ctx.fillStyle = "#073e73";
+        ctx.font = "12px Consolas, monospace";
+        ctx.fillText(`${nw.lat.toFixed(5)}, ${nw.lng.toFixed(5)}`, 8, 16);
+      }
+      return tile;
+    },
+  });
+  return new Grid({ maxZoom: 22, attribution: "grade local" });
+}
+
+function watchMapTiles(layer) {
+  let ok = 0;
+  let bad = 0;
+  layer.on("tileload", () => { ok += 1; });
+  layer.on("tileerror", () => {
+    bad += 1;
+    if (ok > 0 || bad < 4) return;
+    const status = document.getElementById("missionstatus");
+    if (!status || status.dataset.offline || status.textContent) return;
+    status.dataset.offline = "1";
+    status.textContent = "Sem internet: grade local. Clique, arraste e o rover continuam no mapa.";
+  });
+}
+
 function ensureMissionMap() {
   if (typeof L === "undefined") {
     const status = document.getElementById("missionstatus");
-    if (status) status.textContent = "Leaflet não carregou — verifique a rede para o mapa GPS";
+    if (status) status.textContent = "Mapa não iniciou";
     return null;
   }
   const el = document.getElementById("missionleaflet");
@@ -2240,16 +2351,22 @@ function ensureMissionMap() {
   }
   const start = gpsLatLon() || DEFAULT_MAP;
   missionMap = L.map(el, { zoomControl: true, attributionControl: true }).setView(start, 18);
+  const grid = makeLocalGrid();
+  const tileOpts = { maxZoom: 22, maxNativeZoom: 19, errorTileUrl: CLEAR_TILE };
   const streets = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 22,
+    ...tileOpts,
     attribution: "&copy; OpenStreetMap",
   });
   const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-    maxZoom: 22,
+    ...tileOpts,
     attribution: "Esri",
   });
+  watchMapTiles(streets);
+  watchMapTiles(sat);
+  grid.addTo(missionMap);
   streets.addTo(missionMap);
-  L.control.layers({ Mapa: streets, Satélite: sat }, {}, { position: "topright" }).addTo(missionMap);
+  L.control.layers({ Grade: L.layerGroup(), Mapa: streets, Satélite: sat }, null, { position: "topright" }).addTo(missionMap);
+  L.control.scale({ imperial: false, position: "bottomleft" }).addTo(missionMap);
   missionLines = L.layerGroup().addTo(missionMap);
   missionHeadingLayer = L.layerGroup().addTo(missionMap);
 
@@ -2302,11 +2419,25 @@ function syncMissionMapLayers() {
   for (let k = 1; k < path.length; k++) {
     const a = path[k - 1];
     const b = path[k];
+    const meters = distMeters(a.latlng[0], a.latlng[1], b.latlng[0], b.latlng[1]);
+    const color = b.it.direction === "re" ? "#e67e22" : "#2ca02c";
     L.polyline([a.latlng, b.latlng], {
-      color: b.it.direction === "re" ? "#e67e22" : "#2ca02c",
-      weight: 4,
+      color,
+      weight: 5,
       dashArray: b.it.direction === "re" ? "8 6" : null,
-      opacity: 0.9,
+      opacity: 0.95,
+    }).addTo(missionLines);
+    const mid = [(a.latlng[0] + b.latlng[0]) / 2, (a.latlng[1] + b.latlng[1]) / 2];
+    const label = meters < 10 ? `${meters.toFixed(2)} m` : `${meters.toFixed(1)} m`;
+    L.marker(mid, {
+      interactive: false,
+      keyboard: false,
+      icon: L.divIcon({
+        className: "mission-leglabel",
+        html: `<span style="--leg:${color}">${label}${b.it.direction === "re" ? " ré" : ""}</span>`,
+        iconSize: [0, 0],
+        iconAnchor: [0, 0],
+      }),
     }).addTo(missionLines);
   }
   for (const { i, it, latlng } of path) {
@@ -2597,12 +2728,15 @@ function renderMission() {
       <aside class="mission-side">
         <div class="mission-side-head">
           <h1 class="page">Missão</h1>
-          <p class="last">Clique no mapa = WAYPOINT. Alt do WAYPOINT é <b>rumo</b> (−1 passa direto), como no mission_editor. Arraste marcadores; botão direito para Loiter/RTL/apagar.</p>
+          <p class="last">O mapa mostra a missão local: linhas = trechos, números = waypoints, ▲ = rover.
+            <b>Ler</b> traz a do rover; <b>Escrever</b> grava o que está no mapa.
+            Clique = WAYPOINT (Alt = rumo, −1 passa direto). Arraste para mover; botão direito = menu.</p>
         </div>
         <div class="mission-toolbar">
           <button type="button" class="missionact" id="missiondownload">Ler</button>
           <button type="button" class="missionact" id="missionupload" data-danger="1">Escrever</button>
           <button type="button" class="missionact missionlocal" id="missionnew">Nova</button>
+          <button type="button" class="missionact" id="missionsquare" title="HOME no GPS + 4 waypoints de 1 m alinhados à frente do rover">Quadrado 1 m</button>
           <button type="button" class="missionact missionlocal" id="missionopen">Abrir</button>
           <button type="button" class="missionact missionlocal" id="missionsave">Salvar</button>
           <button type="button" class="missionact missionlocal" id="missionfit">Enquadrar</button>
@@ -2966,6 +3100,10 @@ view.addEventListener("click", (ev) => {
   }
   if (ev.target.closest("#missionnew")) {
     if (!ev.target.closest("#missionnew").disabled) newMission();
+    return;
+  }
+  if (ev.target.closest("#missionsquare")) {
+    if (!ev.target.closest("#missionsquare").disabled) makeSquareTestMission(1);
     return;
   }
   if (ev.target.closest("#missionopen")) {
