@@ -407,13 +407,274 @@ button.scriptact:disabled, button.scriptdel:disabled { opacity: 0.38; cursor: de
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+.missionplan {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) 1fr;
+  gap: 0;
+  min-height: calc(100vh - 170px);
+  margin: 0 -28px;
+  border-top: 1px solid var(--line);
+}
+.mission-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 20px;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  max-height: calc(100vh - 170px);
+  overflow: auto;
+}
+.mission-side-head .last { font-size: 13px; margin: 0 0 4px; }
+.mission-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mission-modes {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+button.missionmode {
+  flex: 1;
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 650;
+}
+button.missionmode.on {
+  background: var(--bg);
+  color: var(--orange);
+  box-shadow: 0 1px 0 var(--line);
+}
+#missionrelpanel .mission-select { width: 100%; }
+.missionlist {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 28vh;
+  overflow: auto;
+  background: var(--soft);
+}
+.missionbox {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg);
+}
+.missionbox h2 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--orange);
+}
+.missionbox.off { opacity: 0.55; }
+.mission-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.mission-select {
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.missionfields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.missionfield {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.missionfield em { font-style: normal; opacity: 0.75; }
+.missionfield input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+  color: var(--ink);
+}
+.mission-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+button.missionrow {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  padding: 9px 10px;
+  color: inherit;
+}
+button.missionrow:first-child { border-top: 0; }
+button.missionrow.on {
+  background: var(--bg);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+button.missionrow.warn .missionrow-title,
+button.missionrow.warn .missionrow-meta { color: #c00000; }
+.missionrow-title {
+  display: block;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 13px;
+  font-weight: 650;
+}
+.missionrow-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.missioncheck {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.missioncanvas {
+  display: block;
+  width: 100%;
+  max-width: 240px;
+  height: auto;
+  margin-top: 10px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  touch-action: none;
+}
+button.missionact {
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 2px solid var(--blue);
+  background: var(--bg);
+  color: var(--blue);
+  font-weight: 650;
+  font-size: 13px;
+}
+button.missionact.solid { background: var(--blue); color: var(--on-ink); }
+button.missionact:disabled { opacity: 0.38; cursor: default; }
+.mission-mapwrap {
+  position: relative;
+  min-height: calc(100vh - 170px);
+  background: #1a222b;
+}
+.mission-leaflet {
+  position: absolute;
+  inset: 0 0 34px 0;
+  z-index: 1;
+}
+.mission-mapbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  color: var(--muted);
+  z-index: 2;
+}
+.mission-hint { color: var(--muted); font-family: "Segoe UI", sans-serif; }
+.mission-marker { background: transparent; border: 0; }
+.mission-pin {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: #fff;
+  font: 650 12px Consolas, monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mission-rover {
+  width: 24px;
+  height: 24px;
+  color: #ffcc33;
+  font-size: 20px;
+  text-shadow: 0 0 4px #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: 50% 60%;
+}
+.missionctx {
+  position: fixed;
+  z-index: 50;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.missionctx button {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+.missionctx button:hover { background: var(--soft); }
+.missionctx button:disabled { opacity: 0.35; }
+.leaflet-container { font: inherit; background: #243040; }
+@media (max-width: 980px) {
+  .missionplan {
+    grid-template-columns: 1fr;
+    margin: 0;
+    min-height: auto;
+  }
+  .mission-side {
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .mission-mapwrap { min-height: 55vh; }
+  .mission-leaflet { position: relative; inset: auto; height: 55vh; }
+  .mission-mapbar { position: relative; }
+}
 @media (max-width: 720px) {
   header, .status, .note, main { padding-left: 16px; padding-right: 16px; }
   .param, .reads, .status, .scriptgrid { grid-template-columns: 1fr; }
   .arm { align-items: stretch; flex-direction: column; }
   .record button.cmd { width: auto; }
   button.cmd { width: 100%; }
-  button.scriptact { width: auto; }
+  button.scriptact, button.missionact { width: auto; }
   button.cmd.scriptact { width: 100%; }
   .logo.argo { height: 34px; }
   .logo.grin { height: 26px; }

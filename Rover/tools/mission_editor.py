@@ -36,50 +36,12 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import esc_monitor as em  # noqa: E402  (MAVLink parser, link and encoder)
-
-# ---------------------------------------------------------------------------
-# Mission protocol messages (added to the monitor's decoder tables)
-# ---------------------------------------------------------------------------
-MSG_MISSION_REQUEST = 40
-MSG_MISSION_REQUEST_LIST = 43
-MSG_MISSION_COUNT = 44
-MSG_MISSION_ACK = 47
-MSG_MISSION_REQUEST_INT = 51
-MSG_MISSION_ITEM_INT = 73
-for _mid, _crc, _len in ((MSG_MISSION_REQUEST, 230, 4), (MSG_MISSION_REQUEST_LIST, 132, 2),
-                         (MSG_MISSION_COUNT, 221, 4), (MSG_MISSION_ACK, 153, 3),
-                         (MSG_MISSION_REQUEST_INT, 196, 4), (MSG_MISSION_ITEM_INT, 38, 37)):
-    em.CRC_EXTRA[_mid] = _crc
-    em.PAYLOAD_LEN[_mid] = _len
-
-CMD_WAYPOINT = 16
-CMD_DO_SET_REVERSE = 194
-CMD_NAMES = {16: "WAYPOINT", 17: "LOITER_UNLIM", 19: "LOITER_TIME", 20: "RTL", 21: "LAND", 22: "TAKEOFF",
-             82: "SPLINE_WP", 92: "GUIDED_ENABLE", 93: "DELAY", 112: "COND_DELAY", 114: "COND_DIST",
-             115: "COND_YAW", 177: "DO_JUMP", 178: "DO_CHANGE_SPEED", 179: "DO_SET_HOME", 181: "DO_SET_RELAY",
-             183: "DO_SET_SERVO", 194: "DO_SET_REVERSE", 201: "DO_SET_ROI", 222: "DO_GUIDED_LIMITS"}
-NAV_WITH_POSITION = (16, 17, 19, 21, 22, 82)
-ACK_RESULT = {0: "aceita", 1: "erro", 2: "frame nao suportado", 3: "comando nao suportado", 4: "sem espaco",
-              5: "invalida", 13: "sequencia errada", 15: "negada", 14: "cancelada"}
-
-
-class Item:
-    __slots__ = ("seq", "frame", "command", "current", "autocontinue", "p1", "p2", "p3", "p4", "lat", "lon", "z")
-
-    def __init__(self, seq, frame, command, current, autocontinue, p1, p2, p3, p4, lat, lon, z):
-        self.seq, self.frame, self.command, self.current, self.autocontinue = seq, frame, command, current, autocontinue
-        self.p1, self.p2, self.p3, self.p4 = p1, p2, p3, p4
-        self.lat, self.lon, self.z = lat, lon, z
-
-    @classmethod
-    def from_payload(cls, p):
-        p1, p2, p3, p4, x, y, z, seq, cmd, _ts, _tc, frame, cur, auto = struct.unpack("<4fiifHHBBBBB", p[:37])
-        return cls(seq, frame, cmd, cur, auto, p1, p2, p3, p4, x * 1e-7, y * 1e-7, z)
-
-    def payload(self, sysid, compid):
-        return struct.pack("<4fiifHHBBBBB", self.p1, self.p2, self.p3, self.p4,
-                           int(round(self.lat * 1e7)), int(round(self.lon * 1e7)), self.z,
-                           self.seq, self.command, sysid, compid, self.frame, self.current, self.autocontinue)
+from mission_core import (  # noqa: E402
+    ACK_RESULT, CMD_DO_SET_REVERSE, CMD_NAMES, CMD_WAYPOINT, Item,
+    MSG_MISSION_ACK, MSG_MISSION_COUNT, MSG_MISSION_ITEM_INT, MSG_MISSION_REQUEST,
+    MSG_MISSION_REQUEST_INT, MSG_MISSION_REQUEST_LIST, NAV_WITH_POSITION,
+    analyse, is_pass, load_waypoints, rebuild_reverse, reverse_flags, save_waypoints,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -214,98 +176,6 @@ class MissionClient:
                         # asking for the item it expects, so the upload goes on
                         continue
                     raise RuntimeError("rover recusou a missao: %s" % ACK_RESULT.get(result, result))
-
-
-# ---------------------------------------------------------------------------
-# Mission Planner .waypoints files
-# ---------------------------------------------------------------------------
-def load_waypoints(path):
-    items = []
-    with open(path, encoding="utf-8") as f:
-        head = f.readline()
-        if not head.startswith("QGC WPL"):
-            raise ValueError("nao e um arquivo .waypoints do Mission Planner")
-        for line in f:
-            c = line.strip().split("\t")
-            if len(c) < 12:
-                continue
-            items.append(Item(int(c[0]), int(c[2]), int(c[3]), int(c[1]), int(float(c[11])),
-                              float(c[4]), float(c[5]), float(c[6]), float(c[7]),
-                              float(c[8]), float(c[9]), float(c[10])))
-    return items
-
-
-def save_waypoints(path, items):
-    with open(path, "w", encoding="utf-8", newline="\r\n") as f:
-        f.write("QGC WPL 110\n")
-        for i, it in enumerate(items):
-            f.write("\t".join([str(i), str(it.current), str(it.frame), str(it.command)]
-                              + ["%.8f" % v for v in (it.p1, it.p2, it.p3, it.p4, it.lat, it.lon)]
-                              + ["%.6f" % it.z, str(it.autocontinue)]) + "\n")
-
-
-# ---------------------------------------------------------------------------
-# Mixer rules
-# ---------------------------------------------------------------------------
-def is_pass(z):
-    return z == -1
-
-
-def analyse(items):
-    """Per item: (direction 'frente'/'re', effect text, warning text or '')."""
-    out = []
-    reverse = False
-    for idx, it in enumerate(items):
-        warn = ""
-        if idx == 0:
-            out.append(("", "home", ""))
-            continue
-        if it.command == CMD_DO_SET_REVERSE:
-            reverse = it.p1 >= 0.5
-            out.append(("re" if reverse else "frente", "liga a re" if reverse else "volta de frente", ""))
-            continue
-        if it.command == CMD_WAYPOINT:
-            if is_pass(it.z):
-                effect = "passa direto"
-            else:
-                effect = "para e alinha %.0f graus" % (it.z % 360)
-                if it.z > 360 or it.z < -1:
-                    warn = "Alt %.1f vira rumo %.0f graus (era altitude?)" % (it.z, it.z % 360)
-            # a reverse leg needs its own DO_SET_REVERSE 1 right before it, or a
-            # mode change (alignment) before it leaves it forward
-            if reverse and not warn:
-                prev_do = items[idx - 1].command == CMD_DO_SET_REVERSE and items[idx - 1].p1 >= 0.5
-                if not prev_do:
-                    warn = "re sem DO_SET_REVERSE logo antes: marque 'Chegar de re' de novo"
-        else:
-            effect = ""
-        out.append(("re" if reverse else "frente", effect, warn))
-    return out
-
-
-def reverse_flags(items):
-    """Per item: True when the leg that ends at it is driven in reverse."""
-    return [d == "re" for d, _e, _w in analyse(items)]
-
-
-def rebuild_reverse(items, rev_wp):
-    """Drop every DO_SET_REVERSE and put back one DO_SET_REVERSE 1 before each
-    nav item in rev_wp (a set of items) and a 0 where it goes forward again."""
-    out = [items[0]]
-    reverse = False
-    for it in items[1:]:
-        if it.command == CMD_DO_SET_REVERSE:
-            continue
-        if it.command < 100:
-            want = it in rev_wp
-            if want or reverse != want:
-                out.append(Item(0, it.frame, CMD_DO_SET_REVERSE, 0, 1, 1.0 if want else 0.0,
-                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-            reverse = want
-        out.append(it)
-    for i, it in enumerate(out):
-        it.seq = i
-    return out
 
 
 # ---------------------------------------------------------------------------

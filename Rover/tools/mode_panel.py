@@ -11,6 +11,8 @@ A aba Scripts lista, copia, envia e exclui os .lua de /APM/scripts e
 Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela
 e formata o cartão SD (MAV_CMD_STORAGE_FORMAT), como o sd_format.py.
 A aba Logs baixa e apaga os dataflash do cartão (LOG_REQUEST_* / LOG_ERASE).
+A aba Missão baixa, edita rumos/ré e envia a missão do rover (mesmo protocolo
+do mission_editor.py), sem abrir outra porta UDP.
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -37,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import esc_monitor as mon
+import mission_core as mission
 
 MSG_HEARTBEAT = 0
 MSG_PARAM_REQUEST_READ = 20
@@ -67,6 +70,7 @@ CRC_EXTRA = {
     MSG_LOG_ERASE: 237,
     MSG_LOG_REQUEST_END: 203,
 }
+mission.register_mission_messages(CRC_EXTRA)
 
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_COMPONENT_ARM_DISARM = 400
@@ -128,6 +132,7 @@ SERIES = {
     "BAT_I",
 }
 READOUT = ("VFR_gspd", "NAV_xtrack", "BAT_V", "BAT_I")
+GPS_FIELDS = ("GPI_lat", "GPI_lon", "GPI_hdg", "GPI_vn", "GPI_ve")
 
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -1277,6 +1282,294 @@ def format_bytes_py(n):
     return "%.1f MB" % (n / 1048576.0)
 
 
+class MissionError(Exception):
+    pass
+
+
+class MissionTransfer:
+    """Download/upload MISSION_* on the shared MAVLink link (FtpClient pattern)."""
+
+    def __init__(self, link, tx, enc):
+        self.link = link
+        self.tx = tx
+        self.enc = enc
+        self.cv = threading.Condition()
+        self.inbox = collections.deque()
+        self.op_lock = threading.Lock()
+        self._sysid = 1
+        self._compid = 1
+        self.progress_lock = threading.Lock()
+        self.progress = {
+            "active": False,
+            "action": "",
+            "name": "",
+            "folder": "",
+            "phase": "",
+            "done": 0,
+            "total": 0,
+            "index": 0,
+            "count": 0,
+            "t0": 0.0,
+        }
+
+    def push(self, msgid, payload):
+        with self.cv:
+            self.inbox.append((msgid, payload))
+            self.cv.notify()
+
+    def begin_progress(self, action, total=0, phase=""):
+        with self.progress_lock:
+            self.progress = {
+                "active": True,
+                "action": action,
+                "name": "missão",
+                "folder": "",
+                "phase": phase or "",
+                "done": 0,
+                "total": int(total) if total else 0,
+                "index": 1,
+                "count": 1,
+                "t0": time.monotonic(),
+            }
+
+    def update_progress(self, done=None, total=None, phase=None):
+        with self.progress_lock:
+            if not self.progress.get("active"):
+                return
+            if done is not None:
+                self.progress["done"] = int(done)
+            if total is not None:
+                self.progress["total"] = int(total)
+            if phase is not None:
+                self.progress["phase"] = phase
+
+    def end_progress(self):
+        with self.progress_lock:
+            self.progress["active"] = False
+            self.progress["phase"] = ""
+
+    def progress_snapshot(self):
+        with self.progress_lock:
+            snap = dict(self.progress)
+        if snap.get("active") and snap.get("t0"):
+            elapsed = max(0.0, time.monotonic() - snap["t0"])
+            snap["elapsed"] = round(elapsed, 1)
+            done = snap.get("done") or 0
+            total = snap.get("total") or 0
+            if done > 0 and total > done and elapsed >= 0.4:
+                rate = done / elapsed
+                snap["eta"] = round((total - done) / rate, 1) if rate > 0 else None
+            else:
+                snap["eta"] = None
+        else:
+            snap["elapsed"] = 0
+            snap["eta"] = None
+        snap.pop("t0", None)
+        return snap
+
+    def _clear(self):
+        with self.cv:
+            self.inbox.clear()
+
+    def _send(self, frame):
+        with self.tx:
+            self.link.send(frame)
+
+    def _wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        with self.cv:
+            while True:
+                if self.inbox:
+                    return self.inbox.popleft()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.cv.wait(remaining)
+
+    def _begin(self, vehicle):
+        with vehicle.lock:
+            if vehicle.sysid is None:
+                raise MissionError("sem rover")
+            if vehicle.jobs or vehicle.load is not None:
+                raise MissionError("espere o pedido atual terminar")
+            self._sysid = vehicle.sysid
+            self._compid = vehicle.compid or 1
+        ftp = getattr(vehicle, "ftp", None)
+        if ftp and ftp.progress_snapshot().get("active"):
+            raise MissionError("espere o FTP terminar")
+        logs = getattr(vehicle, "logs", None)
+        if logs and logs.progress_snapshot().get("active"):
+            raise MissionError("espere o download de logs terminar")
+
+    def download(self):
+        self.begin_progress("download", total=0, phase="pedir lista")
+        self._clear()
+        count = None
+        end = time.monotonic() + 20
+        last_req = 0.0
+        while count is None:
+            if time.monotonic() > end:
+                raise MissionError("sem resposta ao pedido da missão")
+            if time.monotonic() - last_req > 1.5:
+                last_req = time.monotonic()
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_REQUEST_LIST,
+                    struct.pack("<BB", self._sysid, self._compid)))
+            got = self._wait(0.2)
+            if got is None:
+                continue
+            msgid, payload = got
+            if msgid == mission.MSG_MISSION_COUNT:
+                count = struct.unpack("<H", payload[:2])[0]
+        if count > mission.MISSION_MAX_ITEMS:
+            raise MissionError("missão grande demais (%d itens)" % count)
+        self.update_progress(done=0, total=count, phase="baixando")
+        items = []
+        for seq in range(count):
+            got_item = None
+            tries = 0
+            last_req = 0.0
+            while got_item is None:
+                if time.monotonic() - last_req > 1.0:
+                    if tries >= 8:
+                        raise MissionError("item %d não chegou" % seq)
+                    tries += 1
+                    last_req = time.monotonic()
+                    self._send(self.enc.pack(
+                        mission.MSG_MISSION_REQUEST_INT,
+                        struct.pack("<HBB", seq, self._sysid, self._compid)))
+                got = self._wait(0.25)
+                if got is None:
+                    continue
+                msgid, payload = got
+                if msgid == mission.MSG_MISSION_ITEM_INT:
+                    it = mission.Item.from_payload(payload)
+                    if it.seq == seq:
+                        got_item = it
+            items.append(got_item)
+            self.update_progress(done=seq + 1, total=count, phase="baixando")
+        self._send(self.enc.pack(
+            mission.MSG_MISSION_ACK,
+            struct.pack("<BBB", self._sysid, self._compid, 0)))
+        self.update_progress(done=count, total=count, phase="pronto")
+        return items
+
+    def upload(self, items):
+        for i, it in enumerate(items):
+            it.seq = i
+        n = len(items)
+        if n < 1:
+            raise MissionError("missão vazia")
+        if n > mission.MISSION_MAX_ITEMS:
+            raise MissionError("missão grande demais (%d itens)" % n)
+        self.begin_progress("upload", total=n, phase="enviar contagem")
+        self._clear()
+        last_count = 0.0
+        last_activity = time.monotonic()
+        last_seq = -1
+        sent = set()
+        start = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if not sent and now - last_count > 1.5:
+                if now - start > 15:
+                    raise MissionError("o rover não pediu os itens")
+                last_count = now
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_COUNT,
+                    struct.pack("<HBB", n, self._sysid, self._compid)))
+            if now - last_activity > 10:
+                raise MissionError("envio parado no item %d" % (max(sent) + 1 if sent else 0))
+            if last_seq == n - 1 and now - last_activity > 1.5 and now - last_count > 1.5:
+                last_count = now
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_ITEM_INT,
+                    items[last_seq].payload(self._sysid, self._compid)))
+            got = self._wait(0.2)
+            if got is None:
+                continue
+            msgid, payload = got
+            if msgid in (mission.MSG_MISSION_REQUEST_INT, mission.MSG_MISSION_REQUEST):
+                seq = struct.unpack("<H", payload[:2])[0]
+                if seq < n and not (seq == last_seq and time.monotonic() - last_activity < 0.7):
+                    self._send(self.enc.pack(
+                        mission.MSG_MISSION_ITEM_INT,
+                        items[seq].payload(self._sysid, self._compid)))
+                    sent.add(seq)
+                    last_seq = seq
+                    last_activity = time.monotonic()
+                    self.update_progress(done=len(sent), total=n, phase="enviando")
+            elif msgid == mission.MSG_MISSION_ACK and sent:
+                result = payload[2]
+                if result == 0 and (n - 1) in sent:
+                    self.update_progress(done=n, total=n, phase="pronto")
+                    return
+                if result in (0, 13):
+                    continue
+                raise MissionError("rover recusou a missão: %s" %
+                                  mission.ACK_RESULT.get(result, result))
+
+
+def mission_progress(vehicle):
+    client = getattr(vehicle, "mission", None)
+    if client is None:
+        return {"active": False}
+    return client.progress_snapshot()
+
+
+def mission_download(vehicle):
+    client = vehicle.mission
+    with client.op_lock:
+        try:
+            client._begin(vehicle)
+            items = client.download()
+        except MissionError as exc:
+            client.end_progress()
+            note = str(exc)
+            print("mission: " + note, flush=True)
+            return False, note, None
+        except Exception as exc:
+            client.end_progress()
+            note = "falha ao baixar: %s" % exc
+            print("mission: " + note, flush=True)
+            return False, note, None
+    client.end_progress()
+    note = "missão baixada: %d itens" % len(items)
+    print("mission: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return True, note, items
+
+
+def mission_upload(vehicle, items):
+    with vehicle.lock:
+        if vehicle.armed:
+            note = "desarme antes de enviar a missão"
+            push_message(vehicle, 4, note)
+            return False, note
+    client = vehicle.mission
+    with client.op_lock:
+        try:
+            client._begin(vehicle)
+            client.upload(items)
+        except MissionError as exc:
+            client.end_progress()
+            note = str(exc)
+            print("mission: " + note, flush=True)
+            return False, note
+        except Exception as exc:
+            client.end_progress()
+            note = "falha ao enviar: %s" % exc
+            print("mission: " + note, flush=True)
+            return False, note
+    client.end_progress()
+    note = "missão enviada e aceita (%d itens)" % len(items)
+    print("mission: " + note, flush=True)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return True, note
+
+
 def script_paths(folder, name):
     directory = SCRIPT_DIRS.get(folder)
     if directory is None or not LUA_NAME.match(name or ""):
@@ -1531,6 +1824,9 @@ class Link:
             return data
         except self.socket.timeout:
             return b""
+        except ConnectionResetError:
+            # Windows UDP: ICMP "port unreachable" after a send to a closed peer.
+            return b""
 
     def send(self, data):
         try:
@@ -1669,6 +1965,11 @@ def reader(link, vehicle, stop, tx, enc):
                 continue
             if msgid == MSG_LOG_DATA:
                 vehicle.logs.push_data(parse_log_data(payload))
+                continue
+            if msgid in (mission.MSG_MISSION_COUNT, mission.MSG_MISSION_ITEM_INT,
+                         mission.MSG_MISSION_REQUEST, mission.MSG_MISSION_REQUEST_INT,
+                         mission.MSG_MISSION_ACK):
+                vehicle.mission.push(msgid, payload)
                 continue
             if msgid != mon.MSG_HEARTBEAT:
                 key = (msgid, payload)
@@ -2421,6 +2722,7 @@ def snapshot(link, vehicle):
         messages = list(vehicle.messages)
         params = dict(vehicle.params)
         latest = {name: vehicle.latest[name] for name in READOUT if name in vehicle.latest}
+        gps = {name: vehicle.latest[name] for name in GPS_FIELDS if name in vehicle.latest}
         blocked = []
         reset_inputs = vehicle.reset_inputs
         vehicle.reset_inputs = False
@@ -2444,6 +2746,7 @@ def snapshot(link, vehicle):
         "messages": messages,
         "params": params,
         "latest": latest,
+        "gps": gps,
         "blocked_modes": blocked,
         "reset_inputs": reset_inputs,
         "param_epoch": param_epoch,
@@ -2482,6 +2785,7 @@ def catalog():
             "text": proc["text"],
             "sets": sets_line(proc),
         } for proc in PROCESSES],
+        "mission_commands": mission.command_catalog(),
     }
 
 
@@ -2570,6 +2874,10 @@ def make_handler(link, vehicle, tx, enc):
                 code, ctype, body = json_body(sdlog_progress(vehicle))
                 self._send(code, ctype, body)
                 return
+            if path == "/mission/progress":
+                code, ctype, body = json_body(mission_progress(vehicle))
+                self._send(code, ctype, body)
+                return
             if path == "/params.parm":
                 with vehicle.lock:
                     body = parm_text(vehicle.params)
@@ -2595,6 +2903,193 @@ def make_handler(link, vehicle, tx, enc):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/mission/download":
+                self._read_json(8000)
+                ok, note, items = mission_download(vehicle)
+                payload = {"ok": ok, "note": note}
+                if ok and items is not None:
+                    payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/new":
+                data = self._read_json(8000)
+                lat = lon = 0.0
+                if isinstance(data, dict):
+                    try:
+                        lat = float(data.get("lat") or 0)
+                        lon = float(data.get("lon") or 0)
+                    except (TypeError, ValueError):
+                        lat = lon = 0.0
+                with vehicle.lock:
+                    if (not lat and not lon) and "GPI_lat" in vehicle.latest and "GPI_lon" in vehicle.latest:
+                        lat = float(vehicle.latest["GPI_lat"])
+                        lon = float(vehicle.latest["GPI_lon"])
+                items = mission.empty_mission(lat, lon)
+                payload = {"ok": True, "note": "missão nova (home em %.6f, %.6f)" % (lat, lon)}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/analyse":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": ""}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/upload":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                ok, note = mission_upload(vehicle, items)
+                code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/import":
+                data = self._read_json(400000)
+                text = data.get("text") if isinstance(data, dict) else None
+                if not isinstance(text, str):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.parse_waypoints_text(text)
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": "arquivo importado: %d itens" % len(items)}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/export":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                text = mission.format_waypoints_text(items)
+                self._send(200, "text/plain; charset=utf-8", text.encode("utf-8"), (
+                    ("Content-Disposition", 'attachment; filename="mission.waypoints"'),
+                ))
+                return
+            if path == "/mission/rebuild":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                    seq = int(data.get("seq"))
+                    want = bool(data.get("reverse"))
+                    items, keep, flipped = mission.apply_reverse_toggle(items, seq, want)
+                except (TypeError, ValueError) as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                note = "trecho até o WP %d agora %s" % (keep, "de RÉ" if want else "de frente")
+                if flipped is not None:
+                    note += "; alinhamento do WP anterior virou %.0f graus" % flipped
+                payload = {"ok": True, "note": note, "selected": keep}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/heading":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                    seq = int(data.get("seq"))
+                    if seq <= 0 or seq >= len(items) or items[seq].command != mission.CMD_WAYPOINT:
+                        raise ValueError("só WAYPOINT tem rumo do próximo trecho")
+                    brg = mission.leg_bearing(items, seq)
+                    if brg is None:
+                        raise ValueError("não há waypoint depois deste")
+                    items[seq].z = round(mission.front_heading(items, seq, brg), 1)
+                except (TypeError, ValueError) as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": "rumo do próximo trecho: %.0f graus" % items[seq].z,
+                           "selected": seq}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/fix":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                n = 0
+                info = mission.analyse(items)
+                for i, it in enumerate(items):
+                    if i and it.command == mission.CMD_WAYPOINT and not mission.is_pass(it.z) and (
+                            it.z > 360 or it.z < -1 or info[i][2]):
+                        it.z = -1.0
+                        n += 1
+                note = ("%d waypoints com Alt de altitude ou conflito viraram 'passa direto'" % n
+                        if n else "nenhum waypoint suspeito para corrigir")
+                payload = {"ok": True, "note": note}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/all-next":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                n = 0
+                for i, it in enumerate(items):
+                    if i and it.command == mission.CMD_WAYPOINT and not mission.is_pass(it.z):
+                        brg = mission.leg_bearing(items, i)
+                        if brg is not None:
+                            it.z = round(mission.front_heading(items, i, brg), 1)
+                            n += 1
+                note = "%d alinhamentos agora apontam para o próximo trecho" % n
+                payload = {"ok": True, "note": note}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
             if path == "/storage/clear-bak":
                 self._read_json(8000)
                 ok, note = storage_bak_clear(vehicle)
@@ -2789,6 +3284,7 @@ def main(argv=None):
     enc = Encoder()
     vehicle.ftp = FtpClient(link, tx, enc)
     vehicle.logs = LogClient(link, tx, enc)
+    vehicle.mission = MissionTransfer(link, tx, enc)
     if args.csv:
         filename = log_filename(args.csv)
         if filename is None:

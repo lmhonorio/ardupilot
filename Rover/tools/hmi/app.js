@@ -3,6 +3,7 @@ const PAGES = [
   ["mensagens", "Mensagens"],
   ["modos", "Modos"],
   ["parametros", "Parâmetros"],
+  ["editor-missao", "Missão"],
   ["scripts", "Scripts"],
   ["ensaios", "Ensaios"],
 ];
@@ -72,6 +73,30 @@ let sdlogBusy = false;
 let sdlogWanted = false;
 let sdlogXferTimer = null;
 let sdlogCache = [];
+let missionBusy = false;
+let missionDirty = false;
+let missionSelected = null;
+let missionItems = [];
+let missionStats = { total_m: 0, legs: [], waypoints: 0 };
+let missionXferTimer = null;
+let missionMap = null;
+let missionMarkers = {};
+let missionLines = null;
+let missionRoverMarker = null;
+let missionHeadingLayer = null;
+let missionClickMode = "add"; // add | pan
+let missionPlanMode = "map"; // map | relative
+let missionCtx = null; // {x,y,lat,lon,seq}
+let missionRelOrigin = null; // {lat, lon, hdg} fixed start for relative steps
+let missionRelPreview = null; // leaflet layers
+let missionRelPreviewPt = null; // [lat, lon]
+const CMD_WAYPOINT = 16;
+const CMD_RTL = 20;
+const CMD_LOITER_UNLIM = 17;
+const CMD_LOITER_TIME = 19;
+const CMD_DO_JUMP = 177;
+const NAV_WITH_POSITION = new Set([16, 17, 19, 21, 22, 82]);
+const DEFAULT_MAP = [-15.78, -47.93];
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -210,15 +235,23 @@ function paint() {
     pending = {};
     for (const input of document.querySelectorAll("input[data-touched]")) input.dataset.touched = "";
   }
-  for (const btn of document.querySelectorAll("button.apply, button.proc, button.scriptact, button.sdlogact")) {
+  for (const btn of document.querySelectorAll("button.apply, button.proc, button.scriptact, button.sdlogact, button.missionact")) {
     if (btn.id === "armbtn") continue;
     const pending = confirm && confirm.el === btn && Date.now() < confirm.until;
     const busy = (btn.classList.contains("scriptact") && scriptBusy)
-      || (btn.classList.contains("sdlogact") && sdlogBusy);
+      || (btn.classList.contains("sdlogact") && sdlogBusy)
+      || (btn.classList.contains("missionact") && missionBusy);
     const needsDisarm = btn.dataset.danger === "1";
+    const needsLink = !btn.classList.contains("missionlocal");
     if (!pending) {
-      btn.disabled = !state.seen || busy || (!!state.armed && needsDisarm);
+      btn.disabled = (needsLink && !state.seen) || busy || (!!state.armed && needsDisarm);
     }
+  }
+  if (page === "editor-missao") {
+    paintRoverOnMap();
+    if (missionPlanMode === "relative") paintRelativePreview();
+    const dirty = document.getElementById("missiondirty");
+    if (dirty && !missionBusy) dirty.textContent = missionDirty ? "alterações locais não enviadas" : "";
   }
   paintTools();
   if (page === "scripts" && scriptWanted && state.seen && !scriptBusy) {
@@ -1510,6 +1543,1212 @@ function renderScripts() {
   }
 }
 
+function missionCommands() {
+  return (catalog && catalog.mission_commands) || [];
+}
+
+function missionCmdSpec(id) {
+  return missionCommands().find((c) => c.id === Number(id));
+}
+
+function missionPlainItems() {
+  return missionItems.map((it) => ({
+    seq: it.seq,
+    frame: it.frame,
+    command: it.command,
+    current: it.current,
+    autocontinue: it.autocontinue,
+    p1: it.p1,
+    p2: it.p2,
+    p3: it.p3,
+    p4: it.p4,
+    lat: it.lat,
+    lon: it.lon,
+    z: it.z,
+  }));
+}
+
+function gpsLatLon() {
+  const g = state.gps || {};
+  if (g.GPI_lat != null && g.GPI_lon != null) return [g.GPI_lat, g.GPI_lon];
+  return null;
+}
+
+function gpsHdg() {
+  const h = state.gps && state.gps.GPI_hdg;
+  return Number.isFinite(Number(h)) ? Number(h) : null;
+}
+
+/** Move distM meters at bearingDeg (0 = north, clockwise). */
+function offsetLatLon(lat, lon, bearingDeg, distM) {
+  const R = 6371000.0;
+  const brng = (((bearingDeg % 360) + 360) % 360) * Math.PI / 180;
+  const φ1 = lat * Math.PI / 180;
+  const λ1 = lon * Math.PI / 180;
+  const δ = Number(distM) / R;
+  const φ2 = Math.asin(Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(brng));
+  const λ2 = λ1 + Math.atan2(
+    Math.sin(brng) * Math.sin(δ) * Math.cos(φ1),
+    Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2),
+  );
+  return [φ2 * 180 / Math.PI, ((λ2 * 180 / Math.PI + 540) % 360) - 180];
+}
+
+function bearingBetween(lat1, lon1, lat2, lon2) {
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+}
+
+function lastPositionalSeq() {
+  for (let i = missionItems.length - 1; i >= 0; i--) {
+    const it = missionItems[i];
+    if (it.has_pos && (it.lat || it.lon)) return i;
+  }
+  return null;
+}
+
+function relativeOriginPoint() {
+  const src = (document.getElementById("missionrelsrc") || {}).value || "rover";
+  if (src === "fixed" && missionRelOrigin) {
+    return { lat: missionRelOrigin.lat, lon: missionRelOrigin.lon, hdg: missionRelOrigin.hdg, label: "origem fixa" };
+  }
+  if (src === "selected" && missionSelected != null && missionItems[missionSelected]
+      && missionItems[missionSelected].has_pos) {
+    const it = missionItems[missionSelected];
+    return { lat: it.lat, lon: it.lon, hdg: null, label: `WP ${missionSelected}` };
+  }
+  if (src === "last" || src === "chain") {
+    const i = lastPositionalSeq();
+    if (i != null) {
+      const it = missionItems[i];
+      let hdg = null;
+      if (i > 0) {
+        for (let j = i - 1; j >= 0; j--) {
+          if (missionItems[j].has_pos && (missionItems[j].lat || missionItems[j].lon)) {
+            hdg = bearingBetween(missionItems[j].lat, missionItems[j].lon, it.lat, it.lon);
+            break;
+          }
+        }
+      }
+      return { lat: it.lat, lon: it.lon, hdg, label: i === 0 ? "HOME" : `WP ${i}` };
+    }
+  }
+  const gps = gpsLatLon();
+  if (gps) return { lat: gps[0], lon: gps[1], hdg: gpsHdg(), label: "rover" };
+  if (missionRelOrigin) {
+    return { lat: missionRelOrigin.lat, lon: missionRelOrigin.lon, hdg: missionRelOrigin.hdg, label: "origem fixa" };
+  }
+  return null;
+}
+
+function relativeAbsoluteBearing(angleInput) {
+  const ang = Number(String(angleInput).replace(",", "."));
+  if (!Number.isFinite(ang)) return null;
+  const ref = (document.getElementById("missionrelref") || {}).value || "north";
+  const origin = relativeOriginPoint();
+  if (ref === "north") return ((ang % 360) + 360) % 360;
+  if (ref === "rover") {
+    const hdg = gpsHdg();
+    if (hdg == null && !(origin && origin.hdg != null)) return null;
+    const base = hdg != null ? hdg : origin.hdg;
+    return ((base + ang) % 360 + 360) % 360;
+  }
+  // relative to last leg / origin heading
+  if (origin && origin.hdg != null) return ((origin.hdg + ang) % 360 + 360) % 360;
+  const hdg = gpsHdg();
+  if (hdg == null) return null;
+  return ((hdg + ang) % 360 + 360) % 360;
+}
+
+function computeRelativeStep() {
+  const distEl = document.getElementById("missionreldist");
+  const angEl = document.getElementById("missionrelang");
+  if (!distEl || !angEl) return null;
+  const dist = Number(String(distEl.value).replace(",", "."));
+  if (!Number.isFinite(dist) || dist < 0) return { error: "distância inválida" };
+  const origin = relativeOriginPoint();
+  if (!origin) return { error: "sem origem (GPS do rover ou waypoint)" };
+  const bearing = relativeAbsoluteBearing(angEl.value);
+  if (bearing == null) return { error: "ângulo inválido (falta rumo do rover?)" };
+  const [lat, lon] = offsetLatLon(origin.lat, origin.lon, bearing, dist);
+  return { origin, bearing, dist, lat, lon };
+}
+
+function clearRelativePreview() {
+  if (missionRelPreview && missionMap) {
+    missionMap.removeLayer(missionRelPreview);
+  }
+  missionRelPreview = null;
+  missionRelPreviewPt = null;
+}
+
+function paintRelativePreview() {
+  if (missionPlanMode !== "relative" || !missionMap) {
+    clearRelativePreview();
+    return;
+  }
+  const step = computeRelativeStep();
+  const info = document.getElementById("missionrelinfo");
+  if (!step || step.error) {
+    clearRelativePreview();
+    if (info) info.textContent = step && step.error ? step.error : "";
+    return;
+  }
+  if (info) {
+    info.textContent = `de ${step.origin.label} → ${step.dist.toFixed(2)} m a ${step.bearing.toFixed(0)}° `
+      + `(${step.lat.toFixed(6)}, ${step.lon.toFixed(6)})`;
+  }
+  missionRelPreviewPt = [step.lat, step.lon];
+  if (!missionRelPreview) missionRelPreview = L.layerGroup().addTo(missionMap);
+  missionRelPreview.clearLayers();
+  L.polyline([[step.origin.lat, step.origin.lon], [step.lat, step.lon]], {
+    color: "#c25e00",
+    weight: 3,
+    dashArray: "4 6",
+  }).addTo(missionRelPreview);
+  L.circleMarker([step.lat, step.lon], {
+    radius: 8,
+    color: "#c25e00",
+    fillColor: "#ffcc66",
+    fillOpacity: 0.9,
+    weight: 2,
+  }).addTo(missionRelPreview);
+  L.circleMarker([step.origin.lat, step.origin.lon], {
+    radius: 5,
+    color: "#c25e00",
+    fillColor: "#fff",
+    fillOpacity: 1,
+    weight: 2,
+  }).addTo(missionRelPreview);
+}
+
+async function addRelativeStep() {
+  if (missionBusy) return;
+  const step = computeRelativeStep();
+  const status = document.getElementById("missionstatus");
+  if (!step || step.error) {
+    if (status) status.textContent = (step && step.error) || "passo inválido";
+    return;
+  }
+  const alignPrev = !!(document.getElementById("missionrelalign") || {}).checked;
+  const chain = !!(document.getElementById("missionrelchain") || {}).checked;
+  const setRumo = !!(document.getElementById("missionrelrumo") || {}).checked;
+  const prevSeq = lastPositionalSeq();
+
+  missionBusy = true;
+  paint();
+  try {
+    if (!missionItems.length) {
+      const home = makeMissionItem(CMD_WAYPOINT, step.origin.lat, step.origin.lon, { z: 0 });
+      home.current = 1;
+      home.frame = 0;
+      home.name = "WAYPOINT";
+      missionItems = [home];
+    }
+
+    // Rumo do WP anterior = direção deste trecho (frente do rover), como no mission_editor.
+    if (alignPrev && prevSeq != null && prevSeq > 0 && missionItems[prevSeq].command === CMD_WAYPOINT) {
+      missionItems[prevSeq].z = Math.round(step.bearing * 10) / 10;
+    }
+
+    const z = setRumo ? Math.round(step.bearing * 10) / 10 : -1;
+    const item = makeMissionItem(CMD_WAYPOINT, step.lat, step.lon, { z });
+    missionItems.push(item);
+    missionItems.forEach((it, i) => { it.seq = i; });
+    missionSelected = missionItems.length - 1;
+    missionDirty = true;
+    await refreshMissionAnalyse(missionSelected);
+
+    if (chain) {
+      const src = document.getElementById("missionrelsrc");
+      if (src) src.value = "last";
+      missionRelOrigin = { lat: step.lat, lon: step.lon, hdg: step.bearing };
+    }
+    paintRelativePreview();
+    if (status) {
+      status.textContent = `passo +${step.dist.toFixed(2)} m / ${step.bearing.toFixed(0)}°`
+        + (setRumo ? ` (rumo do WP = ${Math.round(z)}°)` : " (passa direto)");
+    }
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
+function captureRelativeOriginFromRover() {
+  const gps = gpsLatLon();
+  if (!gps) {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "sem GPS do rover";
+    return;
+  }
+  missionRelOrigin = { lat: gps[0], lon: gps[1], hdg: gpsHdg() };
+  const src = document.getElementById("missionrelsrc");
+  if (src) src.value = "fixed";
+  const status = document.getElementById("missionstatus");
+  if (status) {
+    status.textContent = `origem fixa no rover: ${gps[0].toFixed(6)}, ${gps[1].toFixed(6)}`
+      + (missionRelOrigin.hdg != null ? ` · rumo ${missionRelOrigin.hdg.toFixed(0)}°` : "");
+  }
+  paintRelativePreview();
+}
+
+function setMissionPlanMode(mode) {
+  missionPlanMode = mode === "relative" ? "relative" : "map";
+  missionClickMode = missionPlanMode === "map" ? "add" : "pan";
+  const mapBtn = document.getElementById("missionmodemap");
+  const relBtn = document.getElementById("missionmoderel");
+  const panel = document.getElementById("missionrelpanel");
+  if (mapBtn) mapBtn.classList.toggle("on", missionPlanMode === "map");
+  if (relBtn) relBtn.classList.toggle("on", missionPlanMode === "relative");
+  if (panel) panel.hidden = missionPlanMode !== "relative";
+  const hint = document.querySelector(".mission-hint");
+  if (hint) {
+    hint.textContent = missionPlanMode === "relative"
+      ? "modo relativo: distância + ângulo a partir da origem"
+      : "clique = adicionar · arraste = mover · direito = menu";
+  }
+  if (missionPlanMode !== "relative") clearRelativePreview();
+  else paintRelativePreview();
+}
+
+function acceptMissionPayload(data, { dirty = true, selected = missionSelected, fit = false } = {}) {
+  if (!data || !Array.isArray(data.items)) return;
+  missionItems = data.items;
+  missionStats = data.stats || { total_m: 0, legs: [], waypoints: 0 };
+  missionDirty = dirty;
+  if (selected != null && selected >= 0 && selected < missionItems.length) {
+    missionSelected = selected;
+  } else if (missionSelected == null || missionSelected >= missionItems.length) {
+    missionSelected = missionItems.findIndex((it, i) => i > 0 && it.command === CMD_WAYPOINT);
+    if (missionSelected < 0) missionSelected = missionItems.length ? 0 : null;
+  }
+  paintMissionEditor({ fit });
+}
+
+async function missionPost(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (data.note) document.getElementById("note").textContent = data.note;
+  const status = document.getElementById("missionstatus");
+  if (status && data.note) status.textContent = data.note;
+  pollState();
+  return { ok: res.ok && data.ok !== false, data };
+}
+
+function startMissionXferPoll() {
+  stopMissionXferPoll();
+  missionXferTimer = setInterval(async () => {
+    if (page !== "editor-missao") return;
+    try {
+      const prog = await (await fetch("/mission/progress")).json();
+      paintMissionXfer(prog);
+    } catch (e) { /* ignore */ }
+  }, 200);
+}
+
+function stopMissionXferPoll() {
+  if (missionXferTimer) {
+    clearInterval(missionXferTimer);
+    missionXferTimer = null;
+  }
+  showMissionXfer(false);
+}
+
+function showMissionXfer(on) {
+  const box = document.getElementById("missionxfer");
+  if (box) box.hidden = !on;
+}
+
+function paintMissionXfer(prog) {
+  if (!prog || !prog.active) {
+    showMissionXfer(false);
+    return;
+  }
+  showMissionXfer(true);
+  const label = document.getElementById("missionxferlabel");
+  const fill = document.getElementById("missionxferfill");
+  const meta = document.getElementById("missionxfermeta");
+  const done = prog.done || 0;
+  const total = prog.total || 0;
+  const pct = total > 0 ? Math.min(100, Math.round(100 * done / total)) : 0;
+  if (label) label.textContent = `${prog.action || ""} ${prog.phase || ""}`.trim();
+  if (fill) fill.style.width = pct + "%";
+  if (meta) {
+    meta.textContent = total
+      ? `${done}/${total} · ${prog.elapsed || 0}s`
+      : `${prog.elapsed || 0}s`;
+  }
+}
+
+async function refreshMissionAnalyse(selected = missionSelected) {
+  if (!missionItems.length) return;
+  const result = await missionPost("/mission/analyse", { items: missionPlainItems() });
+  if (result.ok) acceptMissionPayload(result.data, { dirty: missionDirty, selected });
+}
+
+async function downloadMission() {
+  if (missionBusy) return;
+  if (missionDirty && !window.confirm("Descartar as alterações não enviadas?")) return;
+  missionBusy = true;
+  paint();
+  const status = document.getElementById("missionstatus");
+  if (status) status.textContent = "Baixando missão…";
+  startMissionXferPoll();
+  let result;
+  try {
+    result = await missionPost("/mission/download", {});
+  } catch (err) {
+    result = { ok: false, data: { note: String(err && err.message ? err.message : err) } };
+  }
+  stopMissionXferPoll();
+  missionBusy = false;
+  if (result.ok) acceptMissionPayload(result.data, { dirty: false, fit: true });
+  else paint();
+  if (status) status.textContent = (result.data && result.data.note) || (result.ok ? "" : "falha ao baixar");
+}
+
+async function uploadMission() {
+  if (missionBusy) return;
+  if (!missionItems.length) {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "Nenhuma missão carregada";
+    return;
+  }
+  if (state.armed) {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "desarme antes de enviar a missão";
+    return;
+  }
+  const warns = missionItems.filter((it) => it.warn).length;
+  let msg = `Enviar ${missionItems.length} itens ao rover? A missão atual será substituída.`;
+  if (warns) msg += `\n\nATENÇÃO: ${warns} alerta(s) na lista.`;
+  if (!window.confirm(msg)) return;
+  missionBusy = true;
+  paint();
+  const status = document.getElementById("missionstatus");
+  if (status) status.textContent = "Enviando missão…";
+  startMissionXferPoll();
+  let result;
+  try {
+    result = await missionPost("/mission/upload", { items: missionPlainItems() });
+  } catch (err) {
+    result = { ok: false, data: { note: String(err && err.message ? err.message : err) } };
+  }
+  stopMissionXferPoll();
+  missionBusy = false;
+  if (result.ok) missionDirty = false;
+  paintMissionEditor();
+  if (status) status.textContent = (result.data && result.data.note) || (result.ok ? "" : "falha ao enviar");
+}
+
+async function newMission() {
+  if (missionBusy) return;
+  if (missionDirty && !window.confirm("Descartar as alterações não enviadas?")) return;
+  const gps = gpsLatLon() || DEFAULT_MAP;
+  missionBusy = true;
+  paint();
+  const result = await missionPost("/mission/new", { lat: gps[0], lon: gps[1] });
+  missionBusy = false;
+  if (result.ok) acceptMissionPayload(result.data, { dirty: true, fit: true });
+  else paint();
+}
+
+async function importMissionFile(file) {
+  if (!file || missionBusy) return;
+  const text = await file.text();
+  missionBusy = true;
+  paint();
+  const result = await missionPost("/mission/import", { text });
+  missionBusy = false;
+  if (result.ok) acceptMissionPayload(result.data, { dirty: true, fit: true });
+  else paint();
+}
+
+async function exportMissionFile() {
+  if (!missionItems.length || missionBusy) return;
+  const res = await fetch("/mission/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items: missionPlainItems() }),
+  });
+  if (!res.ok) {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "não foi possível exportar";
+    return;
+  }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "mission.waypoints";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function missionEdit(url, extra) {
+  if (missionBusy || !missionItems.length) return;
+  missionBusy = true;
+  paint();
+  const result = await missionPost(url, { items: missionPlainItems(), ...(extra || {}) });
+  missionBusy = false;
+  if (result.ok) {
+    acceptMissionPayload(result.data, {
+      dirty: true,
+      selected: result.data.selected != null ? result.data.selected : missionSelected,
+    });
+  } else {
+    paint();
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = (result.data && result.data.note) || "falha";
+  }
+}
+
+function makeMissionItem(command, lat, lon, extra = {}) {
+  const spec = missionCmdSpec(command);
+  const hasPos = !spec || spec.has_pos;
+  return {
+    seq: 0,
+    frame: 3,
+    command: Number(command),
+    current: 0,
+    autocontinue: 1,
+    p1: extra.p1 || 0,
+    p2: extra.p2 || 0,
+    p3: extra.p3 || 0,
+    p4: extra.p4 || 0,
+    lat: hasPos ? lat : 0,
+    lon: hasPos ? lon : 0,
+    // WAYPOINT: Alt = rumo; -1 = passa direto (regra do mixer / mission_editor).
+    z: extra.z != null ? extra.z : (Number(command) === CMD_WAYPOINT ? -1 : 0),
+    name: (spec && spec.name) || ("CMD_" + command),
+    has_pos: !!hasPos,
+    direction: "",
+    effect: "",
+    warn: "",
+    reverse: false,
+  };
+}
+
+async function ensureMissionHome(lat, lon) {
+  if (missionItems.length) return false;
+  const gps = gpsLatLon();
+  const home = makeMissionItem(
+    CMD_WAYPOINT,
+    gps ? gps[0] : lat,
+    gps ? gps[1] : lon,
+    { z: 0 },
+  );
+  home.current = 1;
+  home.frame = 0;
+  home.name = "WAYPOINT";
+  missionItems = [home];
+  // Sem GPS, o 1º clique só define HOME (como o Mission Planner separa home dos WPs).
+  return !gps;
+}
+
+async function addMissionAt(lat, lon, command = CMD_WAYPOINT) {
+  if (missionBusy) return;
+  missionBusy = true;
+  paint();
+  try {
+    const homeOnly = await ensureMissionHome(lat, lon);
+    if (homeOnly) {
+      missionSelected = 0;
+      missionDirty = true;
+      await refreshMissionAnalyse(0);
+      const status = document.getElementById("missionstatus");
+      if (status) status.textContent = "HOME definido — clique de novo para o 1º WAYPOINT";
+      return;
+    }
+    const item = makeMissionItem(command, lat, lon);
+    missionItems.push(item);
+    missionItems.forEach((it, i) => { it.seq = i; });
+    missionSelected = missionItems.length - 1;
+    missionDirty = true;
+    await refreshMissionAnalyse(missionSelected);
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
+async function insertMissionCommand(command, lat, lon, atSeq) {
+  if (missionBusy) return;
+  missionBusy = true;
+  paint();
+  try {
+    const homeOnly = await ensureMissionHome(lat, lon);
+    if (homeOnly && command === CMD_WAYPOINT) {
+      missionSelected = 0;
+      missionDirty = true;
+      await refreshMissionAnalyse(0);
+      return;
+    }
+    if (!missionItems.length) {
+      // comando não-WP sem home: cria home no ponto e segue
+      await ensureMissionHome(lat, lon);
+    }
+    const item = makeMissionItem(command, lat, lon);
+    let idx = atSeq != null ? Number(atSeq) + 1 : missionItems.length;
+    idx = Math.max(1, Math.min(idx, missionItems.length));
+    missionItems.splice(idx, 0, item);
+    missionItems.forEach((it, i) => { it.seq = i; });
+    missionSelected = idx;
+    missionDirty = true;
+    await refreshMissionAnalyse(missionSelected);
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
+async function deleteMissionSeq(seq) {
+  if (seq == null || seq <= 0 || seq >= missionItems.length || missionBusy) return;
+  missionBusy = true;
+  paint();
+  try {
+    missionItems.splice(seq, 1);
+    missionItems.forEach((it, i) => { it.seq = i; });
+    missionSelected = Math.min(seq, missionItems.length - 1);
+    missionDirty = true;
+    await refreshMissionAnalyse(missionSelected);
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
+async function clearMissionLocal() {
+  if (!missionItems.length || missionBusy) return;
+  if (!window.confirm("Limpar a missão nesta tela? (não apaga a do rover até enviar)")) return;
+  missionBusy = true;
+  paint();
+  try {
+    const home = missionItems[0];
+    missionItems = [home];
+    missionItems[0].seq = 0;
+    missionSelected = 0;
+    missionDirty = true;
+    await refreshMissionAnalyse(0);
+  } finally {
+    missionBusy = false;
+    paint();
+  }
+}
+
+function setMissionZ(z) {
+  const i = missionSelected;
+  if (i == null || !missionItems[i] || missionItems[i].command !== CMD_WAYPOINT || i === 0) return;
+  missionItems[i].z = z;
+  missionDirty = true;
+  refreshMissionAnalyse(i);
+}
+
+function applyMissionAngle() {
+  const input = document.getElementById("missionangle");
+  if (!input) return;
+  const ang = Number(String(input.value).replace(",", "."));
+  if (!Number.isFinite(ang)) {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "Digite um número de 0 a 359";
+    return;
+  }
+  setMissionZ(((ang % 360) + 360) % 360);
+}
+
+function applyMissionFields() {
+  const i = missionSelected;
+  if (i == null || !missionItems[i]) return;
+  const it = missionItems[i];
+  const cmdEl = document.getElementById("missioncmd");
+  // HOME (seq 0): só lat/lon — comando fica WAYPOINT/current=1.
+  if (i > 0 && cmdEl) {
+    const cmd = Number(cmdEl.value);
+    if (Number.isFinite(cmd) && cmd !== it.command) {
+      const spec = missionCmdSpec(cmd);
+      it.command = cmd;
+      it.name = (spec && spec.name) || ("CMD_" + cmd);
+      it.has_pos = !spec || !!spec.has_pos;
+      if (!it.has_pos) { it.lat = 0; it.lon = 0; }
+      if (cmd === CMD_WAYPOINT && (it.z > 360 || it.z < -1)) it.z = -1;
+    }
+  }
+  const keys = i === 0 ? ["lat", "lon"] : ["p1", "p2", "p3", "p4", "lat", "lon", "z"];
+  for (const key of keys) {
+    const el = document.getElementById("missionf-" + key);
+    if (!el || el.disabled) continue;
+    const v = Number(String(el.value).replace(",", "."));
+    if (Number.isFinite(v)) it[key] = v;
+  }
+  missionDirty = true;
+  refreshMissionAnalyse(i);
+}
+
+function destroyMissionMap() {
+  clearRelativePreview();
+  if (missionMap) {
+    missionMap.remove();
+    missionMap = null;
+  }
+  missionMarkers = {};
+  missionLines = null;
+  missionRoverMarker = null;
+  missionHeadingLayer = null;
+}
+
+function wpIcon(seq, selected, warn, reverse, isHome) {
+  const color = warn ? "#c00000" : (isHome ? "#c25e00" : (reverse ? "#e67e22" : "#073e73"));
+  const ring = selected ? "3px solid #efeae3" : "2px solid #fff";
+  return L.divIcon({
+    className: "mission-marker",
+    html: `<div class="mission-pin" style="background:${color};box-shadow:0 0 0 ${ring}">${seq}</div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+function roverIcon(hdg) {
+  const rot = Number.isFinite(hdg) ? hdg : 0;
+  return L.divIcon({
+    className: "mission-marker",
+    html: `<div class="mission-rover" style="transform:rotate(${rot}deg)">▲</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+  });
+}
+
+function ensureMissionMap() {
+  if (typeof L === "undefined") {
+    const status = document.getElementById("missionstatus");
+    if (status) status.textContent = "Leaflet não carregou — verifique a rede para o mapa GPS";
+    return null;
+  }
+  const el = document.getElementById("missionleaflet");
+  if (!el) return null;
+  if (missionMap) {
+    setTimeout(() => missionMap.invalidateSize(), 50);
+    return missionMap;
+  }
+  const start = gpsLatLon() || DEFAULT_MAP;
+  missionMap = L.map(el, { zoomControl: true, attributionControl: true }).setView(start, 18);
+  const streets = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 22,
+    attribution: "&copy; OpenStreetMap",
+  });
+  const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 22,
+    attribution: "Esri",
+  });
+  streets.addTo(missionMap);
+  L.control.layers({ Mapa: streets, Satélite: sat }, {}, { position: "topright" }).addTo(missionMap);
+  missionLines = L.layerGroup().addTo(missionMap);
+  missionHeadingLayer = L.layerGroup().addTo(missionMap);
+
+  missionMap.on("click", async (ev) => {
+    hideMissionCtx();
+    if (missionBusy || missionClickMode !== "add") return;
+    await addMissionAt(ev.latlng.lat, ev.latlng.lng, CMD_WAYPOINT);
+  });
+  missionMap.on("contextmenu", (ev) => {
+    L.DomEvent.preventDefault(ev.originalEvent);
+    showMissionCtx(ev.originalEvent.clientX, ev.originalEvent.clientY, ev.latlng.lat, ev.latlng.lng, null);
+  });
+  missionMap.on("mousemove", (ev) => {
+    const cur = document.getElementById("missioncursor");
+    if (cur) cur.textContent = `${ev.latlng.lat.toFixed(6)}, ${ev.latlng.lng.toFixed(6)}`;
+  });
+  return missionMap;
+}
+
+function fitMissionBounds() {
+  if (!missionMap) return;
+  const pts = [];
+  for (const it of missionItems) {
+    if (it.has_pos && (it.lat || it.lon)) pts.push([it.lat, it.lon]);
+  }
+  const gps = gpsLatLon();
+  if (gps) pts.push(gps);
+  if (!pts.length) return;
+  if (pts.length === 1) missionMap.setView(pts[0], 19);
+  else missionMap.fitBounds(pts, { padding: [40, 40], maxZoom: 20 });
+}
+
+function syncMissionMapLayers() {
+  if (!ensureMissionMap()) return;
+  if (!missionLines) missionLines = L.layerGroup().addTo(missionMap);
+  if (!missionHeadingLayer) missionHeadingLayer = L.layerGroup().addTo(missionMap);
+  for (const key of Object.keys(missionMarkers)) {
+    missionMap.removeLayer(missionMarkers[key]);
+  }
+  missionMarkers = {};
+  missionLines.clearLayers();
+  missionHeadingLayer.clearLayers();
+
+  const path = [];
+  for (let i = 0; i < missionItems.length; i++) {
+    const it = missionItems[i];
+    if (!(it.has_pos && (it.lat || it.lon))) continue;
+    path.push({ i, it, latlng: [it.lat, it.lon] });
+  }
+  for (let k = 1; k < path.length; k++) {
+    const a = path[k - 1];
+    const b = path[k];
+    L.polyline([a.latlng, b.latlng], {
+      color: b.it.direction === "re" ? "#e67e22" : "#2ca02c",
+      weight: 4,
+      dashArray: b.it.direction === "re" ? "8 6" : null,
+      opacity: 0.9,
+    }).addTo(missionLines);
+  }
+  for (const { i, it, latlng } of path) {
+    const marker = L.marker(latlng, {
+      draggable: true,
+      icon: wpIcon(i, i === missionSelected, !!it.warn, it.direction === "re", i === 0),
+      zIndexOffset: i === missionSelected ? 600 : 400,
+    }).addTo(missionMap);
+    marker.on("click", (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      hideMissionCtx();
+      missionSelected = i;
+      paintMissionEditor();
+    });
+    marker.on("contextmenu", (ev) => {
+      L.DomEvent.stopPropagation(ev);
+      L.DomEvent.preventDefault(ev.originalEvent);
+      missionSelected = i;
+      showMissionCtx(ev.originalEvent.clientX, ev.originalEvent.clientY, it.lat, it.lon, i);
+      paintMissionEditor();
+    });
+    marker.on("dragend", async () => {
+      const p = marker.getLatLng();
+      missionItems[i].lat = p.lat;
+      missionItems[i].lon = p.lng;
+      missionDirty = true;
+      await refreshMissionAnalyse(i);
+    });
+    missionMarkers[i] = marker;
+    if (i > 0 && it.command === CMD_WAYPOINT && it.z !== -1) {
+      const ang = (((it.z % 360) + 360) % 360) * Math.PI / 180;
+      const len = 0.00012;
+      const tip = [it.lat + len * Math.cos(ang), it.lon + len * Math.sin(ang) / Math.cos(it.lat * Math.PI / 180)];
+      L.polyline([latlng, tip], { color: "#d62728", weight: 3 }).addTo(missionHeadingLayer);
+    }
+  }
+  paintRoverOnMap();
+  if (missionPlanMode === "relative") paintRelativePreview();
+}
+
+function paintRoverOnMap() {
+  if (!missionMap) return;
+  const gps = gpsLatLon();
+  if (!gps) {
+    if (missionRoverMarker) {
+      missionMap.removeLayer(missionRoverMarker);
+      missionRoverMarker = null;
+    }
+    return;
+  }
+  const hdg = state.gps && state.gps.GPI_hdg;
+  if (!missionRoverMarker) {
+    missionRoverMarker = L.marker(gps, { icon: roverIcon(hdg), zIndexOffset: 1000, interactive: false }).addTo(missionMap);
+  } else {
+    missionRoverMarker.setLatLng(gps);
+    missionRoverMarker.setIcon(roverIcon(hdg));
+  }
+}
+
+function showMissionCtx(x, y, lat, lon, seq) {
+  hideMissionCtx();
+  missionCtx = { x, y, lat, lon, seq };
+  const menu = document.getElementById("missionctx");
+  if (!menu) return;
+  menu.hidden = false;
+  menu.style.left = Math.min(window.innerWidth - 220, Math.max(8, x)) + "px";
+  menu.style.top = Math.min(window.innerHeight - 280, Math.max(8, y)) + "px";
+  const del = menu.querySelector("[data-act='delete']");
+  if (del) del.disabled = !(seq > 0);
+}
+
+function hideMissionCtx() {
+  missionCtx = null;
+  const menu = document.getElementById("missionctx");
+  if (menu) menu.hidden = true;
+}
+
+async function onMissionCtx(act) {
+  const ctx = missionCtx;
+  hideMissionCtx();
+  if (!ctx) return;
+  if (act === "add") {
+    if (ctx.seq != null) await insertMissionCommand(CMD_WAYPOINT, ctx.lat, ctx.lon, ctx.seq);
+    else await addMissionAt(ctx.lat, ctx.lon, CMD_WAYPOINT);
+  }
+  else if (act === "loiter") await insertMissionCommand(CMD_LOITER_UNLIM, ctx.lat, ctx.lon, ctx.seq);
+  else if (act === "loiter-time") await insertMissionCommand(CMD_LOITER_TIME, ctx.lat, ctx.lon, ctx.seq);
+  else if (act === "rtl") await insertMissionCommand(CMD_RTL, ctx.lat, ctx.lon, ctx.seq);
+  else if (act === "jump") await insertMissionCommand(CMD_DO_JUMP, ctx.lat, ctx.lon, ctx.seq);
+  else if (act === "delete") await deleteMissionSeq(ctx.seq);
+  else if (act === "here") {
+    const gps = gpsLatLon();
+    if (gps) await addMissionAt(gps[0], gps[1], CMD_WAYPOINT);
+  }
+  else if (act === "clear") await clearMissionLocal();
+}
+
+function paintMissionEditor(opts = {}) {
+  const status = document.getElementById("missionstatus");
+  if (!status && page === "editor-missao") return;
+  if (page !== "editor-missao") return;
+  const dirty = document.getElementById("missiondirty");
+  const stats = document.getElementById("missionstats");
+  if (dirty) dirty.textContent = missionDirty ? "alterações locais não enviadas" : "";
+  if (stats) {
+    const total = missionStats.total_m || 0;
+    const n = missionStats.waypoints || 0;
+    stats.textContent = missionItems.length
+      ? `${missionItems.length} itens · ${n} pontos · ${total.toFixed(1)} m`
+      : "sem missão";
+  }
+  const list = document.getElementById("missionlist");
+  if (list) {
+    if (!missionItems.length) {
+      list.innerHTML = `<p class="paramcount">Nova missão, baixe do rover ou abra um .waypoints. Clique no mapa para adicionar WAYPOINT (Alt/rumo = −1).</p>`;
+    } else {
+      list.innerHTML = missionItems.map((it, i) => {
+        const title = i === 0 ? "0 HOME" : `${it.seq} ${it.name || ("CMD_" + it.command)}`;
+        let rumo = "";
+        if (i > 0 && it.command === CMD_WAYPOINT) {
+          rumo = it.z === -1 ? "rumo −1" : `rumo ${Math.round((((it.z % 360) + 360) % 360))}°`;
+        }
+        const bits = [it.direction, rumo || it.effect, it.warn].filter(Boolean).join(" · ");
+        return `<button type="button" class="missionrow${i === missionSelected ? " on" : ""}${it.warn ? " warn" : ""}" data-seq="${i}">
+          <span class="missionrow-title">${escText(title)}</span>
+          <span class="missionrow-meta">${escText(bits)}</span>
+        </button>`;
+      }).join("");
+      const on = list.querySelector(".missionrow.on");
+      if (on) on.scrollIntoView({ block: "nearest" });
+    }
+  }
+  paintMissionDetail();
+  syncMissionMapLayers();
+  if (opts.fit) fitMissionBounds();
+}
+
+function paintMissionDetail() {
+  const box = document.getElementById("missioneditor");
+  const selLabel = document.getElementById("missionsel");
+  if (!box) return;
+  const i = missionSelected;
+  const it = i != null ? missionItems[i] : null;
+  if (!it) {
+    box.classList.add("off");
+    if (selLabel) selLabel.textContent = "Selecione um item";
+    box.querySelector("#missionfields").innerHTML = "";
+    drawMissionCompass(null, false);
+    return;
+  }
+  box.classList.remove("off");
+  if (selLabel) selLabel.textContent = i === 0 ? "HOME" : `${it.name} #${i}`;
+  const cmdEl = document.getElementById("missioncmd");
+  if (cmdEl) {
+    cmdEl.disabled = i === 0 || missionBusy;
+    const opts = missionCommands();
+    if (!cmdEl.dataset.ready && opts.length) {
+      cmdEl.innerHTML = opts.map((c) => `<option value="${c.id}">${c.name}</option>`).join("");
+      cmdEl.dataset.ready = "1";
+    }
+    cmdEl.value = String(it.command);
+  }
+  const fields = document.getElementById("missionfields");
+  const spec = missionCmdSpec(it.command);
+  const params = (spec && spec.params) || [];
+  const showLatLon = i === 0 || it.has_pos;
+  let html = "";
+  if (showLatLon) {
+    html += fieldRow("lat", "Lat", it.lat, 7);
+    html += fieldRow("lon", "Lon", it.lon, 7);
+  }
+  for (const p of params) {
+    // z em WAYPOINT = rumo (graus), nunca altitude neste rover.
+    html += fieldRow(p.key, p.label, it[p.key], p.key === "z" && it.command === CMD_WAYPOINT ? 1 : 4, p.hint);
+  }
+  fields.innerHTML = html;
+
+  const wpTools = document.getElementById("missionwptools");
+  const isWp = i > 0 && it.command === CMD_WAYPOINT;
+  if (wpTools) wpTools.hidden = !isWp;
+  const pass = document.getElementById("missionpass");
+  const rev = document.getElementById("missionrev");
+  const angle = document.getElementById("missionangle");
+  const revInfo = document.getElementById("missionrevinfo");
+  if (isWp) {
+    if (pass) pass.checked = it.z === -1;
+    if (angle) {
+      angle.value = it.z === -1 ? "" : String(Math.round((((it.z % 360) + 360) % 360)));
+      angle.disabled = it.z === -1 || missionBusy;
+    }
+    if (rev) rev.checked = !!it.reverse;
+    if (revInfo) {
+      const nxt = missionItems.findIndex((row, j) => j > i && row.command < 100);
+      revInfo.textContent = (nxt >= 0 && missionItems[nxt].reverse)
+        ? "próximo trecho de ré: rumo = traseira (+180)"
+        : "";
+    }
+    drawMissionCompass(it.z === -1 ? null : (((it.z % 360) + 360) % 360), true);
+  } else {
+    drawMissionCompass(null, false);
+  }
+}
+
+function fieldRow(key, label, value, digits, hint) {
+  const v = value == null ? "" : (Number.isFinite(Number(value))
+    ? String(Math.round(Number(value) * 10 ** digits) / 10 ** digits)
+    : "");
+  return `<label class="missionfield"><span>${escText(label)}${hint ? ` <em>${escText(hint)}</em>` : ""}</span>
+    <input id="missionf-${key}" data-key="${key}" type="number" step="any" value="${escText(v)}"></label>`;
+}
+
+function drawMissionCompass(angle, enabled) {
+  const canvas = document.getElementById("missioncompass");
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.min(canvas.clientWidth || 220, 260);
+  const pw = Math.max(1, Math.floor(size * dpr));
+  if (canvas.width !== pw || canvas.height !== pw) {
+    canvas.width = pw;
+    canvas.height = pw;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+  const c = size / 2;
+  const r = size / 2 - 28;
+  const fg = enabled ? cssVar("--ink") : cssVar("--muted");
+  ctx.strokeStyle = fg;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+  ctx.stroke();
+  for (let d = 0; d < 360; d += 15) {
+    const a = d * Math.PI / 180;
+    const r0 = r - (d % 90 === 0 ? 10 : d % 45 === 0 ? 6 : 3);
+    ctx.beginPath();
+    ctx.moveTo(c + r0 * Math.sin(a), c - r0 * Math.cos(a));
+    ctx.lineTo(c + r * Math.sin(a), c - r * Math.cos(a));
+    ctx.lineWidth = d % 45 === 0 ? 2 : 1;
+    ctx.stroke();
+  }
+  ctx.fillStyle = fg;
+  ctx.font = "bold 11px Segoe UI";
+  ctx.textAlign = "center";
+  ctx.fillText("N", c, c - r - 6);
+  if (enabled && angle != null) {
+    const a = angle * Math.PI / 180;
+    ctx.strokeStyle = "#d62728";
+    ctx.fillStyle = "#d62728";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(c, c);
+    ctx.lineTo(c + (r - 12) * Math.sin(a), c - (r - 12) * Math.cos(a));
+    ctx.stroke();
+    ctx.font = "bold 13px Segoe UI";
+    ctx.textAlign = "left";
+    ctx.fillText(`${Math.round(angle)}°`, 6, 16);
+  } else if (enabled) {
+    ctx.fillStyle = cssVar("--muted");
+    ctx.font = "13px Segoe UI";
+    ctx.textAlign = "center";
+    ctx.fillText("passa direto", c, c);
+  }
+}
+
+function onMissionCompassClick(ev) {
+  const canvas = document.getElementById("missioncompass");
+  const i = missionSelected;
+  if (!canvas || i == null || !missionItems[i] || missionItems[i].command !== CMD_WAYPOINT || i === 0) return;
+  if (missionItems[i].z === -1) return;
+  const rect = canvas.getBoundingClientRect();
+  const size = Math.min(rect.width, rect.height);
+  const c = size / 2;
+  const x = ev.clientX - rect.left;
+  const y = ev.clientY - rect.top;
+  let ang = Math.atan2(x - c, c - y) * 180 / Math.PI;
+  ang = ((ang % 360) + 360) % 360;
+  const step = ev.shiftKey ? 1 : 5;
+  ang = Math.round(ang / step) * step % 360;
+  setMissionZ(ang);
+}
+
+function renderMission() {
+  destroyMissionMap();
+  hideMissionCtx();
+  view.innerHTML = `
+    <div class="missionplan">
+      <aside class="mission-side">
+        <div class="mission-side-head">
+          <h1 class="page">Missão</h1>
+          <p class="last">Clique no mapa = WAYPOINT. Alt do WAYPOINT é <b>rumo</b> (−1 passa direto), como no mission_editor. Arraste marcadores; botão direito para Loiter/RTL/apagar.</p>
+        </div>
+        <div class="mission-toolbar">
+          <button type="button" class="missionact" id="missiondownload">Ler</button>
+          <button type="button" class="missionact" id="missionupload" data-danger="1">Escrever</button>
+          <button type="button" class="missionact missionlocal" id="missionnew">Nova</button>
+          <button type="button" class="missionact missionlocal" id="missionopen">Abrir</button>
+          <button type="button" class="missionact missionlocal" id="missionsave">Salvar</button>
+          <button type="button" class="missionact missionlocal" id="missionfit">Enquadrar</button>
+          <button type="button" class="missionact" id="missioncenter">Rover</button>
+          <button type="button" class="missionact missionlocal" id="missionallnext">Rumos→trecho</button>
+          <button type="button" class="missionact missionlocal" id="missionfix">Corrigir rumo</button>
+          <input id="missionfile" type="file" accept=".waypoints,.txt,text/plain" hidden>
+        </div>
+        <div class="mission-modes">
+          <button type="button" class="missionmode on" id="missionmodemap">Mapa</button>
+          <button type="button" class="missionmode" id="missionmoderel">Relativo</button>
+        </div>
+        <section class="missionbox" id="missionrelpanel" hidden>
+          <h2>Passo relativo</h2>
+          <p class="paramcount">A partir da origem: distância (m) + ângulo. Ex.: 1&nbsp;m à frente do rover, depois 2&nbsp;m a 90°.</p>
+          <div class="missionfields">
+            <label class="missionfield"><span>Origem</span>
+              <select id="missionrelsrc" class="mission-select">
+                <option value="rover">GPS do rover</option>
+                <option value="fixed">Origem fixa (capturada)</option>
+                <option value="last">Último WP / HOME</option>
+                <option value="selected">WP selecionado</option>
+              </select>
+            </label>
+            <label class="missionfield"><span>Ângulo relativo a</span>
+              <select id="missionrelref" class="mission-select">
+                <option value="rover">Frente do rover (0° = frente)</option>
+                <option value="north">Norte (0° = N)</option>
+                <option value="leg">Trecho / origem</option>
+              </select>
+            </label>
+            <label class="missionfield"><span>Distância <em>m</em></span>
+              <input id="missionreldist" type="number" step="0.1" min="0" value="1">
+            </label>
+            <label class="missionfield"><span>Ângulo <em>graus</em></span>
+              <input id="missionrelang" type="number" step="1" value="0">
+            </label>
+          </div>
+          <label class="missioncheck"><input type="checkbox" id="missionrelchain" checked> Depois do passo, origem = novo ponto</label>
+          <label class="missioncheck"><input type="checkbox" id="missionrelalign" checked> Alinhar rumo do WP anterior para este trecho</label>
+          <label class="missioncheck"><input type="checkbox" id="missionrelrumo"> Novo WP com rumo = ângulo do passo (senão −1)</label>
+          <p class="paramcount" id="missionrelinfo"></p>
+          <div class="mission-editor-actions">
+            <button type="button" class="missionact" id="missionrelcapture">Capturar origem no rover</button>
+            <button type="button" class="missionact missionlocal" id="missionrelpreview">Atualizar preview</button>
+            <button type="button" class="missionact missionlocal solid" id="missionreladd">Adicionar passo</button>
+          </div>
+        </section>
+        <p class="paramcount" id="missionstatus"></p>
+        <p class="paramcount" id="missiondirty"></p>
+        <p class="paramcount" id="missionstats"></p>
+        <div class="scriptxfer" id="missionxfer" hidden>
+          <div class="scriptxfer-label" id="missionxferlabel"></div>
+          <div class="scriptxfer-track" aria-hidden="true"><div class="scriptxfer-fill" id="missionxferfill"></div></div>
+          <div class="scriptxfer-meta" id="missionxfermeta"></div>
+        </div>
+        <div id="missionlist" class="missionlist"></div>
+        <section class="missionbox" id="missioneditor">
+          <div class="mission-editor-head">
+            <h2 id="missionsel"></h2>
+            <select id="missioncmd" class="mission-select"></select>
+          </div>
+          <div id="missionfields" class="missionfields"></div>
+          <div class="mission-editor-actions">
+            <button type="button" class="missionact missionlocal" id="missionapplyfields">Aplicar campos</button>
+            <button type="button" class="missionact missionlocal" id="missiondelitem">Apagar item</button>
+          </div>
+          <div id="missionwptools">
+            <label class="missioncheck"><input type="checkbox" id="missionpass"> Passa direto (rumo = −1)</label>
+            <label class="missioncheck"><input type="checkbox" id="missionrev"> Chegar de ré</label>
+            <p class="paramcount" id="missionrevinfo"></p>
+            <div class="ctrl">
+              <input id="missionangle" type="number" step="1" min="0" max="359" placeholder="rumo °">
+              <button type="button" class="missionact missionlocal" id="missionapply">Aplicar rumo</button>
+            </div>
+            <button type="button" class="missionact missionlocal" id="missionnextleg">Rumo do próximo trecho</button>
+            <canvas id="missioncompass" class="missioncanvas" width="220" height="220"></canvas>
+          </div>
+        </section>
+      </aside>
+      <div class="mission-mapwrap">
+        <div id="missionleaflet" class="mission-leaflet"></div>
+        <div class="mission-mapbar">
+          <span id="missioncursor">—</span>
+          <span class="mission-hint">clique = adicionar · arraste = mover · direito = menu</span>
+        </div>
+      </div>
+    </div>
+    <div id="missionctx" class="missionctx" hidden>
+      <button type="button" data-act="add">Inserir WAYPOINT</button>
+      <button type="button" data-act="loiter">Loiter aqui</button>
+      <button type="button" data-act="loiter-time">Loiter tempo</button>
+      <button type="button" data-act="rtl">RTL</button>
+      <button type="button" data-act="jump">DO_JUMP</button>
+      <button type="button" data-act="here">WP na posição do rover</button>
+      <button type="button" data-act="delete">Apagar WP</button>
+      <button type="button" data-act="clear">Limpar missão</button>
+    </div>`;
+
+  document.getElementById("missionfile").addEventListener("change", () => {
+    const input = document.getElementById("missionfile");
+    const f = input.files && input.files[0];
+    input.value = "";
+    if (f) importMissionFile(f);
+  });
+  const compass = document.getElementById("missioncompass");
+  if (compass) compass.addEventListener("pointerdown", onMissionCompassClick);
+  const angle = document.getElementById("missionangle");
+  if (angle) angle.addEventListener("keydown", (ev) => { if (ev.key === "Enter") applyMissionAngle(); });
+  const pass = document.getElementById("missionpass");
+  if (pass) pass.addEventListener("change", () => { if (pass.checked) setMissionZ(-1); else setMissionZ(0); });
+  const rev = document.getElementById("missionrev");
+  if (rev) rev.addEventListener("change", () => {
+    if (missionSelected == null) return;
+    missionEdit("/mission/rebuild", { seq: missionSelected, reverse: !!rev.checked });
+  });
+  document.getElementById("missionctx").addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-act]");
+    if (btn) onMissionCtx(btn.dataset.act);
+  });
+  for (const id of ["missionreldist", "missionrelang", "missionrelsrc", "missionrelref"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener("input", paintRelativePreview);
+    el.addEventListener("change", paintRelativePreview);
+  }
+  for (const id of ["missionreldist", "missionrelang"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") addRelativeStep();
+    });
+  }
+  document.addEventListener("click", hideMissionCtxOnOutside);
+  ensureMissionMap();
+  setMissionPlanMode(missionPlanMode);
+  paintMissionEditor({ fit: !!missionItems.length });
+}
+
+function hideMissionCtxOnOutside(ev) {
+  const menu = document.getElementById("missionctx");
+  if (!menu || menu.hidden) return;
+  if (menu.contains(ev.target)) return;
+  hideMissionCtx();
+}
+
 function renderProcesses() {
   const cards = (catalog.processes || []).map((p) => `
     <article class="card">
@@ -1679,6 +2918,106 @@ view.addEventListener("click", (ev) => {
     reboot.className = "cmd scriptact solid";
     return;
   }
+  if (ev.target.closest("#missiondownload")) {
+    const btn = ev.target.closest("#missiondownload");
+    if (!btn.disabled) downloadMission();
+    return;
+  }
+  if (ev.target.closest("#missionupload")) {
+    const btn = ev.target.closest("#missionupload");
+    if (!btn.disabled) {
+      if (confirm && confirm.el === btn && Date.now() < confirm.until) {
+        confirm = null;
+        btn.textContent = "Escrever";
+        btn.className = "missionact";
+        uploadMission();
+        return;
+      }
+      confirm = {
+        el: btn,
+        until: Date.now() + 4000,
+        label: "Escrever",
+        className: "missionact",
+      };
+      btn.textContent = "Substitui — confirmar";
+      btn.className = "missionact solid";
+    }
+    return;
+  }
+  if (ev.target.closest("#missionmodemap")) {
+    setMissionPlanMode("map");
+    return;
+  }
+  if (ev.target.closest("#missionmoderel")) {
+    setMissionPlanMode("relative");
+    return;
+  }
+  if (ev.target.closest("#missionrelcapture")) {
+    if (!ev.target.closest("#missionrelcapture").disabled) captureRelativeOriginFromRover();
+    return;
+  }
+  if (ev.target.closest("#missionrelpreview")) {
+    paintRelativePreview();
+    return;
+  }
+  if (ev.target.closest("#missionreladd")) {
+    if (!ev.target.closest("#missionreladd").disabled) addRelativeStep();
+    return;
+  }
+  if (ev.target.closest("#missionnew")) {
+    if (!ev.target.closest("#missionnew").disabled) newMission();
+    return;
+  }
+  if (ev.target.closest("#missionopen")) {
+    const input = document.getElementById("missionfile");
+    if (input && !missionBusy) input.click();
+    return;
+  }
+  if (ev.target.closest("#missionsave")) {
+    if (!ev.target.closest("#missionsave").disabled) exportMissionFile();
+    return;
+  }
+  if (ev.target.closest("#missionfit")) {
+    fitMissionBounds();
+    return;
+  }
+  if (ev.target.closest("#missioncenter")) {
+    const gps = gpsLatLon();
+    if (gps && missionMap) missionMap.setView(gps, Math.max(missionMap.getZoom(), 18));
+    return;
+  }
+  if (ev.target.closest("#missionallnext")) {
+    if (!ev.target.closest("#missionallnext").disabled) missionEdit("/mission/all-next");
+    return;
+  }
+  if (ev.target.closest("#missionfix")) {
+    if (!ev.target.closest("#missionfix").disabled) missionEdit("/mission/fix");
+    return;
+  }
+  if (ev.target.closest("#missionapply")) {
+    if (!ev.target.closest("#missionapply").disabled) applyMissionAngle();
+    return;
+  }
+  if (ev.target.closest("#missionapplyfields")) {
+    if (!ev.target.closest("#missionapplyfields").disabled) applyMissionFields();
+    return;
+  }
+  if (ev.target.closest("#missiondelitem")) {
+    if (!ev.target.closest("#missiondelitem").disabled) deleteMissionSeq(missionSelected);
+    return;
+  }
+  if (ev.target.closest("#missionnextleg")) {
+    if (!ev.target.closest("#missionnextleg").disabled) {
+      missionEdit("/mission/heading", { seq: missionSelected });
+    }
+    return;
+  }
+  const row = ev.target.closest("button.missionrow");
+  if (row) {
+    missionSelected = Number(row.dataset.seq);
+    paintMissionEditor();
+    return;
+  }
   const proc = ev.target.closest("button.proc");
   if (!proc || proc.disabled) return;
   if (confirm && confirm.el === proc && Date.now() < confirm.until) {
@@ -1699,12 +3038,18 @@ function route() {
   confirm = null;
   if (page !== "scripts") stopScriptXferPoll();
   if (page !== "logs") stopSdlogXferPoll();
+  if (page !== "editor-missao") {
+    stopMissionXferPoll();
+    destroyMissionMap();
+    document.removeEventListener("click", hideMissionCtxOnOutside);
+  }
   renderNav();
   if (!catalog) { view.textContent = "Carregando."; return; }
   if (page === "logs") renderLogs();
   else if (page === "mensagens") renderMessages();
   else if (page === "modos") renderModes();
   else if (page === "parametros") renderParametros();
+  else if (page === "editor-missao") renderMission();
   else if (page === "scripts") renderScripts();
   else if (page === "ensaios") renderProcesses();
   paint();
