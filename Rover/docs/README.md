@@ -106,11 +106,13 @@ O comportamento de cada um está em [esc_can.md](esc_can.md). Resumo:
 | `ESC_WT_BW` | 8 | Banda desejada do autotune, rad/s |
 | `ESC_CMD_L` `ESC_CMD_R` | 0 | Sem uso desde o `rover.lua` modular. Mantidos para a tabela não deslocar |
 | `ESC_CMD_SEQ` | 0 | Sem uso desde o `rover.lua` modular |
-| `ESC_STAT` | 0 | Bits: 1 CAN, 2 saturado, 4 tune rodando, 8 tune ok, 16 tune falhou, 32 patinação |
+| `ESC_STAT` | 0 | Bits: 1 CAN, 2 saturado, 4 tune rodando, 8 tune ok, 16 tune falhou, 32 patinação, 64 controle de tração |
 | `ESC_FR1` … `ESC_FR4` | 0 | Sem uso. Mantidos para a tabela não deslocar |
 | `ESC_P1` `ESC_I1` `ESC_FF1` … `P4` `I4` `FF4` | 0 | Ganhos da roda. 0 usa o compartilhado |
 | `ESC_GCS_HZ` | 4 | `NAMED_VALUE_FLOAT` para a estação de solo, Hz. 0 desliga |
 | `ESC_PREF` | 0,5 | Pré-filtro da referência, fração do tempo integral. 0 desliga |
+| `ESC_TC` | 1 | Controle de tração. Se uma roda de um lado gira solta (sem carga) enquanto a outra roda do mesmo lado segura o rover, limita a solta ao rpm da carregada + `ESC_TC_RPM` e deixa a carregada usar até `ESC_CUR` (em vez de `ESC_IMAX`). Entra com diferença maior que `ESC_TC_RPM` ou 30% do alvo por 150 ms; sai quando a carregada fica 1 s acima de 70% do alvo. Avisa `ESC: traction left/right: ESC n free, ESC m to 20A` e liga o bit 64 do `ESC_STAT`. Desligado com `ESC_RPM_AUX = 0` |
+| `ESC_TC_RPM` | 15 | Quanto a roda solta pode girar acima da carregada, rpm |
 | `ESC_RPM_AUX` | 1 | Liga os auxiliares configurados do controle de RPM. 0 contorna rampa, pré-filtro, restrição adicional de frenagem, boost de destravamento e dessaturação entre lados, preservando PID e limites absolutos de corrente. |
 
 ### `THRO_` — curso do mixer

@@ -4,7 +4,7 @@
 
 Driver Lua de ESC DJI C620 / motor M3508 para o ArduPilot Rover, sem firmware modificado. Versão marcada no código: `v2611o`.
 
-Até a versão `v2611o` era o script `esc_can.lua`. Agora é parte do `rover.lua` (ver [README](README.md#estrutura-dos-scripts)), dividido em `can_esc.lua` (barramento, saúde, pré-arm, `ESC_STAT`), `can_state.lua` (estado e parâmetros `ESC_`), `can_speed.lua` (PI de cada roda), `can_wheeltune.lua` (autotune de roda) e `can_report.lua` (log e telemetria), todos em `APM/scripts/modules`. O comportamento é o mesmo. O driver fala CAN com os ESCs, fecha um PI de velocidade em cada roda e publica o estado para o mixer e para a estação de solo.
+Até a versão `v2611o` era o script `esc_can.lua`. A `v2611p` acrescenta o controle de tração por lado (`ESC_TC`, `ESC_TC_RPM`; ver o [README](README.md)). Agora é parte do `rover.lua` (ver [README](README.md#estrutura-dos-scripts)), dividido em `can_esc.lua` (barramento, saúde, pré-arm, `ESC_STAT`), `can_state.lua` (estado e parâmetros `ESC_`), `can_speed.lua` (PI de cada roda), `can_wheeltune.lua` (autotune de roda) e `can_report.lua` (log e telemetria), todos em `APM/scripts/modules`. O comportamento é o mesmo. O driver fala CAN com os ESCs, fecha um PI de velocidade em cada roda e publica o estado para o mixer e para a estação de solo.
 
 ## O que ele faz
 

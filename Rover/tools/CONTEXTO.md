@@ -38,7 +38,7 @@ Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da
 | `modules/rover_common.lua` | Constantes, utilitários e a tabela `R` compartilhada (`R.pwm`, `R.can`, `R.mixer`) |
 | `modules/mixer.lua` | Modos, alocação L/R, `THRO_`, `MIXER_`, Circle tune |
 | `modules/out_pwm.lua` | Saída PWM (MAIN 1..4), kick de yaw, `THRO_MIN_LUA` |
-| `modules/can_esc.lua` + `can_state`, `can_speed`, `can_wheeltune`, `can_report` | Driver C620 (v2611o): barramento e saúde; estado/`ESC_`; PI de rpm por roda; WheelTune por degrau; log/telemetria |
+| `modules/can_esc.lua` + `can_state`, `can_speed`, `can_wheeltune`, `can_report` | Driver C620 (v2611p; controle de tração `ESC_TC` em `can_speed`, cenários `tc`/`tc0` no simulador): barramento e saúde; estado/`ESC_`; PI de rpm por roda; WheelTune por degrau; log/telemetria |
 | `modules/yaw_align.lua` / `yaw_tune.lua` | Alinhamento de proa no waypoint / relé de yaw |
 | `modules/gain_banks.lua` | Bancos `CANT_` |
 | `modules/quicktune.lua` + `quicktune_params.lua` | QuickTune do ArduPilot (ajusta `ATC_*`); os parâmetros `RTUN_` ficam no `quicktune_params` (boot) |

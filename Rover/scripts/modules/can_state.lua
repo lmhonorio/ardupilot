@@ -12,7 +12,7 @@ local C = {}
 
 local K = {
   -- Shown in "ESC: ready" so a test can confirm which file is on the SD card
-  VERSION = "v2611o",
+  VERSION = "v2611p",
   NUM_ESC = 4,
   MAX_FB = 8,
   CMD_ID = 0x200,
@@ -40,6 +40,17 @@ local K = {
   REST_CMD = 0.004,
   -- Share of the stall boost removed once the wheel breaks free
   STALL_RELEASE = 0.7,
+  -- Traction control (ESC_TC): a wheel faster than the other wheel of its side
+  -- by more than ESC_TC_RPM or TC_SPREAD of the target (the larger), for
+  -- TC_DETECT_MS, is free; the control ends when the loaded wheel reaches
+  -- TC_RELEASE of the side target
+  TC_DETECT_MS = 150,
+  TC_SPREAD = 0.3,
+  TC_RELEASE = 0.7,
+  -- The loaded wheel must stay above TC_RELEASE this long before the control
+  -- ends: right after the full current it often drops back and stalls again
+  TC_RELEASE_MS = 1000,
+  TC_WARN_MS = 3000,
   HOLD_MODE = 4,
   WHEEL_TUNE_SELECTOR = 4,
   BRK_SELECTOR = 5,
@@ -61,6 +72,7 @@ local K = {
   STAT_TUNE_OK = 8,
   STAT_TUNE_FAIL = 16,
   STAT_SLIP = 32,
+  STAT_TC = 64,
   PARAM_KEY = 74,
   PREFIX = "ESC_",
   TELEM_CURRENT = 1 << 3,
@@ -130,6 +142,23 @@ local PARAM_SPEC = {
     // @User: Standard
   --]]
   { 47, "RPM_AUX", 1 },
+  --[[
+    // @Param: ESC_TC
+    // @DisplayName: Traction control
+    // @Description: When one wheel of a side spins free (lifted, no load) while the other wheel of the same side holds the rover, cap the free wheel at the loaded wheel's rpm plus ESC_TC_RPM and let the loaded wheel use up to ESC_CUR instead of ESC_IMAX. Ends when the loaded wheel reaches 70% of the side target. Off with ESC_RPM_AUX = 0.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Standard
+  --]]
+  { 48, "TC", 1 },
+  --[[
+    // @Param: ESC_TC_RPM
+    // @DisplayName: Traction control margin
+    // @Description: Wheel rpm the free wheel may run above the loaded wheel of its side. A difference larger than this, or than 30% of the side target, for 150 ms starts the traction control.
+    // @Units: rpm
+    // @Range: 2 100
+    // @User: Standard
+  --]]
+  { 49, "TC_RPM", 15 },
 }
 
 local MAV_SEVERITY = R.MAV_SEVERITY
@@ -326,6 +355,9 @@ local M = {
     fast = {},
     raw = { 0, 0, 0, 0, 0, 0, 0, 0 },
     goals = { 0, 0 },
+    -- Wheel index (0-based) of the slowest / fastest wheel of each side
+    lag_i = { 0, 0 },
+    fast_i = { 0, 0 },
   },
 }
 
@@ -426,6 +458,7 @@ local function reset_control()
     fb.ref_f = 0
     fb.target_rpm = 0
     fb.saturated = false
+    fb.tc_full = false
   end
 end
 

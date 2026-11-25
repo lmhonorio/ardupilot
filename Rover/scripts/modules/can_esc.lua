@@ -362,6 +362,9 @@ function M.publish_stat()
   if C.slip_active then
     stat = stat | K.STAT_SLIP
   end
+  if C.tc_active then
+    stat = stat | K.STAT_TC
+  end
   if stat ~= C.published_stat then
     C.published_stat = stat
     set_param("STAT", stat)

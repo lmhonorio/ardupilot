@@ -110,6 +110,8 @@ local function wheel_pi(i, target, dt, k)
     kff = k.kff
   end
   local err = target - fb.wheel_rpm
+  -- Traction control lifts this wheel's integrator limit to the full current
+  local imax = fb.tc_full and k.max_current or k.imax
   -- Stall boost: a wheel asked to move but still stopped (static friction,
   -- or the scrub of a pivot turn) gets its integrator raised at ESC_STALL A/s
   -- until it breaks away. The plain integrator needed about 1 s to reach the
@@ -121,12 +123,12 @@ local function wheel_pi(i, target, dt, k)
       math.abs(fb.wheel_rpm) < math.min(K.MOVING_RPM, math.max(K.STALL_NOISE_RPM, 0.5 * math.abs(target))) then
     local add = (target > 0 and 1 or -1) * k.stall * dt
     local before = fb.integrator
-    fb.integrator = constrain(fb.integrator + add, -k.imax, k.imax)
+    fb.integrator = constrain(fb.integrator + add, -imax, imax)
     fb.boost = (fb.boost or 0) + (fb.integrator - before)
   elseif fb.boost ~= nil and fb.boost ~= 0 then
     -- Broke free: moving friction is below the breakaway current, so hand
     -- back part of the boost or the wheel jumps well past a slow target
-    fb.integrator = constrain(fb.integrator - K.STALL_RELEASE * fb.boost, -k.imax, k.imax)
+    fb.integrator = constrain(fb.integrator - K.STALL_RELEASE * fb.boost, -imax, imax)
     fb.boost = 0
   end
   local derivative = 0
@@ -139,7 +141,7 @@ local function wheel_pi(i, target, dt, k)
   local unsat = ff + kp * err + fb.integrator + derivative
   local saturated = (unsat >= hi and err > 0) or (unsat <= lo and err < 0)
   if not saturated then
-    fb.integrator = constrain(fb.integrator + ki * err * dt, -k.imax, k.imax)
+    fb.integrator = constrain(fb.integrator + ki * err * dt, -imax, imax)
   end
   fb.saturated = (unsat > k.max_current and err > 0) or (unsat < -k.max_current and err < 0)
   return constrain(ff + kp * err + fb.integrator + derivative, lo, hi)
@@ -216,6 +218,8 @@ local function read_gains(now)
   cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
   cached.pref = constrain(g("PREF"), 0, 2)
   cached.stall = constrain(g("STALL"), 0, 200)
+  cached.tc = g("TC") >= 0.5
+  cached.tc_rpm = constrain(g("TC_RPM"), 2, 100)
   -- Override the effective cache only; preserve the individual saved settings.
   -- Keep logging/zero-rpm hold bits of ESC_OPT and all hard current/safety limits.
   if g("RPM_AUX") < 0.5 then
@@ -224,6 +228,7 @@ local function read_gains(now)
     cached.brake = false
     cached.stall = 0
     cached.opt = cached.opt & (~4)
+    cached.tc = false
   end
   return cached
 end
@@ -252,6 +257,62 @@ function M.check_slip(k, now, enabled)
   C.slip_active = any
 end
 
+--[[
+Traction control, per side (ESC_TC). Both wheels of a side get the same
+target. When one turns faster than the other by more than ESC_TC_RPM or
+K.TC_SPREAD of the target (the larger) for K.TC_DETECT_MS, it is free (lifted, no load) and the other holds the rover:
+the free wheel is capped at the loaded wheel's rpm + ESC_TC_RPM, and the
+loaded wheel may use up to ESC_CUR. It ends when the loaded wheel stays at
+K.TC_RELEASE of the target for K.TC_RELEASE_MS, the target drops under
+5 rpm, or ESC_TC = 0.
+lag / fast are the slowest / fastest wheel speed in the target's direction.
+--]]
+function M.traction(k, now, goals, count, lag, fast, lag_i, fast_i)
+  local any = false
+  for s = 1, 2 do
+    local sd = side[s]
+    local goal = math.abs(goals[s])
+    if k.tc and count[s] == 2 and goal >= K.MOVING_RPM and lag[s] ~= nil and fast[s] ~= nil then
+      if not sd.tc then
+        if fast[s] - lag[s] > math.max(k.tc_rpm, K.TC_SPREAD * goal) and lag[s] < K.TC_RELEASE * goal then
+          sd.tc_since = sd.tc_since or now
+          if now - sd.tc_since >= K.TC_DETECT_MS then
+            sd.tc = true
+            if now - (sd.tc_warn_ms or -K.TC_WARN_MS) >= K.TC_WARN_MS then
+              sd.tc_warn_ms = now
+              gcs:send_text(MAV_SEVERITY.WARNING, string.format("ESC: traction %s: ESC %d free, ESC %d to %.0fA",
+                s == 1 and "left" or "right", fast_i[s] + 1, lag_i[s] + 1, k.max_current))
+            end
+          end
+        else
+          sd.tc_since = nil
+        end
+      elseif lag[s] >= K.TC_RELEASE * goal then
+        sd.tc_free_ms = sd.tc_free_ms or now
+        if now - sd.tc_free_ms >= K.TC_RELEASE_MS then
+          sd.tc = false
+          sd.tc_since = nil
+          sd.tc_free_ms = nil
+        end
+      else
+        sd.tc_free_ms = nil
+      end
+    else
+      sd.tc = false
+      sd.tc_since = nil
+      sd.tc_free_ms = nil
+    end
+    if sd.tc then
+      -- The faster wheel is the free one this cycle; the cap keeps it just
+      -- above the loaded one, so the roles do not swap
+      sd.tc_free = fast_i[s]
+      sd.tc_lag = lag[s]
+      any = true
+    end
+  end
+  C.tc_active = any
+end
+
 function M.run_control()
   local now_us = micros()
   local dt = 0.01
@@ -263,6 +324,8 @@ function M.run_control()
 
   local k = read_gains(now)
   local hold_disarmed = (k.opt & 2) ~= 0
+  -- Set again by M.traction() when the speed loop runs this cycle
+  C.tc_active = false
   local armed = arming:is_armed()
   local safety_live = not SRV_Channels:get_safety_state()
   local estop = SRV_Channels:get_emergency_stop()
@@ -277,6 +340,8 @@ function M.run_control()
   local count = scratch.count
   local lag = scratch.lag
   local fast = scratch.fast
+  local lag_i = scratch.lag_i
+  local fast_i = scratch.fast_i
   sum[1], sum[2] = 0, 0
   count[1], count[2] = 0, 0
   lag[1], lag[2] = nil, nil
@@ -292,9 +357,11 @@ function M.run_control()
       local progress = (cmd >= 0) and fb.wheel_rpm or -fb.wheel_rpm
       if lag[s] == nil or progress < lag[s] then
         lag[s] = progress
+        lag_i[s] = i
       end
       if fast[s] == nil or progress > fast[s] then
         fast[s] = progress
+        fast_i[s] = i
       end
     end
   end
@@ -342,6 +409,7 @@ function M.run_control()
     side[2].saturated = false
     for i = 0, K.MAX_FB - 1 do
       local fb = esc[i + 1]
+      fb.tc_full = false
       if fb.detected then
         fb.current_a = constrain(wheel_currents[i + 1], -k.max_current, k.max_current)
         raw[i + 1] = direction(i) * fb.current_a * K.RAW_PER_AMP
@@ -368,12 +436,28 @@ function M.run_control()
       side[s].saturated = false
       side[s].target_rpm = goals[s]
     end
+    M.traction(k, now, goals, count, lag, fast, lag_i, fast_i)
     for i = 0, K.MAX_FB - 1 do
       local fb = esc[i + 1]
       if fb.detected then
         local s = side_of(i)
         local sd = side[s]
-        profile_wheel(i, goals[s], dt)
+        local wgoal = goals[s]
+        fb.tc_full = false
+        if sd.tc then
+          if i == sd.tc_free then
+            -- Free wheel: no faster than the loaded wheel plus the margin
+            local sgn = (wgoal >= 0) and 1 or -1
+            local cap = math.max(sd.tc_lag, 0) + k.tc_rpm
+            if cap < math.abs(wgoal) then
+              wgoal = sgn * cap
+            end
+          else
+            -- Loaded wheel: may use the whole ESC_CUR
+            fb.tc_full = true
+          end
+        end
+        profile_wheel(i, wgoal, dt)
         -- Below 0.004 (0.5 rpm at ESC_RPM 120) the side is at rest; a slow yaw
         -- correction (1-3 rpm) must still be driven, not coasted
         local at_rest = math.abs(sd.interp_value) < K.REST_CMD and math.abs(fb.ref_rpm) < K.MOVING_RPM

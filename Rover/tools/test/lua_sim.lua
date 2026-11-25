@@ -90,6 +90,9 @@ end
 if SCENARIO == "pwm" then
   SAVED.ESC_CAN = 0
 end
+if SCENARIO == "tc0" then
+  SAVED.ESC_TC = 0
+end
 
 local param = {}
 function param:add_table(key, prefix, n)
@@ -178,7 +181,13 @@ for i = 1, 4 do
   W[i] = { rpm = 0, cur = 0, cmd = 0, temp = 30 }
 end
 local KV = { 30, 34, 28, 32 }
-local FRIC_A = 2.0
+local FRIC = { 2.0, 2.0, 2.0, 2.0 }
+-- Rover hung on a diagonal: wheels 1 and 3 hold it (19 A to break free),
+-- 2 and 4 hang in the air (light and free)
+if SCENARIO == "tc" or SCENARIO == "tc0" then
+  FRIC = { 19.0, 0.3, 19.0, 0.3 }
+  KV = { 30, 150, 28, 150 }
+end
 local VISC = 0.02
 local GEAR = 19.2032
 local LEFT = { [1] = true, [4] = true } -- ESC_LMASK = 9
@@ -257,12 +266,13 @@ local function plant_step(dt)
     end
     w.cur = w.cur + (target - w.cur) * math.min(1, dt / 0.004)
     local fric = 0
+    local fa = FRIC[i]
     if math.abs(w.rpm) > 0.5 then
-      fric = (w.rpm > 0) and FRIC_A or -FRIC_A
-    elseif math.abs(w.cur) <= FRIC_A then
+      fric = (w.rpm > 0) and fa or -fa
+    elseif math.abs(w.cur) <= fa then
       fric = w.cur
     else
-      fric = (w.cur > 0) and FRIC_A or -FRIC_A
+      fric = (w.cur > 0) and fa or -fa
     end
     w.rpm = w.rpm + KV[i] * (w.cur - fric - VISC * w.rpm) * dt
   end
@@ -503,48 +513,67 @@ end
 local MODE = { MANUAL = 0, ACRO = 1, STEERING = 3, HOLD = 4, CIRCLE = 9, AUTO = 10 }
 local scenario_end
 
-at(6000, function() V.armed = true end)
-at(7000, function() V.rc[3] = 1250 V.rc[1] = 1580 end)    -- forward + right
-at(9000, function() V.rc[3] = 1700 V.rc[1] = 1500 end)    -- backward
-at(10500, function() V.rc[3] = 1500 V.rc[1] = 1500 end)   -- centred
--- AUTO with a pass-through waypoint, then a yaw alignment to 90 deg
-at(12000, function()
-  V.items = { [1] = { 16, -1 }, [2] = { 16, 90 }, [3] = { 16, -1 } }
-  V.nav_idx = 1
-  V.mode = MODE.AUTO
-end)
-at(15000, function() V.nav_idx = 2 end)
-at(19000, function() V.nav_idx = 3 end)
--- wheel step tune (CAN only): chosen while disarmed, as on the rover (the
--- tune module loads only while disarmed), then armed in HOLD
-at(44000, function()
-  V.armed = false
-  V.mode = MODE.HOLD
-  V.thr_out, V.str_out = 0, 0
-  if SCENARIO == "can" then PV.SCR_USER1 = 4 end
-  if SCENARIO == "can5" then PV.SCR_USER1 = 5 end
-end)
-at(45000, function() V.armed = true end)
--- yaw relay tune in HOLD
-at(80000, function() PV.SCR_USER1 = 0 end)
-at(81000, function() PV.SCR_USER1 = 2 end)
--- QuickTune in Circle: selected while disarmed, then armed
-at(198000, function()
-  V.armed = false
-  PV.SCR_USER1 = 1
-end)
-at(200000, function()
-  V.armed = true
-  V.mode = MODE.CIRCLE
-end)
--- Circle relay tune
-at(260000, function() PV.SCR_USER1 = 3 end)
-at(300000, function()
-  PV.SCR_USER1 = 0
-  V.mode = MODE.MANUAL
-end)
-at(302000, function() V.armed = false end)
-scenario_end = 306000
+local function main_scenario()
+  at(6000, function() V.armed = true end)
+  at(7000, function() V.rc[3] = 1250 V.rc[1] = 1580 end)    -- forward + right
+  at(9000, function() V.rc[3] = 1700 V.rc[1] = 1500 end)    -- backward
+  at(10500, function() V.rc[3] = 1500 V.rc[1] = 1500 end)   -- centred
+  -- AUTO with a pass-through waypoint, then a yaw alignment to 90 deg
+  at(12000, function()
+    V.items = { [1] = { 16, -1 }, [2] = { 16, 90 }, [3] = { 16, -1 } }
+    V.nav_idx = 1
+    V.mode = MODE.AUTO
+  end)
+  at(15000, function() V.nav_idx = 2 end)
+  at(19000, function() V.nav_idx = 3 end)
+  -- wheel step tune (CAN only): chosen while disarmed, as on the rover (the
+  -- tune module loads only while disarmed), then armed in HOLD
+  at(44000, function()
+    V.armed = false
+    V.mode = MODE.HOLD
+    V.thr_out, V.str_out = 0, 0
+    if SCENARIO == "can" then PV.SCR_USER1 = 4 end
+    if SCENARIO == "can5" then PV.SCR_USER1 = 5 end
+  end)
+  at(45000, function() V.armed = true end)
+  -- yaw relay tune in HOLD
+  at(80000, function() PV.SCR_USER1 = 0 end)
+  at(81000, function() PV.SCR_USER1 = 2 end)
+  -- QuickTune in Circle: selected while disarmed, then armed
+  at(198000, function()
+    V.armed = false
+    PV.SCR_USER1 = 1
+  end)
+  at(200000, function()
+    V.armed = true
+    V.mode = MODE.CIRCLE
+  end)
+  -- Circle relay tune
+  at(260000, function() PV.SCR_USER1 = 3 end)
+  at(300000, function()
+    PV.SCR_USER1 = 0
+    V.mode = MODE.MANUAL
+  end)
+  at(302000, function() V.armed = false end)
+  scenario_end = 306000
+end
+
+-- Rover hung on a diagonal (see FRIC / KV): slow forward stick for 10 s.
+-- The trace gets wheel rpm and current every 500 ms.
+local function traction_scenario()
+  at(6000, function() V.armed = true end)
+  at(7000, function() V.rc[3] = 1382 end) -- slow forward, about 25 rpm target
+  at(17000, function() V.rc[3] = 1500 end)
+  at(19000, function() V.armed = false end)
+  scenario_end = 20000
+end
+
+local TRACTION = SCENARIO == "tc" or SCENARIO == "tc0"
+if TRACTION then
+  traction_scenario()
+else
+  main_scenario()
+end
 
 local ei = 1
 local PLANT_DT = 0.001
@@ -558,6 +587,10 @@ while T <= scenario_end do
     auto_outputs()
   end
   plant_step(PLANT_DT)
+  if TRACTION and T % 500 == 0 then
+    trace("W rpm %6.1f %6.1f %6.1f %6.1f  A %5.1f %5.1f %5.1f %5.1f", W[1].rpm, W[2].rpm, W[3].rpm, W[4].rpm,
+      W[1].cur, W[2].cur, W[3].cur, W[4].cur)
+  end
   for _, t in ipairs(tasks) do
     if not t.dead and T >= t.due then
       run_task(t)
