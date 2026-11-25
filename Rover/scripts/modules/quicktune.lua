@@ -16,7 +16,23 @@ CRUISE_THROTTLE
 
 See the accompanying rover-quiktune.md file for instructions on how to use
 
+Module of rover.lua (Rover/scripts/modules/quicktune.lua): rover.lua calls
+QT.step() at 40 Hz while tuning and 10 Hz while idle.
+
 --]]
+
+if ... == nil then
+  return
+end
+
+-- Module of rover.lua: these were globals of the stand-alone script. As locals
+-- they cannot collide with the other modules sharing the script environment.
+local bind_param, bind_add_param, get_time, init_params_tables, reset_axes_done
+local get_all_params, restore_all_params, save_all_params, setup_filters
+local save_gcs_pid_mask, restore_gcs_pid_mask, setup_gcs_pid_mask, have_pilot_input
+local get_current_axis, get_slew_rate, advance_axis, adjust_gain, write_log
+local init_steering_ff, update_steering_ff, init_speed_ff, update_speed_ff, update
+local quicktune_started, axis
 
 ---@diagnostic disable: param-type-mismatch
 ---@diagnostic disable: need-check-nil
@@ -810,19 +826,22 @@ function update()
   end
 end
 
--- wrapper around update(). This calls update() at 10Hz,
--- and if update faults then an error is displayed, but the script is not
--- stopped
-function protected_wrapper()
+--[[
+One QuickTune cycle for the scheduler in rover.lua. A fault is reported and
+the next cycle comes 1 s later, so the console is not flooded; the tune goes on.
+-- @return delay to the next cycle, ms
+--]]
+local QT = {}
+function QT.step()
   local success, err = pcall(update)
   if not success then
     gcs:send_text(MAV_SEVERITY.CRITICAL, "RTun: Internal Error: " .. err)
-    -- when we fault we run the update function again after 1s, slowing it
-    -- down a bit so we don't flood the console with errors
-    return protected_wrapper, 1000
+    return 1000
   end
-  return protected_wrapper, 1000 / (quicktune_active and UPDATE_RATE_HZ or IDLE_RATE_HZ)
+  return 1000 / (quicktune_active and UPDATE_RATE_HZ or IDLE_RATE_HZ)
 end
 
--- start running update loop
-return protected_wrapper()
+-- The stand-alone script ran its first cycle at load
+QT.FIRST_DELAY_MS = 0
+
+return QT

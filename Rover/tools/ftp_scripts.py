@@ -6,7 +6,7 @@ arquivo pelo CRC da propria placa.
   python ftp_scripts.py              # envia o que mudou em Rover/scripts
   python ftp_scripts.py --check      # so compara, nao envia
   python ftp_scripts.py --all        # envia tudo, mesmo o que ja esta igual
-  python ftp_scripts.py rover-controlallocation.lua   # so estes arquivos
+  python ftp_scripts.py modules/mixer.lua    # so estes arquivos
 
 Feche o esc_monitor.py, o mission_editor.py e o mav_param.py antes (mesma porta
 UDP 14550). O Mission Planner pode ficar aberto.
@@ -18,6 +18,11 @@ resposta de um pedido repetido sem refazer a operacao), respostas duplicadas
 sao ignoradas, e o arquivo vai primeiro para um nome .tmp. So depois que o CRC
 do .tmp na placa bate com o do PC ele troca de nome para o .lua; o .lua antigo
 fica intacto se algo falhar. No fim o CRC do .lua final e conferido de novo.
+
+Desde a versao modular so existe um script, rover.lua; o resto fica em
+modules/. Os scripts antigos (esc_can.lua, rover-controlallocation.lua,
+rover-quicktune.lua) sao apagados da placa: com eles la, o rover.lua nao
+inicia (os dois mexeriam nos mesmos motores). --keep-old deixa de apagar.
 
 O script que esta rodando continua na memoria: os novos so valem depois de
 reiniciar a placa ou de "Restart Scripting" (MP > Config > MAVFtp / mensagens).
@@ -47,6 +52,9 @@ ERR = {0: "nenhum", 1: "falha", 2: "erro do SD (errno)", 3: "tamanho invalido", 
        9: "protegido", 10: "nao encontrado"}
 CHUNK = 239        # data bytes per FILE_TRANSFER_PROTOCOL packet
 SESSION = 7
+
+# Stand-alone scripts replaced by rover.lua + modules/; never leave them on the board
+OBSOLETE = ["esc_can.lua", "rover-controlallocation.lua", "rover-quicktune.lua"]
 
 SCRIPTS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 
@@ -224,6 +232,8 @@ def main():
     ap.add_argument("--dest", default="/APM/scripts", help="pasta na placa")
     ap.add_argument("--check", action="store_true", help="so compara PC x placa")
     ap.add_argument("--all", action="store_true", help="envia mesmo os iguais")
+    ap.add_argument("--keep-old", action="store_true",
+                    help="nao apaga da placa os scripts antigos (%s)" % ", ".join(OBSOLETE))
     ap.add_argument("--tries", type=int, default=4, help="tentativas por arquivo")
     ap.add_argument("--timeout", type=float, default=0.6, help="espera por resposta (s) antes de repetir")
     args = ap.parse_args()
@@ -254,7 +264,12 @@ def main():
         if args.all or state != "igual":
             plan.append((local, remote))
 
-    if args.check or not plan:
+    dest = args.dest.rstrip("/")
+    old_on_board = [dest + "/" + n for n in OBSOLETE if ftp.crc(dest + "/" + n) is not None]
+    for r in old_on_board:
+        print("%-34s %10s  %s" % (r.rsplit("/", 1)[1], "", "ANTIGO: impede o rover.lua de iniciar"))
+
+    if args.check or (not plan and (args.keep_old or not old_on_board)):
         if not plan:
             print("Tudo igual na placa; nada a enviar.")
         return 0
@@ -267,6 +282,13 @@ def main():
         print("%s -> %s" % (os.path.relpath(local, SCRIPTS_DIR), remote))
         if not upload_one(ftp, local, remote, args.tries):
             failed.append(remote)
+    if old_on_board and not args.keep_old:
+        if failed:
+            print("Scripts antigos mantidos: houve falha no envio dos novos.")
+        else:
+            for r in old_on_board:
+                ftp.remove(r)
+                print("apagado %s" % r)
     print("Pedidos repetidos pela perda de pacotes: %d" % ftp.resent)
     if failed:
         print("FALHARAM (o arquivo antigo da placa continua la): " + ", ".join(failed))

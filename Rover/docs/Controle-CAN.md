@@ -2,7 +2,9 @@
 
 Índice da pasta: [README](README.md).
 
-> O driver em `esc_can.lua` fecha um PI em cada roda (`ESC_P1..4`, `ESC_I1..4`, `ESC_FF1..4`). O procedimento de campo está em `Autotunning.md`. O restante deste arquivo descreve o desenho anterior (PI de lado + correção local).
+> Nomes de arquivo deste documento são os da época: hoje `esc_can.lua` é o driver em `modules/can_*.lua` e `rover-controlallocation.lua` é `modules/mixer.lua` com `yaw_align.lua`, `yaw_tune.lua` e `gain_banks.lua`, todos carregados pelo `rover.lua` (ver [README](README.md#estrutura-dos-scripts)). O mixer chama o driver direto, sem os parâmetros `ESC_CMD_*`.
+>
+> O driver fecha um PI em cada roda (`ESC_P1..4`, `ESC_I1..4`, `ESC_FF1..4`). O procedimento de campo está em `Autotunning.md`. O restante deste arquivo descreve o desenho anterior (PI de lado + correção local).
 
 Esquema de como o rover deve passar do acionamento PWM atual para um acionamento CAN com **referência de velocidade por roda** e **realimentação do encoder de cada roda**, mantendo a mesma lógica de alto nível (mixer, missões, autotunes) que já funciona em PWM.
 

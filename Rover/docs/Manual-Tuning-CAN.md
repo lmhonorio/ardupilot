@@ -12,15 +12,23 @@ Em `APM/scripts/`:
 
 | Arquivo | Obrigatório |
 |---|---|
-| `esc_can.lua` | sim (CAN) |
-| `rover-controlallocation.lua` | sim |
-| `rover-quicktune.lua` | sim (QuickTune) |
+| `rover.lua` | sim (o único script; carrega os módulos) |
+| `modules/rover_common.lua` | sim |
+| `modules/mixer.lua` | sim (modos e alocação) |
+| `modules/gain_banks.lua` | sim |
+| `modules/yaw_align.lua` | sim (alinhamento no waypoint) |
+| `modules/yaw_tune.lua` | sim (relé de yaw) |
+| `modules/quicktune.lua` | sim (QuickTune) |
+| `modules/circle-tune.lua` | sim (relé Circle) |
 | `modules/functions.lua` | sim |
 | `modules/autotune.lua` | sim |
 | `modules/pid.lua` | sim |
-| `modules/circle-tune.lua` | sim (Circle relay) |
+| `modules/out_pwm.lua` | caminho PWM (apague para rodar só em CAN) |
+| `modules/can_esc.lua`, `can_state.lua`, `can_speed.lua` | caminho CAN (apague todos os `can_*` para rodar só em PWM) |
+| `modules/can_wheeltune.lua` | autotune de roda (opcional) |
+| `modules/can_report.lua` | log, telemetria e valores ao vivo do CAN (opcional) |
 
-**Apague** qualquer `c620_can.lua` antigo. Reinicie a placa depois de copiar.
+**Apague** de `APM/scripts/` os scripts antigos `esc_can.lua`, `rover-controlallocation.lua`, `rover-quicktune.lua` e qualquer `c620_can.lua`: com eles no cartão o `rover.lua` não inicia e recusa o arm. O `tools/ftp_scripts.py` faz isso sozinho. Reinicie a placa depois de copiar.
 
 ---
 
@@ -46,7 +54,7 @@ Se os ESCs estão no **CAN2**: `CAN_P1_DRIVER=0`, `CAN_P2_DRIVER=1`, `CAN_D1_PRO
 |---|---|---|
 | `SCR_ENABLE` | 1 | |
 | `SCR_HEAP_SIZE` | **400000** (ou 500000) | Reinicie depois de mudar |
-| `SCR_VM_I_COUNT` | **100000** | Obrigatório; com 10000 o `esc_can.lua` estoura e é removido |
+| `SCR_VM_I_COUNT` | **100000** | Obrigatório; com 10000 o `rover.lua` estoura e é removido |
 | `SCR_USER1` | **0** | Seletor de tuning (sempre voltar a 0) |
 | `SCR_USER2` | (ganhos PWM de yaw P) | Não mexer à mão no CAN |
 | `SCR_USER3` | (ganhos PWM de yaw I) | Não mexer à mão no CAN |

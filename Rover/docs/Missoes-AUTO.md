@@ -1,6 +1,6 @@
 # Missões AUTO de frente e de ré
 
-Como montar missões no Mission Planner para este rover (mixer `rover-controlallocation.lua` + `esc_can.lua`).
+Como montar missões no Mission Planner para este rover (`rover.lua`: mixer em `modules/mixer.lua`, alinhamento em `modules/yaw_align.lua`, driver CAN em `modules/can_*.lua`).
 Verificado no código do ArduRover 4.5 e dos scripts em 19/11/2026.
 
 ## Como o AUTO chega às rodas

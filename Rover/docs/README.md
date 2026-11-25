@@ -4,12 +4,41 @@ Esta pasta é a documentação do rover. O GitHub mostra este arquivo ao abrir `
 
 | Documento | Conteúdo |
 | --- | --- |
-| [esc_can.md](esc_can.md) | O que `esc_can.lua` faz, cada variável, a lei de controle, o CAN do C620 e o autotune de roda |
+| [esc_can.md](esc_can.md) | O que o driver CAN (`modules/can_*.lua`) faz, cada variável, a lei de controle, o CAN do C620 e o autotune de roda |
 | [Manual-Tuning-CAN.md](Manual-Tuning-CAN.md) | Ordem de campo: parâmetros de base e cada autotune |
 | [Autotunning.md](Autotunning.md) | Guia de instalação, sintonia e operação em MANUAL e AUTO |
 | [Controle-CAN.md](Controle-CAN.md) | Arquitetura do mixer e do caminho CAN. A parte final ainda descreve o desenho antigo de PI por lado |
 
-Os scripts estão em `Rover/scripts/`. A lista oficial de cada parâmetro do firmware, com unidade e faixa, está em [Parameters do Rover](https://ardupilot.org/rover/docs/parameters.html). Abaixo está o resumo do que este veículo usa e dos grupos que o firmware declara.
+Os scripts estão em `Rover/scripts/` (estrutura abaixo). A lista oficial de cada parâmetro do firmware, com unidade e faixa, está em [Parameters do Rover](https://ardupilot.org/rover/docs/parameters.html). Abaixo está o resumo do que este veículo usa e dos grupos que o firmware declara.
+
+## Estrutura dos scripts
+
+Só existe um script na pasta principal: `rover.lua`. Ele carrega os módulos de `modules/` e roda as três tarefas (mixer, QuickTune e driver CAN) num agendador único. No cartão SD fica igual: `APM/scripts/rover.lua` e `APM/scripts/modules/*.lua`.
+
+| Módulo | Função |
+| --- | --- |
+| `rover_common.lua` | Constantes, utilitários e a tabela compartilhada onde os módulos se encontram |
+| `mixer.lua` | Modos de condução e alocação esquerda/direita; parâmetros `THRO_` e `MIXER_` |
+| `out_pwm.lua` | Saída **PWM** (MAIN 1..4), kick de yaw e `THRO_MIN_LUA` |
+| `can_esc.lua` | Driver **CAN** do C620: E/S do barramento, saúde, pré-arm, `ESC_STAT` |
+| `can_state.lua` | Estado e parâmetros `ESC_` do driver CAN |
+| `can_speed.lua` | PI de velocidade de cada roda (rampa, pré-filtro, frenagem, stall boost) |
+| `can_wheeltune.lua` | Autotune de roda por degrau, frente e ré (`SCR_USER1 = 4/5`) |
+| `can_report.lua` | Log `DJIC`, telemetria de ESC e valores ao vivo para a GCS |
+| `yaw_align.lua` | Alinhamento de proa no waypoint e sequência de verificação |
+| `yaw_tune.lua` | Autotune de yaw por relé (`SCR_USER1 = 2`) |
+| `quicktune.lua` | QuickTune do ArduPilot (`SCR_USER1 = 1`) |
+| `circle-tune.lua` | Relé de curva em Circle (`SCR_USER1 = 3`) |
+| `gain_banks.lua` | Bancos de ganho PWM/CAN (`CANT_`) |
+| `autotune.lua`, `pid.lua`, `functions.lua` | Relé, PID e funções comuns |
+
+**Tirar um caminho de saída:** apague do cartão `modules/out_pwm.lua` para rodar só em CAN, ou todos os `modules/can_*.lua` para rodar só em PWM. O `rover.lua` informa na inicialização quais caminhos carregou (`Rover r2611a: PWM yes, CAN yes`). `can_wheeltune.lua` e `can_report.lua` também podem sair sozinhos.
+
+**Scripts antigos:** `esc_can.lua`, `rover-controlallocation.lua` e `rover-quicktune.lua` não podem ficar em `APM/scripts` junto com o `rover.lua` (dois scripts mexeriam nos mesmos motores). Se algum for encontrado, o `rover.lua` não inicia nada e recusa o arm. O `tools/ftp_scripts.py` apaga esses arquivos ao enviar os novos.
+
+**Falhas:** um erro em uma tarefa não derruba as outras. Erro no mixer para as rodas e recusa o arm até reiniciar; o driver CAN, ao falhar, zera a corrente e recusa o arm; o QuickTune avisa e tenta de novo em 1 s.
+
+**Teste sem o rover:** `tools/test/lua_sim.lua` roda os scripts num simulador da API do ArduPilot (4 rodas, CAN e PWM) e grava um traço para comparar versões.
 
 ## Seletor `SCR_USER1`
 
@@ -18,31 +47,31 @@ Um valor por vez. O autotune que termina bem grava 0 sozinho.
 | Valor | Quem atende | Condição |
 | --- | --- | --- |
 | 0 | ninguém | Uso normal |
-| 1 | `rover-quicktune.lua` | QuickTune do Pixhawk, armado |
-| 2 | `rover-controlallocation.lua` | Relé de yaw, armado em HOLD |
+| 1 | `quicktune.lua` | QuickTune do Pixhawk, armado |
+| 2 | `yaw_tune.lua` | Relé de yaw, armado em HOLD |
 | 3 | `modules/circle-tune.lua` | Relé de curva, armado em Circle |
-| 4 | `esc_can.lua` | Sintonia de roda no chão, armado em HOLD, sticks no centro |
-| 5 | `esc_can.lua` | A mesma sintonia, uma roda por vez, rodas no ar |
+| 4 | `can_wheeltune.lua` | Sintonia de roda no chão, armado em HOLD, sticks no centro |
+| 5 | `can_wheeltune.lua` | A mesma sintonia, uma roda por vez, rodas no ar |
 | 6 | — | Aposentado. Não faz nada |
 
-`SCR_USER5 = 2` faz o mixer Lua escrever `ESC_CMD_L` / `ESC_CMD_R`. Outro valor faz o driver de ESC ler as saídas de servo.
+`SCR_USER5 = 2` faz o driver CAN seguir o comando do mixer Lua. Outro valor faz o driver de ESC ler as saídas de servo.
 
 ## Parâmetros criados pelos scripts
 
 Cada tabela Lua tem uma chave fixa. Não reutilizar a chave com outro prefixo.
 
-| Prefixo | Chave | Script |
+| Prefixo | Chave | Módulo |
 | --- | --- | --- |
 | `BATT_SOC` | 14 | `system-start.lua` |
-| `RTUN_` | 15 | `rover-quicktune.lua` |
-| `YAWT_` | 16 | `rover-controlallocation.lua` |
-| `THRO_` | 17 | `rover-controlallocation.lua` |
+| `RTUN_` | 15 | `quicktune.lua` |
+| `YAWT_` | 16 | `yaw_align.lua` (`GAIN_MULT`, `TIMEOUT`) e `yaw_tune.lua` (o resto) |
+| `THRO_` | 17 | `mixer.lua` |
 | `CTUN_` | 18 | `modules/circle-tune.lua` |
-| `CANT_` | 19 | `rover-controlallocation.lua` |
-| `MIXER_` | 20 | `rover-controlallocation.lua` |
-| `ESC_` | 74, ou 72 se a 74 já tiver outro prefixo | `esc_can.lua` |
+| `CANT_` | 19 | `gain_banks.lua` |
+| `MIXER_` | 20 | `mixer.lua` |
+| `ESC_` | 74, ou 72 se a 74 já tiver outro prefixo | `can_state.lua` |
 
-`ESC_CMD_L`, `ESC_CMD_R`, `ESC_CMD_SEQ` e `ESC_STAT` são ponte entre scripts, só em RAM. Não salvar.
+`ESC_STAT` mostra o estado do driver, só em RAM. Não salvar. `ESC_CMD_L`, `ESC_CMD_R` e `ESC_CMD_SEQ` não são mais usados (o mixer chama o driver direto); as posições ficam para a tabela não deslocar.
 
 ### `ESC_` — driver C620
 
@@ -68,8 +97,8 @@ O comportamento de cada um está em [esc_can.md](esc_can.md). Resumo:
 | `ESC_WT_RELAY` | 100 | Degrau do autotune de roda, % de `ESC_CUR` |
 | `ESC_WT_RPM` | 120 | Patamar alto do autotune, rpm. Abaixo de 60 o script usa 120 |
 | `ESC_WT_BW` | 8 | Banda desejada do autotune, rad/s |
-| `ESC_CMD_L` `ESC_CMD_R` | 0 | Comando do mixer, −1 a +1. Não salvar |
-| `ESC_CMD_SEQ` | 0 | Contador. Mudou, o driver aplica L e R. Não salvar |
+| `ESC_CMD_L` `ESC_CMD_R` | 0 | Sem uso desde o `rover.lua` modular. Mantidos para a tabela não deslocar |
+| `ESC_CMD_SEQ` | 0 | Sem uso desde o `rover.lua` modular |
 | `ESC_STAT` | 0 | Bits: 1 CAN, 2 saturado, 4 tune rodando, 8 tune ok, 16 tune falhou, 32 patinação |
 | `ESC_FR1` … `ESC_FR4` | 0 | Sem uso. Mantidos para a tabela não deslocar |
 | `ESC_P1` `ESC_I1` `ESC_FF1` … `P4` `I4` `FF4` | 0 | Ganhos da roda. 0 usa o compartilhado |
@@ -90,11 +119,11 @@ O comportamento de cada um está em [esc_can.md](esc_can.md). Resumo:
 | --- | --- | --- |
 | `MIXER_FREQ` | 50 Hz | Frequência solicitada ao mixer em AUTO, CIRCLE (incluindo CircleTune), ACRO, RTL e SIMPLE, nos caminhos CAN e PWM. Faixa efetiva: 25–200 Hz. |
 
-O script registra `MIXER_FREQ` como parâmetro dinâmico do ArduPilot, persistente quando gravado pela estação de solo. Para aparecer no **Full Parameter List** do Mission Planner, instale o `rover-controlallocation.lua` atualizado em `APM/scripts`, deixe `SCR_ENABLE = 1`, reinicie a controladora ou os scripts e use **Refresh Params** depois que o script carregar. Não é necessário recompilar o firmware. Se o script não carregar, consulte as mensagens de erro de scripting.
+O script registra `MIXER_FREQ` como parâmetro dinâmico do ArduPilot, persistente quando gravado pela estação de solo. Para aparecer no **Full Parameter List** do Mission Planner, instale o `rover.lua` e o `modules/mixer.lua` atualizados em `APM/scripts`, deixe `SCR_ENABLE = 1`, reinicie a controladora ou os scripts e use **Refresh Params** depois que o script carregar. Não é necessário recompilar o firmware. Se o script não carregar, consulte as mensagens de erro de scripting.
 
 A alteração do valor é lida a cada ciclo e muda o próximo reagendamento. O período é `1000 / MIXER_FREQ`, arredondado para milissegundos inteiros; 50 Hz solicita 20 ms e 100 Hz solicita 10 ms. Valores positivos fora da faixa são limitados a 25–200 Hz; zero, negativos e NaN usam 50 Hz. A frequência real depende da carga do scripting.
 
-O mínimo de 25 Hz mantém o intervalo nominal abaixo do limite de 50 ms do CircleTune e do timeout de 60 ms das suas saídas PWM. O parâmetro não altera o PI de alinhamento de proa (5 Hz), o controle de RPM em `esc_can.lua` (200 Hz), o período de MANUAL/HOLD nem `SCHED_LOOP_RATE`.
+O mínimo de 25 Hz mantém o intervalo nominal abaixo do limite de 50 ms do CircleTune e do timeout de 60 ms das suas saídas PWM. O parâmetro não altera o PI de alinhamento de proa (5 Hz), o controle de RPM do driver CAN (200 Hz), o período de MANUAL/HOLD nem `SCHED_LOOP_RATE`.
 
 ### `YAWT_` — autotune de yaw
 
@@ -175,7 +204,7 @@ Valores de barramento e de scripting usados com os C620 no CAN1. Mudou CAN, heap
 | `CAN_P2_DRIVER` | 0 | Não pode ser o mesmo número de `CAN_P1_DRIVER` |
 | `SCR_ENABLE` | 1 | Liga os scripts |
 | `SCR_HEAP_SIZE` | 400000 | Memória dos scripts |
-| `SCR_VM_I_COUNT` | 100000 | Instruções por ciclo. Com 10000 o `esc_can.lua` é removido |
+| `SCR_VM_I_COUNT` | 100000 | Instruções por ciclo. Com 10000 o `rover.lua` estoura e é removido |
 | `SCR_USER4` | 4 | Uso antigo do mixer. Não é seletor |
 | `SCR_USER6` | 0 | Livre |
 | `SERVO1_FUNCTION` | 73 | ThrottleLeft, ESC 1 |
@@ -240,7 +269,7 @@ Parâmetros soltos do veículo, sem prefixo de biblioteca: `FORMAT_VERSION`, `LO
 | `AFS_` | Failsafe avançado, se o firmware foi compilado com ele |
 | `BCN` | Beacon de posição |
 | `MOT_` | Misturador nativo de motor, safety disarm e limites |
-| `WENC` | Encoder de roda do firmware. Os M3508 usam o encoder do C620, lido por `esc_can.lua` |
+| `WENC` | Encoder de roda do firmware. Os M3508 usam o encoder do C620, lido pelo driver CAN (`can_esc.lua`) |
 | `ATC` | PIDs de curva e de velocidade |
 | `SRTL_` | Smart RTL |
 | `PRX` | Proximidade |

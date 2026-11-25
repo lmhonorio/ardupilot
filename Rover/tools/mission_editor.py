@@ -11,7 +11,7 @@ Editor dos rumos de alinhamento da missao do rover (campo Alt dos waypoints).
 3. "Enviar ao rover" grava a missao de volta. Tambem abre e salva .waypoints
    (formato do Mission Planner).
 
-Regra do mixer (rover-controlallocation.lua): ao chegar num WAYPOINT, Alt = -1
+Regra do mixer (rover.lua, modules/yaw_align.lua): ao chegar num WAYPOINT, Alt = -1
 passa direto; qualquer outro valor para o rover e gira ate esse rumo (frente).
 
 Re: marque "Chegar de re" num waypoint e o trecho que termina nele e feito de

@@ -1,10 +1,10 @@
-# esc_can.lua
+# Driver CAN (`modules/can_*.lua`)
 
 Índice da pasta: [README](README.md).
 
 Driver Lua de ESC DJI C620 / motor M3508 para o ArduPilot Rover, sem firmware modificado. Versão marcada no código: `v2611o`.
 
-Copia para `APM/scripts` no cartão SD junto com `rover-controlallocation.lua` e `modules/autotune.lua`. O driver fala CAN com os ESCs, fecha um PI de velocidade em cada roda e publica o estado para o mixer e para a estação de solo.
+Até a versão `v2611o` era o script `esc_can.lua`. Agora é parte do `rover.lua` (ver [README](README.md#estrutura-dos-scripts)), dividido em `can_esc.lua` (barramento, saúde, pré-arm, `ESC_STAT`), `can_state.lua` (estado e parâmetros `ESC_`), `can_speed.lua` (PI de cada roda), `can_wheeltune.lua` (autotune de roda) e `can_report.lua` (log e telemetria), todos em `APM/scripts/modules`. O comportamento é o mesmo. O driver fala CAN com os ESCs, fecha um PI de velocidade em cada roda e publica o estado para o mixer e para a estação de solo.
 
 ## O que ele faz
 
@@ -42,7 +42,7 @@ O comando de cada lado é um número de −1 a +1. +1 pede `ESC_RPM` de roda par
 
 | `SCR_USER5` | Fonte |
 | --- | --- |
-| 2 | `rover-controlallocation.lua` escreve `ESC_CMD_L`, `ESC_CMD_R` e incrementa `ESC_CMD_SEQ`. Este driver só aceita o par quando `ESC_CMD_SEQ` muda. O primeiro valor depois do boot ou de uma troca de modo não conta: ainda pode ser resto do boot anterior. Sem um número de sequência novo por 500 ms, os dois lados vão a 0. |
+| 2 | O mixer (`mixer.lua`) chama `command(esquerda, direita)` do driver, que conta uma sequência interna (antes eram os parâmetros `ESC_CMD_L`, `ESC_CMD_R` e `ESC_CMD_SEQ`, hoje sem uso). Este driver só aceita o par quando a sequência muda. O primeiro valor depois do boot ou de uma troca de modo não conta: ainda pode ser resto do boot anterior. Sem um número de sequência novo por 500 ms, os dois lados vão a 0. |
 | outro | Saídas do Rover. `ThrottleLeft` (função 73) e `ThrottleRight` (função 74) vêm em −1000 a +1000 e são divididas por 1000. Se as duas estão em 0, `Throttle` (função 70), em −100 a +100, é dividido por 100 e vale para os dois lados. |
 
 Desarmado, os dois comandos são forçados a 0 depois dessa leitura. O stick não move o motor.
@@ -75,7 +75,7 @@ A máscara 0 e a máscara 0xFF são inválidas: todo mundo no mesmo lado. Em CAN
 
 A mudança é lida em até aproximadamente 50 ms. Ao voltar para 1, o filtro parte da referência acompanhada durante o bypass. Desligar o boost também pode aumentar o tempo para vencer atrito na partida; desativar suavização não garante menos overshoot. Para comparar o efeito no seguimento de reta, mantenha os ganhos e os outros parâmetros iguais entre os ensaios. Depois, os parâmetros individuais permitem isolar cada recurso.
 
-`ESC_RPM_AUX` ocupa a nova posição 47, sem deslocar as posições existentes. Após instalar o `esc_can.lua` atualizado, reinicie a controladora para recriar a tabela com o tamanho novo; só reiniciar o script pode deixar a tabela antiga alocada. Com o script carregado e `SCR_ENABLE = 1`, use **Refresh Params** no Mission Planner para localizar `ESC_RPM_AUX` no **Full Parameter List**. Grave o valor pela estação de solo para persistir após reboot.
+`ESC_RPM_AUX` ocupa a nova posição 47, sem deslocar as posições existentes. Após instalar os módulos atualizados, reinicie a controladora para recriar a tabela com o tamanho novo; só reiniciar o script pode deixar a tabela antiga alocada. Com o script carregado e `SCR_ENABLE = 1`, use **Refresh Params** no Mission Planner para localizar `ESC_RPM_AUX` no **Full Parameter List**. Grave o valor pela estação de solo para persistir após reboot.
 
 `ESC_ACC` limita a aceleração da referência, em rpm de roda por segundo, nos dois sentidos. 0 deixa a referência igual ao alvo no mesmo ciclo. O uso previsto no stick e na missão é 0, sem rampa artificial.
 

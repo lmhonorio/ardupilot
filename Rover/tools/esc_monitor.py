@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Monitor ao vivo do rover pelo HereLink: motores CAN (esc_can.lua) + navegacao.
+Monitor ao vivo do rover pelo HereLink: motores CAN (driver CAN do rover.lua) + navegacao.
 
 Grava em CSV (formato longo: hora_pc, t_s, boot_ms, nome, valor, texto):
-  ESCn_I / ESCn_ICMD / ESCn_RPM, ESC_TGT_L / ESC_TGT_R   (esc_can.lua, ESC_GCS_HZ > 0)
+  ESCn_I / ESCn_ICMD / ESCn_RPM, ESC_TGT_L / ESC_TGT_R   (modules/can_report.lua, ESC_GCS_HZ > 0)
   STATUSTEXT                                              mensagens da controladora
   MODE (valor = numero, texto = nome) e ARMED             mudancas de modo e arme
   ATT_*   atitude: roll, pitch, yaw (graus), yawrate (graus/s)

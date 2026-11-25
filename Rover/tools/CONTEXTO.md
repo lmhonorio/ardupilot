@@ -23,8 +23,9 @@ Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da
 - Rádio e telemetria pela HereLink (o PC conecta no Wi-Fi AndroidAP).
 - Dois caminhos de saída:
   - **PWM**: servos 0..3;
-  - **CAN**: `esc_can.lua` com malha de velocidade por roda.
-  - O caminho é escolhido pelo parâmetro `ESC_CAN`; o `esc_can` publica o caminho ativo em `ESC_STAT`.
+  - **CAN**: driver C620 (`modules/can_*.lua`) com malha de velocidade por roda.
+  - O caminho é escolhido pelo parâmetro `ESC_CAN`; o driver publica o caminho ativo em `ESC_STAT`.
+  - Cada caminho é um módulo removível: sem `modules/out_pwm.lua` roda só CAN; sem os `modules/can_*.lua` roda só PWM.
 - Convenção de sentido: no motor, **frente física = rpm negativo**.
   `THRO_INV = 1` inverte só o acelerador que vem do ArduPilot. O stick do modo manual já estava certo.
 - Mapa de lados nos logs: em giro no lugar, ESC1/ESC4 vão para um sentido e ESC2/ESC3 para o outro.
@@ -33,31 +34,36 @@ Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da
 
 | Arquivo | Papel |
 |---|---|
-| `Rover/scripts/rover-controlallocation.lua` | Mixer: modos, alocação L/R, alinhamento de yaw em waypoint, Yaw tune, Circle tune, bancos de ganho PWM/CAN |
-| `Rover/scripts/esc_can.lua` (v2611n) | Driver C620 no CAN: PI de rpm por roda, prefiltro, rampa, stall boost, WheelTune por degrau |
-| `Rover/scripts/rover-quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
-| `Rover/scripts/modules/` | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua` (`PERIOD_MS` = 25), `functions.lua` |
+| `Rover/scripts/rover.lua` (r2611a) | **Único script.** Carrega os módulos e roda mixer, QuickTune e driver CAN num agendador; isola a falha de cada tarefa; recusa iniciar se os scripts antigos estiverem no SD |
+| `modules/rover_common.lua` | Constantes, utilitários e a tabela `R` compartilhada (`R.pwm`, `R.can`, `R.mixer`) |
+| `modules/mixer.lua` | Modos, alocação L/R, `THRO_`, `MIXER_`, Circle tune |
+| `modules/out_pwm.lua` | Saída PWM (MAIN 1..4), kick de yaw, `THRO_MIN_LUA` |
+| `modules/can_esc.lua` + `can_state`, `can_speed`, `can_wheeltune`, `can_report` | Driver C620 (v2611o): barramento e saúde; estado/`ESC_`; PI de rpm por roda; WheelTune por degrau; log/telemetria |
+| `modules/yaw_align.lua` / `yaw_tune.lua` | Alinhamento de proa no waypoint / relé de yaw |
+| `modules/gain_banks.lua` | Bancos `CANT_` |
+| `modules/quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
+| `modules/` (resto) | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua`, `functions.lua` |
+| `Rover/tools/test/lua_sim.lua` | Simulador da API do ArduPilot (4 rodas, CAN e PWM) que grava um traço para comparar versões dos scripts. Precisa de um Lua 5.3 |
 | `Rover/tools/esc_monitor.py` | Monitor no PC: gráfico, console e CSV, via HereLink |
 | `Rover/tools/mode_panel.py` | Servidor da interface GRIN: MAVLink na UDP 14550 e página em `http://127.0.0.1:8765` (também no celular, mesma rede) |
 | `Rover/tools/hmi/` | Página (`index.html`, `app.js`, `app.css`, logos). O `index.html` é ignorado pelo git; entra com `git add -f` |
 | `Rover/tools/mission_core.py` | Regras e codec da missão, sem tela. Usado pela interface e pelo `mission_editor.py` |
 | `Rover/tools/mission_editor.py` | Editor Tk da missão (bússola, ré, .waypoints). A aba Missão da GRIN faz o mesmo e ainda planeja no mapa. Os dois não abrem juntos: mesma UDP |
 | `Rover/tools/param_docs.json` | Descrições dos parâmetros na aba Parâmetros (gerado por `build_param_docs.py`) |
-| `Rover/tools/ftp_scripts.py` | CLI que envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP). A aba Scripts da GRIN faz o equivalente na página |
+| `Rover/tools/ftp_scripts.py` | CLI que envia os .lua de `Rover/scripts` (e `modules/`) para `/APM/scripts` pela HereLink (MAVFTP) e apaga da placa os scripts antigos (`--keep-old` não apaga). A aba Scripts da GRIN faz o envio na página, mas não apaga os antigos sozinha |
 | `Rover/tools/mav_param.py` | Ler e gravar parâmetros pela HereLink (sem pymavlink) |
 | `Rover/tools/sd_format.py` | Formata o cartão SD da controladora pela HereLink (`MAV_CMD_STORAGE_FORMAT`). Pede confirmação (ou `--yes`) e só envia com o rover desarmado. Apaga scripts, logs e terreno; parâmetros e missão ficam |
 | `Rover/docs/` | Documentação: `esc_can.md`, `Controle-CAN.md`, `Autotunning.md`, `Manual-Tuning-CAN.md` |
 
-### Comunicação mixer → esc_can
+### Comunicação mixer → driver CAN
 
-Por parâmetros em RAM:
-- `ESC_CMD_L`, `ESC_CMD_R` (−1..1) e `ESC_CMD_SEQ`;
-- `ESC_STAT` informa o caminho ativo.
+Chamada direta dentro do `rover.lua`: o mixer chama `R.can.command(l, r)` (−1..1) e lê `R.can.selected()`
+(`ESC_STAT` bit 0) e `R.can.pwm_blocked()` (`ESC_CAN`). `ESC_CMD_L/R/SEQ` não são mais usados.
 
 No CAN, a mistura é `left = t + s`, `right = t − s`, normalizada pelo pico quando passa de 1.
 Não há prioridade de direção.
 
-O `esc_can` faz `alvo_rpm = cmd × ESC_RPM`. Em seguida aplica:
+O driver CAN faz `alvo_rpm = cmd × ESC_RPM`. Em seguida aplica:
 - a rampa `ESC_ACC`;
 - o prefiltro `ESC_PREF × Ti`;
 - o PI por roda, com ganhos por roda ou os compartilhados `ESC_P` / `ESC_I` / `ESC_FF`;
@@ -72,10 +78,10 @@ O `esc_can` faz `alvo_rpm = cmd × ESC_RPM`. Em seguida aplica:
 | 1 | QuickTune (armado; usar Circle) |
 | 2 | Yaw PI por relé (armado em HOLD). Ganhos em `SCR_USER2` / `SCR_USER3` |
 | 3 | Circle tune do mixer (taxa de direção, relé) |
-| 4 | WheelTune no chão (esc_can, degrau de corrente) |
+| 4 | WheelTune no chão (`can_wheeltune.lua`, degrau de corrente) |
 | 5 | WheelTune com o rover suspenso |
 
-### WheelTune por degrau (esc_can)
+### WheelTune por degrau (`can_wheeltune.lua`)
 
 1. Kv vem da inclinação do rpm (mínimos quadrados) e o atraso vem do intercepto da reta.
 2. `wc = min(ESC_WT_BW, 1/(2,65·T))`, `Kp = wc/Kv`, `Ti = 4/wc`.
@@ -155,7 +161,7 @@ O `GCS_PID_MASK` precisa ser 3 para o gráfico de guinada (PID de direção e de
 
 ## Limites do Lua do ArduPilot (já causaram problemas)
 
-- No máximo 100 variáveis locais no corpo principal: o estado fica em tabelas (`S` no mixer, `M` e `K` no esc_can).
+- No máximo 100 variáveis locais no corpo principal: o estado fica em tabelas (`S` no mixer; `C`, `M` e `K` no driver CAN).
 - `collectgarbage` não existe. Lua com números de 32 bits. Não carrega bytecode.
 - Falta de memória (`SCR_HEAP_SIZE` = 520000) ao carregar acontece **sem mensagem de erro**.
   Se o script não sobe, reduzir o código. A v2611e caiu por isso.
@@ -165,7 +171,7 @@ O `GCS_PID_MASK` precisa ser 3 para o gráfico de guinada (PID de direção e de
 | Grupo | Parâmetros |
 |---|---|
 | Velocidade | `WP_SPEED` 1,0 · `CIRC_SPEED` 1 · `CRUISE_SPEED` 0,99 · `CRUISE_THROTTLE` 67 |
-| esc_can | `ESC_RPM` 120 · `ESC_CUR` 20 · `ESC_IMAX` 15 · `ESC_P` 0,134 · `ESC_I` 0,150 · `ESC_WT_BW` 5 · `ESC_PREF` 0,5 · `ESC_ACC` 800 · `ESC_STALL` 30 · `ESC_OPT` 1 |
+| driver CAN | `ESC_RPM` 120 · `ESC_CUR` 20 · `ESC_IMAX` 15 · `ESC_P` 0,134 · `ESC_I` 0,150 · `ESC_WT_BW` 5 · `ESC_PREF` 0,5 · `ESC_ACC` 800 · `ESC_STALL` 30 · `ESC_OPT` 1 |
 | Velocidade (ATC) | `ATC_SPEED_P` 0,684 · `ATC_SPEED_I` 0,684 · `ATC_ACCEL_MAX` 3 · `ATC_DECEL_MAX` 1 |
 | Direção (ATC) | `ATC_STR_RAT_P` 0,141 · `ATC_STR_RAT_I` 0,141 · `ATC_STR_RAT_D` 0,002 · `ATC_STR_RAT_FF` 0,281 · `ATC_STR_RAT_MAX` 120 · `ATC_STR_ACC_MAX` 180 |
 | Navegação | `WP_RADIUS` 0,1 · `WP_ACCEL` 2 · `WP_PIVOT_ANGLE` 45 · `WP_PIVOT_RATE` 20 · `PSC_VEL_P` 2 |

@@ -15,7 +15,7 @@ Missão / RC / Circle
         ↓
 Mixer Lua (throttle + steering → norm L / norm R)
         ↓
-esc_can.lua  (ESC_MODE=0): a meta de RPM do lado vai para cada roda
+driver CAN, can_speed.lua  (ESC_MODE=0): a meta de RPM do lado vai para cada roda
         └─ PI próprio em cada roda, no encoder dela
               ESC_P1..4 / ESC_I1..4 / ESC_FF1..4
               (0 em qualquer um desses usa ESC_P / ESC_I / ESC_FF)
@@ -27,9 +27,9 @@ As duas rodas de um lado recebem a **mesma meta** (o comando daquele lado). O qu
 
 | Malha | Script | Período | Ganhos |
 |---|---|---|---|
-| Velocidade de cada roda | `esc_can.lua` | ~10 ms | `ESC_Pn` / `ESC_In` / `ESC_FFn` |
+| Velocidade de cada roda | `modules/can_speed.lua` | ~10 ms | `ESC_Pn` / `ESC_In` / `ESC_FFn` |
 | Taxa de giro / velocidade | ArduRover | ~50 Hz | `ATC_STR_RAT_*`, `ATC_SPEED_*`, `CRUISE_*` |
-| Alinhamento de yaw (pós-WP) | `rover-controlallocation.lua` | 200 ms | CAN e PWM: `SCR_USER2/3` · × `YAWT_GAIN_MULT` |
+| Alinhamento de yaw (pós-WP) | `modules/yaw_align.lua` | 200 ms | CAN e PWM: `SCR_USER2/3` · × `YAWT_GAIN_MULT` |
 
 O rover é **diferencial 4WD**: as 2 rodas do mesmo lado devem ter o **mesmo RPM alvo**. `ESC_LMASK` define quem é esquerda; `ESC_REV` inverte sentido por motor.
 
@@ -41,15 +41,23 @@ Em `APM/scripts/`:
 
 | Arquivo | Obrigatório |
 |---|---|
-| `esc_can.lua` | sim (caminho CAN) |
-| `rover-controlallocation.lua` | sim (mixer + yaw + Circle relay) |
-| `rover-quicktune.lua` | sim (QuickTune) |
+| `rover.lua` | sim (o único script; carrega os módulos) |
+| `modules/rover_common.lua` | sim |
+| `modules/mixer.lua` | sim (modos e alocação) |
+| `modules/gain_banks.lua` | sim |
+| `modules/yaw_align.lua` | sim (alinhamento no waypoint) |
+| `modules/yaw_tune.lua` | sim (relé de yaw) |
+| `modules/quicktune.lua` | sim (QuickTune) |
+| `modules/circle-tune.lua` | sim (relé Circle) |
 | `modules/functions.lua` | sim |
 | `modules/autotune.lua` | sim |
 | `modules/pid.lua` | sim |
-| `modules/circle-tune.lua` | sim (relé Circle) |
+| `modules/out_pwm.lua` | caminho PWM (apague para rodar só em CAN) |
+| `modules/can_esc.lua`, `can_state.lua`, `can_speed.lua` | caminho CAN (apague todos os `can_*` para rodar só em PWM) |
+| `modules/can_wheeltune.lua` | autotune de roda (opcional) |
+| `modules/can_report.lua` | log, telemetria e valores ao vivo do CAN (opcional) |
 
-**Apague** qualquer `c620_can.lua` antigo. Os `.md` **não** precisam ir para o cartão.
+**Apague** de `APM/scripts/` os scripts antigos `esc_can.lua`, `rover-controlallocation.lua`, `rover-quicktune.lua` e qualquer `c620_can.lua`: com eles no cartão o `rover.lua` não inicia e recusa o arm. O `tools/ftp_scripts.py` faz isso sozinho. Os `.md` **não** precisam ir para o cartão.
 
 Depois de copiar: `SCR_ENABLE=1`, reboot da Pixhawk.
 
@@ -76,7 +84,7 @@ ESCs no **CAN2**: `CAN_P1_DRIVER=0`, `CAN_P2_DRIVER=1`, `CAN_D1_PROTOCOL=10`.
 |---|---|---|
 | `SCR_ENABLE` | 1 | |
 | `SCR_HEAP_SIZE` | **400000** (ou 500000) | reboot após mudar |
-| `SCR_VM_I_COUNT` | **100000** | com 10000 o `esc_can.lua` estoura e some |
+| `SCR_VM_I_COUNT` | **100000** | com 10000 o `rover.lua` estoura e some |
 | `SCR_USER1` | **0** | seletor de tuning |
 | `SCR_USER2` / `SCR_USER3` | (PWM yaw P/I) | em CAN não mexer à mão |
 | `SCR_USER5` | **2** | mixer Rover Lua ativo |
