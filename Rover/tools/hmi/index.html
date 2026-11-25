@@ -6,12 +6,17 @@
 <title>GRIN</title>
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<style>
+  #missionleaflet.leaflet-container { background: #e7efe0; }
+  #missionleaflet.leaflet-container img.leaflet-tile { mix-blend-mode: normal; }
+</style>
 <script src="/vendor/leaflet/leaflet.js"></script>
 </head>
 <body>
 <header>
   <img class="logo argo" src="/argo.png" alt="Argo Energia">
   <nav id="nav" aria-label="Páginas"></nav>
+  <button type="button" id="theme">Escuro</button>
   <img class="logo grin" src="/grin.png" alt="GRIN">
 </header>
 <section class="status" aria-label="Estado do rover">
@@ -31,7 +36,6 @@
 </section>
 <p id="note" class="note"></p>
 <main id="view"></main>
-<button type="button" id="theme">Escuro</button>
 <script src="/app.js"></script>
 </body>
 </html>

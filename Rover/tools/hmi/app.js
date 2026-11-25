@@ -80,6 +80,16 @@ let missionItems = [];
 let missionStats = { total_m: 0, legs: [], waypoints: 0 };
 let missionXferTimer = null;
 let missionMap = null;
+let missionMapSizeObs = null;
+let missionTrack = [];
+let missionTrackAfter = 0;
+let missionTrackEpoch = 0;
+let missionTrackBusy = false;
+let missionTrackLayer = null;
+let missionTrackLink = null;
+let missionTrackKey = "";
+let missionTrackStats = null;
+let missionCacheBusy = false;
 let missionMarkers = {};
 let missionLines = null;
 let missionRoverMarker = null;
@@ -244,8 +254,9 @@ function paint() {
       || (btn.classList.contains("missionact") && missionBusy);
     const needsDisarm = btn.dataset.danger === "1";
     const needsLink = !btn.classList.contains("missionlocal");
+    const caching = btn.id === "missioncache" && missionCacheBusy;
     if (!pending) {
-      btn.disabled = (needsLink && !state.seen) || busy || (!!state.armed && needsDisarm);
+      btn.disabled = caching || (needsLink && !state.seen) || busy || (!!state.armed && needsDisarm);
     }
   }
   if (page === "editor-missao") {
@@ -689,6 +700,12 @@ function renderLogs() {
       </div>
       <button type="button" class="cmd" id="armbtn">Armar</button>
     </div>
+    <div class="reads">
+      <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
+      <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
+      <div><span>Bateria</span><strong data-read="BAT">—</strong></div>
+    </div>
+    <p class="last" id="lasttext"></p>
     <section class="record">
       <div class="who">
         <p>CSV</p>
@@ -716,12 +733,6 @@ function renderLogs() {
       </div>
       <div id="sdloglist" class="sdloglist"></div>
     </section>
-    <div class="reads">
-      <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
-      <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
-      <div><span>Bateria</span><strong data-read="BAT">—</strong></div>
-    </div>
-    <p class="last" id="lasttext"></p>
     ${CHARTS.map((c, i) => `<section class="chart"><h2>${c.title} (${c.unit})</h2><div class="nums">${NUM_ROWS[i]}</div><div class="legend"></div><canvas data-chart="${i}"></canvas></section>`).join("")}`;
   const name = document.getElementById("logname");
   name.addEventListener("keydown", (ev) => {
@@ -2252,10 +2263,18 @@ function applyMissionFields() {
 
 function destroyMissionMap() {
   clearRelativePreview();
+  missionTrackLink = null;
+  if (missionMapSizeObs) {
+    missionMapSizeObs.disconnect();
+    missionMapSizeObs = null;
+  }
   if (missionMap) {
     missionMap.remove();
     missionMap = null;
   }
+  missionTileLayers = [];
+  missionTrackLayer = null;
+  missionTrackKey = "";
   missionMarkers = {};
   missionLines = null;
   missionRoverMarker = null;
@@ -2277,22 +2296,31 @@ function roverIcon(hdg) {
   const rot = Number.isFinite(hdg) ? hdg : 0;
   return L.divIcon({
     className: "mission-marker",
-    html: `<div class="mission-rover" style="transform:rotate(${rot}deg)">▲</div>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
+    html: `<div class="mission-rover" style="transform:rotate(${rot}deg)" aria-hidden="true">
+      <svg viewBox="0 0 36 52">
+        <rect x="1" y="6" width="8" height="14" rx="2.5" fill="#1c1c1c"/>
+        <rect x="27" y="6" width="8" height="14" rx="2.5" fill="#1c1c1c"/>
+        <rect x="1" y="32" width="8" height="14" rx="2.5" fill="#1c1c1c"/>
+        <rect x="27" y="32" width="8" height="14" rx="2.5" fill="#1c1c1c"/>
+        <rect x="8" y="3" width="20" height="46" rx="5" fill="#f7f4ee" stroke="#242424" stroke-width="1.4"/>
+        <rect x="13" y="7" width="10" height="6" rx="1.5" fill="#2b2b2b"/>
+      </svg>
+    </div>`,
+    iconSize: [36, 52],
+    iconAnchor: [18, 26],
   });
 }
-
-const CLEAR_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 function makeLocalGrid() {
   const Grid = L.GridLayer.extend({
     createTile(coords) {
       const tile = document.createElement("canvas");
       const size = this.getTileSize();
-      tile.width = size.x;
-      tile.height = size.y;
+      const px = 2;
+      tile.width = size.x * px;
+      tile.height = size.y * px;
       const ctx = tile.getContext("2d");
+      ctx.scale(px, px);
       ctx.fillStyle = "#e7efe0";
       ctx.fillRect(0, 0, size.x, size.y);
       ctx.strokeStyle = "rgba(7, 62, 115, 0.16)";
@@ -2321,21 +2349,284 @@ function makeLocalGrid() {
       return tile;
     },
   });
-  return new Grid({ maxZoom: 22, attribution: "grade local" });
+  return new Grid({ maxZoom: MAP_MAX_ZOOM, attribution: "grade local" });
 }
 
-function watchMapTiles(layer) {
-  let ok = 0;
-  let bad = 0;
-  layer.on("tileload", () => { ok += 1; });
-  layer.on("tileerror", () => {
-    bad += 1;
-    if (ok > 0 || bad < 4) return;
-    const status = document.getElementById("missionstatus");
-    if (!status || status.dataset.offline || status.textContent) return;
-    status.dataset.offline = "1";
-    status.textContent = "Sem internet: grade local. Clique, arraste e o rover continuam no mapa.";
+const MAP_NATIVE_ZOOM = 19;
+const MAP_MAX_ZOOM = 24;
+
+function makeCachedTiles(source, attribution) {
+  const nativeZoom = source === "sat" ? 22 : MAP_NATIVE_ZOOM;
+  const Layer = L.GridLayer.extend({
+    createTile(coords, done) {
+      const canvas = document.createElement("canvas");
+      const size = this.getTileSize();
+      canvas.width = size.x * 2;
+      canvas.height = size.y * 2;
+      this._paint(coords, canvas).then((drew) => {
+        if (drew) {
+          this._hit = (this._hit || 0) + 1;
+          const status = document.getElementById("missionstatus");
+          if (status && status.dataset.mapnote === "missing") {
+            status.dataset.mapnote = "";
+            status.textContent = "";
+          }
+        } else {
+          this._miss = (this._miss || 0) + 1;
+          if (this._miss >= 8 && !this._hit) noteMapTilesMissing();
+        }
+        try { done(); } catch (err) { /* mapa já fechado */ }
+      }, () => {
+        try { done(); } catch (err) { /* mapa já fechado */ }
+      });
+      return canvas;
+    },
+    async _paint(coords, canvas) {
+      const found = await this._find(coords);
+      if (!found) return false;
+      this._draw(coords, canvas, found);
+      if (source === "osm" && found.img && found.img.width < 400) {
+        const native = Math.min(coords.z, nativeZoom);
+        const nativeXY = parentTile(coords.x, coords.y, coords.z, native);
+        this._load(native, nativeXY.x, nativeXY.y, "net").then((sharp) => {
+          if (!sharp || sharp.width < 400) return;
+          this._draw(coords, canvas, { img: sharp, z: native, x: nativeXY.x, y: nativeXY.y });
+        });
+      }
+      return true;
+    },
+    _draw(coords, canvas, found) {
+      const ctx = canvas.getContext("2d");
+      const zoomGap = coords.z - found.z;
+      const span = 2 ** zoomGap;
+      const ox = coords.x - found.x * span;
+      const oy = coords.y - found.y * span;
+      const sw = found.img.width / span;
+      const sh = found.img.height / span;
+      ctx.imageSmoothingEnabled = zoomGap > 0 || found.img.width < canvas.width;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(found.img, ox * sw, oy * sh, sw, sh, 0, 0, canvas.width, canvas.height);
+    },
+    async _find(coords) {
+      const native = Math.min(coords.z, nativeZoom);
+      const nativeXY = parentTile(coords.x, coords.y, coords.z, native);
+      // Disco primeiro. Zoom maior que o arquivo salvo recorta o pai na hora,
+      // sem esperar a internet. A rede só entra se não houver nenhuma cópia.
+      const cached = await this._load(native, nativeXY.x, nativeXY.y, "exact");
+      if (cached) return { img: cached, z: native, x: nativeXY.x, y: nativeXY.y };
+      let z = native - 1;
+      let x = Math.floor(nativeXY.x / 2);
+      let y = Math.floor(nativeXY.y / 2);
+      const floor = Math.max(0, coords.z - 8);
+      while (z >= floor) {
+        const img = await this._load(z, x, y, "exact");
+        if (img) return { img, z, x, y };
+        x = Math.floor(x / 2);
+        y = Math.floor(y / 2);
+        z -= 1;
+      }
+      const near = await this._load(native, nativeXY.x, nativeXY.y, "near");
+      if (near) return { img: near, z: native, x: nativeXY.x, y: nativeXY.y };
+      const fetched = await this._load(native, nativeXY.x, nativeXY.y, "net");
+      if (fetched) return { img: fetched, z: native, x: nativeXY.x, y: nativeXY.y };
+      return null;
+    },
+    _load(z, x, y, mode) {
+      if (!this._mem) this._mem = new Map();
+      const key = source + "/" + z + "/" + x + "/" + y + "/" + mode;
+      const cached = this._mem.get(key);
+      if (cached) return cached;
+      const pending = loadMapTile(source, z, x, y, mode).then((img) => {
+        if (!img && mode !== "exact") this._mem.delete(key);
+        return img;
+      });
+      this._mem.set(key, pending);
+      return pending;
+    },
   });
+  const layer = new Layer({
+    minZoom: 2,
+    maxZoom: MAP_MAX_ZOOM,
+    tileSize: 256,
+    attribution,
+    keepBuffer: 2,
+  });
+  missionTileLayers.push(layer);
+  return layer;
+}
+
+function parentTile(x, y, z, parentZ) {
+  const span = 2 ** (z - parentZ);
+  return { x: Math.floor(x / span), y: Math.floor(y / span) };
+}
+
+function loadMapTile(source, z, x, y, mode) {
+  const parts = [];
+  if (mode === "exact") parts.push("only=1");
+  else if (mode === "near") parts.push("near=1");
+  if (source === "osm") parts.push("retina=1");
+  const qs = parts.length ? "?" + parts.join("&") : "";
+  return fetch("/maptile/" + source + "/" + z + "/" + x + "/" + y + ".png" + qs).then(async (res) => {
+    const kind = res.headers.get("X-Map-Tile");
+    if (!res.ok || kind === "empty") return null;
+    const blob = await res.blob();
+    if (kind !== "hit" && kind !== "fetch" && blob.size < 120) return null;
+    return decodeTile(blob);
+  }).catch(() => null);
+}
+
+function decodeTile(blob) {
+  if (typeof createImageBitmap === "function") {
+    return createImageBitmap(blob).catch(() => null);
+  }
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      resolve(img);
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    img.src = url;
+  });
+}
+
+function noteMapTilesMissing() {
+  const status = document.getElementById("missionstatus");
+  if (!status || status.dataset.mapnote || status.textContent) return;
+  status.dataset.mapnote = "missing";
+  status.textContent = "Este trecho ainda não está no computador. Com internet, use Guardar área. A grade continua no mapa.";
+}
+
+function invalidateMapTiles() {
+  for (const layer of missionTileLayers) {
+    if (layer._mem) layer._mem.clear();
+    layer._miss = 0;
+    layer._hit = 0;
+    if (missionMap && missionMap.hasLayer(layer)) layer.redraw();
+  }
+}
+
+function clampTile(value, n) {
+  return Math.max(0, Math.min(n - 1, Math.floor(value)));
+}
+
+function latToTileY(lat, z) {
+  const s = Math.max(-0.9999, Math.min(0.9999, Math.sin(lat * Math.PI / 180)));
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * (2 ** z);
+}
+
+function tileRect(bounds, z) {
+  const n = 2 ** z;
+  const x0 = clampTile((bounds.getWest() + 180) / 360 * n, n);
+  const x1 = clampTile((bounds.getEast() + 180) / 360 * n, n);
+  const y0 = clampTile(latToTileY(bounds.getNorth(), z), n);
+  const y1 = clampTile(latToTileY(bounds.getSouth(), z), n);
+  return {
+    z,
+    x0: Math.min(x0, x1),
+    x1: Math.max(x0, x1),
+    y0: Math.min(y0, y1),
+    y1: Math.max(y0, y1),
+    count: (Math.abs(x1 - x0) + 1) * (Math.abs(y1 - y0) + 1),
+  };
+}
+
+function mapSavePlan(bounds) {
+  const specs = [];
+  let total = 0;
+  for (let z = MAP_NATIVE_ZOOM; z >= 14; z--) {
+    const spec = tileRect(bounds, z);
+    const n = spec.count * 2;
+    if (!Number.isFinite(n) || n <= 0 || total + n > 800) continue;
+    specs.push(spec);
+    total += n;
+  }
+  return specs.length ? { specs, total } : null;
+}
+
+async function cacheVisibleMap() {
+  if (!missionMap || missionCacheBusy) return;
+  const status = document.getElementById("missionstatus");
+  const plan = mapSavePlan(missionMap.getBounds().pad(0.12));
+  if (!plan) {
+    if (status) status.textContent = "Área grande demais. Aproxime o mapa no trecho do ensaio e guarde de novo.";
+    return;
+  }
+  const jobs = [];
+  for (const source of ["osm", "sat"]) {
+    for (const spec of plan.specs) {
+      for (let x = spec.x0; x <= spec.x1; x++) {
+        for (let y = spec.y0; y <= spec.y1; y++) {
+          const sharp = source === "osm" ? "&retina=1" : "";
+          jobs.push("/maptile/" + source + "/" + spec.z + "/" + x + "/" + y + ".png?fetch=1" + sharp);
+        }
+      }
+    }
+  }
+  missionCacheBusy = true;
+  const btn = document.getElementById("missioncache");
+  if (btn) btn.disabled = true;
+  let done = 0;
+  let missing = 0;
+  const queue = jobs.slice();
+  const paint = () => {
+    if (!status) return;
+    status.textContent = "Guardando mapa " + done + "/" + jobs.length + (missing ? " · " + missing + " sem rede" : "");
+  };
+  const worker = async () => {
+    while (queue.length) {
+      const url = queue.pop();
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok || res.headers.get("X-Map-Tile") === "empty") missing += 1;
+      } catch (err) {
+        missing += 1;
+      }
+      done += 1;
+      if (done === jobs.length || done % 10 === 0) paint();
+    }
+  };
+  try {
+    paint();
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    invalidateMapTiles();
+    if (status) {
+      const zooms = plan.specs.map((spec) => spec.z).sort((a, b) => a - b).join(", ");
+      const detail = plan.specs.some((spec) => spec.z === MAP_NATIVE_ZOOM)
+        ? ""
+        : " Aproxime mais para guardar o detalhe máximo.";
+      status.dataset.mapnote = "saved";
+      if (missing === 0) {
+        status.textContent = "Mapa guardado (zooms " + zooms + "). Sem internet dá para abrir e ampliar até o zoom " + MAP_MAX_ZOOM + "." + detail;
+      } else if (missing === jobs.length) {
+        status.textContent = "Sem internet: nada novo foi guardado. O que já estava no computador continua no mapa.";
+      } else {
+        status.textContent = "Mapa parcial: " + (jobs.length - missing) + " imagens guardadas, " + missing + " faltaram." + detail;
+      }
+    }
+  } finally {
+    missionCacheBusy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function watchMissionMapSize(el) {
+  const fix = () => {
+    if (!missionMap) return;
+    const size = missionMap.getSize();
+    if (el.clientWidth !== size.x || el.clientHeight !== size.y) {
+      missionMap.invalidateSize({ animate: false, pan: false });
+    }
+  };
+  requestAnimationFrame(() => requestAnimationFrame(fix));
+  if (missionMapSizeObs) missionMapSizeObs.disconnect();
+  if (typeof ResizeObserver === "undefined") return;
+  missionMapSizeObs = new ResizeObserver(fix);
+  missionMapSizeObs.observe(el);
 }
 
 function ensureMissionMap() {
@@ -2351,25 +2642,31 @@ function ensureMissionMap() {
     return missionMap;
   }
   const start = gpsLatLon() || DEFAULT_MAP;
-  missionMap = L.map(el, { zoomControl: true, attributionControl: true }).setView(start, 18);
+  missionMap = L.map(el, {
+    zoomControl: true,
+    attributionControl: true,
+    fadeAnimation: false,
+    minZoom: 2,
+    maxZoom: MAP_MAX_ZOOM,
+    zoomSnap: 0.25,
+    zoomDelta: 1,
+    wheelPxPerZoomLevel: 45,
+  }).setView(start, 18);
+  watchMissionMapSize(el);
   const grid = makeLocalGrid();
-  const tileOpts = { maxZoom: 22, maxNativeZoom: 19, errorTileUrl: CLEAR_TILE };
-  const streets = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    ...tileOpts,
-    attribution: "&copy; OpenStreetMap",
-  });
-  const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-    ...tileOpts,
-    attribution: "Esri",
-  });
-  watchMapTiles(streets);
-  watchMapTiles(sat);
+  const streets = makeCachedTiles("osm", "&copy; OpenStreetMap");
+  const sat = makeCachedTiles("sat", "Esri");
   grid.addTo(missionMap);
   streets.addTo(missionMap);
-  L.control.layers({ Grade: L.layerGroup(), Mapa: streets, Satélite: sat }, null, { position: "topright" }).addTo(missionMap);
   L.control.scale({ imperial: false, position: "bottomleft" }).addTo(missionMap);
   missionLines = L.layerGroup().addTo(missionMap);
+  missionTrackLayer = L.layerGroup().addTo(missionMap);
   missionHeadingLayer = L.layerGroup().addTo(missionMap);
+  L.control.layers(
+    { Grade: L.layerGroup(), Mapa: streets, Satélite: sat },
+    { Percorrido: missionTrackLayer, Previsto: missionLines },
+    { position: "topright" },
+  ).addTo(missionMap);
 
   missionMap.on("click", async (ev) => {
     if (missionCtx || missionCtxIgnoreClick) {
@@ -2393,6 +2690,14 @@ function ensureMissionMap() {
     const cur = document.getElementById("missioncursor");
     if (cur) cur.textContent = `${ev.latlng.lat.toFixed(6)}, ${ev.latlng.lng.toFixed(6)}`;
   });
+  const paintZoom = () => {
+    const elz = document.getElementById("missionzoom");
+    if (!elz || !missionMap) return;
+    elz.textContent = "zoom " + (Math.round(missionMap.getZoom() * 4) / 4);
+  };
+  missionMap.on("zoomend", paintZoom);
+  paintZoom();
+  paintTrackCompare();
   return missionMap;
 }
 
@@ -2404,9 +2709,11 @@ function fitMissionBounds() {
   }
   const gps = gpsLatLon();
   if (gps) pts.push(gps);
+  for (let i = 0; i < missionTrack.length; i += 15) pts.push(missionTrack[i]);
+  if (missionTrack.length) pts.push(missionTrack[missionTrack.length - 1]);
   if (!pts.length) return;
-  if (pts.length === 1) missionMap.setView(pts[0], 19);
-  else missionMap.fitBounds(pts, { padding: [40, 40], maxZoom: 20 });
+  if (pts.length === 1) missionMap.setView(pts[0], 20);
+  else missionMap.fitBounds(pts, { padding: [40, 40], maxZoom: 22 });
 }
 
 function syncMissionMapLayers() {
@@ -2433,9 +2740,10 @@ function syncMissionMapLayers() {
     const color = b.it.direction === "re" ? "#e67e22" : "#2ca02c";
     L.polyline([a.latlng, b.latlng], {
       color,
-      weight: 5,
+      weight: 10,
+      opacity: 0.35,
       dashArray: b.it.direction === "re" ? "8 6" : null,
-      opacity: 0.95,
+      interactive: false,
     }).addTo(missionLines);
     const mid = [(a.latlng[0] + b.latlng[0]) / 2, (a.latlng[1] + b.latlng[1]) / 2];
     const label = meters < 10 ? `${meters.toFixed(2)} m` : `${meters.toFixed(1)} m`;
@@ -2492,6 +2800,234 @@ function syncMissionMapLayers() {
   if (missionPlanMode === "relative") paintRelativePreview();
 }
 
+function plannedPathLatLngs() {
+  const path = [];
+  for (const it of missionItems) {
+    if (it.has_pos && (it.lat || it.lon)) path.push([it.lat, it.lon]);
+  }
+  return path;
+}
+
+function distToSegmentMeters(lat, lon, a, b) {
+  const lat0 = ((lat + a[0] + b[0]) / 3) * Math.PI / 180;
+  const mlat = 111320;
+  const mlon = 111320 * Math.cos(lat0);
+  const bx = (b[1] - a[1]) * mlon;
+  const by = (b[0] - a[0]) * mlat;
+  const px = (lon - a[1]) * mlon;
+  const py = (lat - a[0]) * mlat;
+  const len2 = bx * bx + by * by;
+  let t = len2 > 1e-4 ? (px * bx + py * by) / len2 : 0;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const dx = px - t * bx;
+  const dy = py - t * by;
+  const cross = bx * py - by * px;
+  return {
+    dist: Math.hypot(dx, dy),
+    sign: cross >= 0 ? 1 : -1,
+    lat: a[0] + (t * by) / mlat,
+    lon: a[1] + (t * bx) / mlon,
+  };
+}
+
+function trackError(lat, lon, plan) {
+  if (!plan || plan.length < 2) return null;
+  let best = null;
+  for (let i = 1; i < plan.length; i++) {
+    const hit = distToSegmentMeters(lat, lon, plan[i - 1], plan[i]);
+    if (!best || hit.dist < best.dist) best = hit;
+  }
+  return best;
+}
+
+function errorColor(dist) {
+  if (dist <= 0.3) return "#1f6feb";
+  if (dist <= 1) return "#c48a00";
+  return "#c00000";
+}
+
+function fmtMeters(m) {
+  if (!Number.isFinite(m)) return "—";
+  if (m < 10) return m.toFixed(2) + " m";
+  return m.toFixed(1) + " m";
+}
+
+function trackDrawKey(plan) {
+  let h = missionTrack.length * 17 + plan.length;
+  for (let i = 0; i < plan.length; i++) {
+    h = (h * 33 + Math.round(plan[i][0] * 1e6) + Math.round(plan[i][1] * 1e6)) | 0;
+  }
+  return missionTrack.length + ":" + plan.length + ":" + h;
+}
+
+function summarizeTrack(plan) {
+  let driven = 0;
+  let sum = 0;
+  let max = 0;
+  let n = 0;
+  const step = missionTrack.length > 2500 ? Math.ceil(missionTrack.length / 2500) : 1;
+  for (let i = 1; i < missionTrack.length; i++) {
+    driven += distMeters(missionTrack[i - 1][0], missionTrack[i - 1][1], missionTrack[i][0], missionTrack[i][1]);
+  }
+  if (plan.length >= 2) {
+    for (let i = 0; i < missionTrack.length; i += step) {
+      const err = trackError(missionTrack[i][0], missionTrack[i][1], plan);
+      if (!err) continue;
+      sum += err.dist;
+      if (err.dist > max) max = err.dist;
+      n += 1;
+    }
+  }
+  missionTrackStats = { driven, mean: n ? sum / n : 0, max, compared: n > 0 };
+}
+
+function paintTrackStats(plan) {
+  const el = document.getElementById("missioncomparenums");
+  if (!el) return;
+  if (missionTrack.length < 2) {
+    el.textContent = "Rastro vazio.";
+    return;
+  }
+  if (!missionTrackStats) summarizeTrack(plan);
+  const stats = missionTrackStats;
+  const gps = gpsLatLon();
+  const now = gps ? trackError(gps[0], gps[1], plan) : null;
+  let live = "";
+  if (now) {
+    live = " · agora " + now.dist.toFixed(2) + " m " + (now.sign > 0 ? "à esquerda" : "à direita");
+  }
+  if (!stats.compared) {
+    el.textContent = "Percorrido " + fmtMeters(stats.driven) + ". Sem trecho previsto para comparar.";
+    return;
+  }
+  el.textContent = "Percorrido " + fmtMeters(stats.driven) + live
+    + " · médio " + stats.mean.toFixed(2) + " m · máximo " + stats.max.toFixed(2) + " m";
+}
+
+function paintTrackLink(plan) {
+  if (!missionMap) return;
+  const gps = gpsLatLon();
+  const hit = gps ? trackError(gps[0], gps[1], plan) : null;
+  if (!hit || hit.dist < 0.08) {
+    if (missionTrackLink) {
+      missionMap.removeLayer(missionTrackLink);
+      missionTrackLink = null;
+    }
+    return;
+  }
+  const latlngs = [gps, [hit.lat, hit.lon]];
+  const color = errorColor(hit.dist);
+  if (!missionTrackLink) {
+    missionTrackLink = L.polyline(latlngs, {
+      color,
+      weight: 2,
+      dashArray: "4 4",
+      interactive: false,
+    }).addTo(missionMap);
+  } else {
+    missionTrackLink.setLatLngs(latlngs);
+    missionTrackLink.setStyle({ color });
+  }
+}
+
+function paintTrackCompare() {
+  if (!missionMap || !missionTrackLayer) return;
+  const plan = plannedPathLatLngs();
+  const key = trackDrawKey(plan);
+  if (key !== missionTrackKey) {
+    missionTrackKey = key;
+    missionTrackLayer.clearLayers();
+    summarizeTrack(plan);
+    if (missionTrack.length >= 2) {
+      let run = [missionTrack[0]];
+      let color = "#1f6feb";
+      const first = trackError(missionTrack[0][0], missionTrack[0][1], plan);
+      if (first) color = errorColor(first.dist);
+      for (let i = 1; i < missionTrack.length; i++) {
+        const err = trackError(missionTrack[i][0], missionTrack[i][1], plan);
+        const next = err ? errorColor(err.dist) : "#1f6feb";
+        if (next !== color) {
+          run.push(missionTrack[i]);
+          L.polyline(run, { color, weight: 4, opacity: 0.9, interactive: false }).addTo(missionTrackLayer);
+          run = [missionTrack[i]];
+          color = next;
+        } else {
+          run.push(missionTrack[i]);
+        }
+      }
+      if (run.length >= 2) {
+        L.polyline(run, { color, weight: 4, opacity: 0.9, interactive: false }).addTo(missionTrackLayer);
+      }
+    } else if (missionTrack.length === 1) {
+      L.circleMarker(missionTrack[0], {
+        radius: 4,
+        color: "#1f6feb",
+        weight: 2,
+        fillOpacity: 0.9,
+        interactive: false,
+      }).addTo(missionTrackLayer);
+    }
+  }
+  paintTrackLink(plan);
+  paintTrackStats(plan);
+}
+
+async function pollTrack() {
+  if (page !== "editor-missao" || missionTrackBusy) return;
+  missionTrackBusy = true;
+  const epoch = missionTrackEpoch;
+  try {
+    const res = await fetch("/track?after=" + missionTrackAfter);
+    if (!res.ok || epoch !== missionTrackEpoch) return;
+    const data = await res.json();
+    if (epoch !== missionTrackEpoch) return;
+    let changed = false;
+    if (data.reset) {
+      const next = (data.points || []).map((p) => [p[1], p[2]]);
+      const same = next.length === missionTrack.length && data.after === missionTrackAfter;
+      if (!same) {
+        missionTrack = next;
+        changed = true;
+      }
+    } else if (data.points && data.points.length) {
+      for (const p of data.points) missionTrack.push([p[1], p[2]]);
+      changed = true;
+    }
+    if (Number.isFinite(data.after)) missionTrackAfter = data.after;
+    if (changed) {
+      missionTrackKey = "";
+      paintTrackCompare();
+    }
+  } catch (err) {
+    /* sem painel */
+  } finally {
+    missionTrackBusy = false;
+  }
+}
+
+async function clearRoverTrack() {
+  missionTrackEpoch += 1;
+  let data = {};
+  try {
+    const res = await fetch("/track/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    data = await res.json();
+  } catch (err) {
+    data = {};
+  }
+  missionTrack = [];
+  missionTrackAfter = Number.isFinite(data.after) ? data.after : 0;
+  missionTrackKey = "";
+  missionTrackStats = null;
+  const note = document.getElementById("note");
+  if (note && data.note) note.textContent = data.note;
+  paintTrackCompare();
+}
+
 function paintRoverOnMap() {
   if (!missionMap) return;
   const gps = gpsLatLon();
@@ -2509,6 +3045,9 @@ function paintRoverOnMap() {
     missionRoverMarker.setLatLng(gps);
     missionRoverMarker.setIcon(roverIcon(hdg));
   }
+  const plan = plannedPathLatLngs();
+  paintTrackLink(plan);
+  paintTrackStats(plan);
 }
 
 function showMissionCtx(x, y, lat, lon, seq) {
@@ -2591,6 +3130,7 @@ function paintMissionEditor(opts = {}) {
   }
   paintMissionDetail();
   syncMissionMapLayers();
+  paintTrackCompare();
   if (opts.fit) fitMissionBounds();
 }
 
@@ -2747,22 +3287,33 @@ function renderMission() {
       <aside class="mission-side">
         <div class="mission-side-head">
           <h1 class="page">Missão</h1>
-          <p class="last">O mapa mostra a missão local: linhas = trechos, números = waypoints, ▲ = rover.
+          <p class="last">O mapa mostra a missão local: a faixa é o caminho previsto, o traço fino é o que o rover fez.
             <b>Ler</b> traz a do rover; <b>Escrever</b> grava o que está no mapa.
             Clique = WAYPOINT (Alt = rumo, −1 passa direto). Arraste para mover; botão direito = menu.</p>
         </div>
         <div class="mission-toolbar">
-          <button type="button" class="missionact" id="missiondownload">Ler</button>
-          <button type="button" class="missionact" id="missionupload" data-danger="1">Escrever</button>
-          <button type="button" class="missionact missionlocal" id="missionnew">Nova</button>
-          <button type="button" class="missionact" id="missionsquare" title="HOME no GPS + 4 waypoints de 1 m alinhados à frente do rover">Quadrado 1 m</button>
-          <button type="button" class="missionact missionlocal" id="missionopen">Abrir</button>
-          <button type="button" class="missionact missionlocal" id="missionsave">Salvar</button>
-          <button type="button" class="missionact missionlocal" id="missionfit">Enquadrar</button>
-          <button type="button" class="missionact" id="missioncenter">Rover</button>
-          <button type="button" class="missionact missionlocal" id="missionallnext">Rumos→trecho</button>
-          <button type="button" class="missionact missionlocal" id="missionfix">Corrigir rumo</button>
-          <input id="missionfile" type="file" accept=".waypoints,.txt,text/plain" hidden>
+          <div class="mission-group">
+            <p class="mission-kicker">Rover</p>
+            <button type="button" class="missionact" id="missiondownload">Ler</button>
+            <button type="button" class="missionact danger" id="missionupload" data-danger="1">Escrever</button>
+            <button type="button" class="missionact" id="missionsquare" title="HOME no GPS + 4 waypoints de 1 m alinhados à frente do rover">Quadrado 1 m</button>
+            <button type="button" class="missionact" id="missioncenter">Rover</button>
+          </div>
+          <div class="mission-group">
+            <p class="mission-kicker">Mapa</p>
+            <button type="button" class="missionact missionlocal" id="missionfit">Enquadrar</button>
+            <button type="button" class="missionact missionlocal" id="missioncache" title="Baixa ruas e satélite desta área para abrir depois sem internet">Guardar área</button>
+            <button type="button" class="missionact missionlocal" id="missiontrackclear" title="Apaga o rastro gravado deste ensaio">Limpar rastro</button>
+            <button type="button" class="missionact missionlocal" id="missionallnext">Rumos→trecho</button>
+            <button type="button" class="missionact missionlocal" id="missionfix">Corrigir rumo</button>
+          </div>
+          <div class="mission-group">
+            <p class="mission-kicker">Arquivo</p>
+            <button type="button" class="missionact missionlocal" id="missionnew">Nova</button>
+            <button type="button" class="missionact missionlocal" id="missionopen">Abrir</button>
+            <button type="button" class="missionact missionlocal" id="missionsave">Salvar</button>
+            <input id="missionfile" type="file" accept=".waypoints,.txt,text/plain" hidden>
+          </div>
         </div>
         <div class="mission-modes">
           <button type="button" class="missionmode on" id="missionmodemap">Mapa</button>
@@ -2807,6 +3358,15 @@ function renderMission() {
         <p class="paramcount" id="missionstatus"></p>
         <p class="paramcount" id="missiondirty"></p>
         <p class="paramcount" id="missionstats"></p>
+        <div class="missioncompare" id="missioncompare">
+          <div class="cmp-legend">
+            <span><i class="swatch plan"></i>previsto</span>
+            <span><i class="swatch near"></i>≤ 0,3 m</span>
+            <span><i class="swatch mid"></i>≤ 1 m</span>
+            <span><i class="swatch far"></i>fora</span>
+          </div>
+          <p class="cmp-nums" id="missioncomparenums">Rastro vazio.</p>
+        </div>
         <div class="scriptxfer" id="missionxfer" hidden>
           <div class="scriptxfer-label" id="missionxferlabel"></div>
           <div class="scriptxfer-track" aria-hidden="true"><div class="scriptxfer-fill" id="missionxferfill"></div></div>
@@ -2840,7 +3400,8 @@ function renderMission() {
         <div id="missionleaflet" class="mission-leaflet"></div>
         <div class="mission-mapbar">
           <span id="missioncursor">—</span>
-          <span class="mission-hint">clique = adicionar · arraste = mover · direito = menu</span>
+          <span id="missionzoom">zoom 18</span>
+          <span class="mission-hint">clique = adicionar · arraste = mover · direito = menu · zoom até 24</span>
         </div>
       </div>
     </div>
@@ -3091,7 +3652,7 @@ view.addEventListener("click", (ev) => {
       if (confirm && confirm.el === btn && Date.now() < confirm.until) {
         confirm = null;
         btn.textContent = "Escrever";
-        btn.className = "missionact";
+        btn.className = "missionact danger";
         uploadMission();
         return;
       }
@@ -3099,10 +3660,10 @@ view.addEventListener("click", (ev) => {
         el: btn,
         until: Date.now() + 4000,
         label: "Escrever",
-        className: "missionact",
+        className: "missionact danger",
       };
       btn.textContent = "Substitui — confirmar";
-      btn.className = "missionact solid";
+      btn.className = "missionact danger";
     }
     return;
   }
@@ -3145,6 +3706,14 @@ view.addEventListener("click", (ev) => {
   }
   if (ev.target.closest("#missionfit")) {
     fitMissionBounds();
+    return;
+  }
+  if (ev.target.closest("#missioncache")) {
+    if (!ev.target.closest("#missioncache").disabled) cacheVisibleMap();
+    return;
+  }
+  if (ev.target.closest("#missiontrackclear")) {
+    if (!ev.target.closest("#missiontrackclear").disabled) clearRoverTrack();
     return;
   }
   if (ev.target.closest("#missioncenter")) {
@@ -3227,6 +3796,7 @@ async function pollState() {
   try { state = await (await fetch("/state")).json(); }
   catch (e) { return; }
   paint();
+  pollTrack();
 }
 
 async function pollTelem() {

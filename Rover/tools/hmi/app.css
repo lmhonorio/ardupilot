@@ -10,19 +10,31 @@
   --on-ink: #ffffff;
   --plot: #e4ddd4;
   --plot-zero: #efe8df;
+  --ok: #0d7a3f;
+  --on-ok: #ffffff;
+  --alarm: #9f1d14;
+  --alarm-fill: #b42318;
+  --on-alarm: #ffffff;
+  --alarm-soft: #f8ecea;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --blue: #8ebbe0;
-  --orange: #e3943a;
-  --ink: #efeae3;
-  --muted: #a8b0b8;
-  --line: #2c3540;
-  --bg: #12161c;
-  --soft: #1c232c;
-  --on-ink: #12161c;
-  --plot: #31404c;
-  --plot-zero: #3d4c5a;
+  --blue: #c5dff6;
+  --orange: #f2a85a;
+  --ink: #f7f2eb;
+  --muted: #d2c4b6;
+  --line: #4e4338;
+  --bg: #1c1814;
+  --soft: #2b241e;
+  --on-ink: #1c1814;
+  --plot: #3f362e;
+  --plot-zero: #564a40;
+  --ok: #1f8a4a;
+  --on-ok: #ffffff;
+  --alarm: #ffb4a8;
+  --alarm-fill: #c94b3c;
+  --on-alarm: #ffffff;
+  --alarm-soft: #3c2420;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); }
@@ -92,22 +104,26 @@ nav a[aria-current="page"] {
   font-variant-numeric: tabular-nums;
 }
 .status strong.on {
-  color: var(--on-ink);
-  background: var(--blue);
+  color: var(--on-ok);
+  background: var(--ok);
   display: inline-block;
   padding: 2px 10px;
   margin-top: 4px;
 }
 .status .estado em {
   margin-left: 14px;
-  color: var(--orange);
+  color: var(--alarm);
   font-style: normal;
   font-weight: 650;
   font-size: 16px;
 }
-.status strong.bad {
-  color: var(--orange);
-  background: none;
+.status strong.bad,
+.status strong.on.bad {
+  color: var(--on-alarm);
+  background: var(--alarm-fill);
+  display: inline-block;
+  padding: 2px 10px;
+  margin-top: 4px;
 }
 .note {
   min-height: 1.2em;
@@ -174,6 +190,15 @@ button.cmd {
   font-weight: 650;
 }
 button.cmd.solid { background: var(--blue); color: var(--on-ink); }
+button.cmd[data-danger="1"] {
+  border-color: var(--alarm-fill);
+  color: var(--alarm);
+}
+button.cmd[data-danger="1"].solid {
+  background: var(--alarm-fill);
+  border-color: var(--alarm-fill);
+  color: var(--on-alarm);
+}
 button.cmd:disabled, button.apply:disabled, button.mode:disabled { opacity: 0.38; cursor: default; }
 .reads {
   display: grid;
@@ -198,7 +223,7 @@ button.cmd:disabled, button.apply:disabled, button.mode:disabled { opacity: 0.38
 .tabs button.on { color: var(--blue); border-bottom-color: var(--blue); }
 .tabs button .count {
   margin-left: 6px;
-  color: #8d3a32;
+  color: var(--alarm);
   font-variant-numeric: tabular-nums;
 }
 .msglist {
@@ -217,16 +242,15 @@ button.cmd:disabled, button.apply:disabled, button.mode:disabled { opacity: 0.38
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
-.msg time { color: #7b8794; margin-right: 10px; }
-.msg.err { color: #8d3a32; }
-.msg.warn { color: var(--orange); }
-.msglist.alerts .msg.err { background: #f8f1ef; }
-.msglist.alerts .msg.warn { background: #f8f3ea; }
+.msg time { color: var(--muted); margin-right: 10px; }
+.msg.err, .msg.warn { color: var(--alarm); }
+.msglist.alerts .msg.err,
+.msglist.alerts .msg.warn { background: var(--alarm-soft); }
 .msglist.page { max-height: calc(100vh - 220px); }
 .charts.off { display: none; }
 .msglist.off { display: none; }
 .chart { margin: 0 0 18px; }
-.chart h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; color: var(--orange); }
+.chart h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; color: var(--ink); }
 .chart .legend { color: var(--muted); font-size: 13px; min-height: 1.2em; margin-bottom: 4px; }
 .nums { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 6px; }
 .num small { display: block; color: var(--muted); font-size: 12px; }
@@ -428,8 +452,22 @@ button.scriptact:disabled, button.scriptdel:disabled { opacity: 0.38; cursor: de
 .mission-side-head .last { font-size: 13px; margin: 0 0 4px; }
 .mission-toolbar {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.mission-group {
+  display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.mission-kicker {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 .mission-modes {
   display: flex;
@@ -533,7 +571,7 @@ button.missionrow.on {
   box-shadow: inset 3px 0 0 var(--blue);
 }
 button.missionrow.warn .missionrow-title,
-button.missionrow.warn .missionrow-meta { color: #c00000; }
+button.missionrow.warn .missionrow-meta { color: var(--alarm); }
 .missionrow-title {
   display: block;
   font-family: Consolas, "Cascadia Mono", monospace;
@@ -576,7 +614,45 @@ button.missionact {
   font-size: 13px;
 }
 button.missionact.solid { background: var(--blue); color: var(--on-ink); }
+button.missionact.danger {
+  background: var(--alarm-fill);
+  border-color: var(--alarm-fill);
+  color: var(--on-alarm);
+}
 button.missionact:disabled { opacity: 0.38; cursor: default; }
+.missioncompare {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cmp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cmp-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.swatch {
+  display: inline-block;
+  width: 16px;
+  height: 8px;
+  border-radius: 2px;
+}
+.swatch.plan { width: 22px; height: 10px; background: #2ca02c; opacity: 0.75; }
+.swatch.near { background: #1f6feb; }
+.swatch.mid { background: #c48a00; }
+.swatch.far { background: #c00000; }
+.cmp-nums {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
 .mission-mapwrap {
   position: relative;
   min-height: calc(100vh - 170px);
@@ -635,16 +711,13 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
   justify-content: center;
 }
 .mission-rover {
-  width: 24px;
-  height: 24px;
-  color: #ffcc33;
-  font-size: 20px;
-  text-shadow: 0 0 4px #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transform-origin: 50% 60%;
+  width: 36px;
+  height: 52px;
+  display: block;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
+.mission-rover svg { display: block; width: 100%; height: 100%; }
 .missionctx {
   position: fixed;
   z-index: 50;
@@ -673,7 +746,8 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
 }
 .missionctx button:hover { background: var(--soft); }
 .missionctx button:disabled { opacity: 0.35; }
-.leaflet-container { font: inherit; background: #e7efe0; }
+#missionleaflet.leaflet-container { font: inherit; background: #e7efe0; }
+#missionleaflet.leaflet-container img.leaflet-tile { mix-blend-mode: normal; }
 @media (max-width: 980px) {
   .missionplan {
     grid-template-columns: 1fr;
@@ -701,14 +775,11 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
   .logo.grin { height: 26px; }
 }
 #theme {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 20;
+  flex: 0 0 auto;
   border: 1px solid var(--line);
   background: var(--soft);
   color: var(--ink);
   border-radius: 999px;
-  padding: 10px 16px;
+  padding: 8px 14px;
   font-weight: 650;
 }

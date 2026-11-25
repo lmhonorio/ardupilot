@@ -13,6 +13,11 @@ e formata o cartão SD (MAV_CMD_STORAGE_FORMAT), como o sd_format.py.
 A aba Logs baixa e apaga os dataflash do cartão (LOG_REQUEST_* / LOG_ERASE).
 A aba Missão baixa, edita rumos/ré e envia a missão do rover (mesmo protocolo
 do mission_editor.py), sem abrir outra porta UDP.
+O mapa pede as imagens por este processo (/maptile/...), que guarda uma cópia
+em Rover/tools/map_cache. Sem a imagem exata, amplia uma cópia mais grossa ou
+reduz uma mais detalhada já salva. Sem nenhuma cópia e sem rede, devolve uma grade.
+O rastro do GPS fica em memória (/track) para a missão comparar o percurso
+feito com o caminho previsto.
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -26,6 +31,7 @@ import base64
 import collections
 import csv
 import datetime
+import io
 import json
 import math
 import os
@@ -36,7 +42,13 @@ import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+import urllib.request
+from urllib.parse import parse_qs, urlparse
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 import esc_monitor as mon
 import mission_core as mission
@@ -1868,6 +1880,10 @@ class Vehicle:
         self.latest = {}
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=500))
         self.list_sent = False
+        self.track = collections.deque(maxlen=20000)  # (seq, lat, lon)
+        self.track_seq = 0
+        self.track_gen = 0
+        self.track_last = None
 
 
 def mode_name(number):
@@ -1889,6 +1905,60 @@ def push_message(vehicle, sev, text):
         "sev": int(sev),
         "text": text,
     })
+
+
+def _track_meters(lat1, lon1, lat2, lon2):
+    mid = math.radians((lat1 + lat2) * 0.5)
+    dy = (lat2 - lat1) * 111320.0
+    dx = (lon2 - lon1) * 111320.0 * math.cos(mid)
+    return math.hypot(dx, dy)
+
+
+def append_track(vehicle, lat, lon):
+    """Keep a thinned GPS trail for the mission comparison. Drops points closer than 0.25 m."""
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return
+    if abs(lat) < 1e-5 and abs(lon) < 1e-5:
+        return
+    if abs(lat) > 90.0 or abs(lon) > 180.0:
+        return
+    with vehicle.lock:
+        last = vehicle.track_last
+        if last is not None and _track_meters(last[0], last[1], lat, lon) < 0.25:
+            return
+        vehicle.track_seq += 1
+        vehicle.track.append((vehicle.track_seq, round(lat, 7), round(lon, 7)))
+        vehicle.track_last = (lat, lon)
+
+
+def track_payload(vehicle, after):
+    with vehicle.lock:
+        items = list(vehicle.track)
+        gen = vehicle.track_gen
+        seq = vehicle.track_seq
+    if not items:
+        return {"gen": gen, "reset": True, "after": seq, "points": []}
+    oldest = items[0][0]
+    if after <= 0 or after + 1 < oldest:
+        chosen = items
+        reset = True
+    else:
+        chosen = [item for item in items if item[0] > after]
+        reset = False
+    return {
+        "gen": gen,
+        "reset": reset,
+        "after": items[-1][0],
+        "points": [[item[0], item[1], item[2]] for item in chosen],
+    }
+
+
+def clear_track(vehicle):
+    with vehicle.lock:
+        vehicle.track.clear()
+        vehicle.track_last = None
+        vehicle.track_gen += 1
+        return vehicle.track_gen, vehicle.track_seq
 
 
 def add_value(vehicle, name, value):
@@ -2040,9 +2110,16 @@ def reader(link, vehicle, stop, tx, enc):
                     vehicle.recorder.write(msg["name"], msg["value"], msg.get("boot_ms", ""))
             elif "values" in msg:
                 boot = msg.get("boot_ms", "")
+                lat = lon = None
                 for name, value in msg["values"]:
                     add_value(vehicle, name, value)
                     vehicle.recorder.write(name, value, boot)
+                    if name == "GPI_lat":
+                        lat = value
+                    elif name == "GPI_lon":
+                        lon = value
+                if lat is not None and lon is not None:
+                    append_track(vehicle, lat, lon)
 
 
 def take_statustext(vehicle, payload):
@@ -2794,6 +2871,283 @@ def json_body(payload, code=200):
     return code, "application/json", body
 
 
+# Ruas (OpenStreetMap, até o zoom 19, com cópia @2x) e satélite (Esri, até 22).
+# Acima disso a página amplia a imagem guardada.
+MAP_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map_cache")
+MAP_NATIVE_ZOOM = 19
+MAP_ZOOM_CAP = {"osm": 19, "sat": 22}
+TILE_URLS = {
+    "osm": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "sat": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+}
+TILE_UA = "GRIN-rover-hmi/1.0 (local ground station; map tile cache)"
+_tile_slots = threading.Semaphore(4)
+_tile_lock_guard = threading.Lock()
+_tile_locks = {}
+_tile_fail_lock = threading.Lock()
+_tile_fail_until = {}
+
+
+def _png_chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def _blank_png():
+    # 1x1 transparente. O navegador recebe 200 e não registra falha de rede.
+    raw = b"\x00\x00\x00\x00\x00"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+BLANK_TILE = _blank_png()
+
+
+def _grid_tile():
+    """256px pale grid, so a missing tile is never a white hole."""
+    if Image is None:
+        return BLANK_TILE
+    im = Image.new("RGB", (256, 256), (231, 239, 224))
+    pix = im.load()
+    line = (186, 198, 188)
+    edge = (120, 140, 150)
+    for i in range(0, 256, 32):
+        for t in range(256):
+            pix[i, t] = line
+            pix[t, i] = line
+    for t in range(256):
+        pix[0, t] = edge
+        pix[t, 0] = edge
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+GRID_TILE = _grid_tile()
+_RESAMPLE = None
+_RESAMPLE_FAST = None
+if Image is not None:
+    _pool = getattr(Image, "Resampling", Image)
+    _RESAMPLE = getattr(_pool, "BILINEAR", Image.BILINEAR)
+    _RESAMPLE_FAST = getattr(_pool, "NEAREST", Image.NEAREST)
+
+
+def _image_type(data):
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
+def _tile_file_lock(key):
+    with _tile_lock_guard:
+        lock = _tile_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _tile_locks[key] = lock
+        return lock
+
+
+def map_tile_file(source, z, x, y, retina=False):
+    cap = MAP_ZOOM_CAP.get(source)
+    if cap is None or z < 0 or z > cap:
+        return None
+    n = 1 << z
+    if x < 0 or y < 0 or x >= n or y >= n:
+        return None
+    name = "%d@2.img" % y if retina else "%d.img" % y
+    return os.path.join(MAP_CACHE_DIR, source, str(z), str(x), name)
+
+
+def _read_cached_tile(path):
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    if _image_type(data) is None:
+        return None
+    return data
+
+
+def _upscale_from_cache(source, z, x, y):
+    """Build this tile from a coarser one already on disk. None if nothing is saved."""
+    if Image is None or z <= 0:
+        return None
+    for shift in range(1, 7):
+        parent_z = z - shift
+        if parent_z < 0:
+            break
+        parent_x = x >> shift
+        parent_y = y >> shift
+        path = map_tile_file(source, parent_z, parent_x, parent_y)
+        if not path:
+            continue
+        data = _read_cached_tile(path)
+        if not data:
+            continue
+        try:
+            image = Image.open(io.BytesIO(data)).convert("RGBA")
+        except Exception:
+            continue
+        span = 1 << shift
+        width, height = image.size
+        cell_w = width / float(span)
+        cell_h = height / float(span)
+        ox = x - (parent_x << shift)
+        oy = y - (parent_y << shift)
+        box = (ox * cell_w, oy * cell_h, (ox + 1) * cell_w, (oy + 1) * cell_h)
+        sample = _RESAMPLE_FAST if shift > 2 else _RESAMPLE
+        crop = image.crop(box).resize((256, 256), sample)
+        out = io.BytesIO()
+        crop.save(out, format="PNG")
+        return out.getvalue()
+    return None
+
+
+def _downsample_from_cache(source, z, x, y, min_coverage=0.0):
+    """Monta este tile com as cópias mais detalhadas já salvas. None se a cobertura não chega."""
+    cap = MAP_ZOOM_CAP.get(source, MAP_NATIVE_ZOOM)
+    if Image is None or z >= cap:
+        return None
+    for shift in range(1, 5):
+        child_z = z + shift
+        if child_z > cap:
+            break
+        span = 1 << shift
+        cell = 256 // span
+        total = span * span
+        canvas = None
+        found = 0
+        sample = _RESAMPLE if shift <= 2 else _RESAMPLE_FAST
+        for dy in range(span):
+            for dx in range(span):
+                path = map_tile_file(source, child_z, (x << shift) + dx, (y << shift) + dy)
+                if not path:
+                    continue
+                data = _read_cached_tile(path)
+                if not data:
+                    continue
+                try:
+                    image = Image.open(io.BytesIO(data)).convert("RGBA")
+                except Exception:
+                    continue
+                if canvas is None:
+                    canvas = Image.new("RGBA", (256, 256), (231, 239, 224, 255))
+                canvas.paste(image.resize((cell, cell), sample), (dx * cell, dy * cell))
+                found += 1
+        if not found or found / float(total) < min_coverage:
+            continue
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    return None
+
+
+def _download_tile(source, z, x, y, retina=False):
+    url = TILE_URLS[source].format(z=z, x=x, y=y)
+    if retina and source == "osm" and url.endswith(".png"):
+        url = url[:-4] + "@2x.png"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": TILE_UA,
+        "Accept": "image/png,image/jpeg;q=0.9,*/*;q=0.1",
+    })
+    try:
+        with _tile_slots:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = resp.read(2_000_000)
+    except Exception:
+        return None
+    if _image_type(data) is None:
+        return None
+    return data
+
+
+def _cached_overview(source, z, x, y, min_coverage):
+    scaled = _upscale_from_cache(source, z, x, y)
+    if scaled:
+        return scaled
+    return _downsample_from_cache(source, z, x, y, min_coverage)
+
+
+def _save_tile(dest, data):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, dest)
+
+
+def map_tile_payload(path, only_cache=False, prefer_net=False, near=False, retina=False):
+    """Devolve (bytes, content-type, hit|fetch|scale|empty). empty é uma grade, nunca erro."""
+    match = re.fullmatch(r"/maptile/(osm|sat)/(\d+)/(\d+)/(\d+)\.png", path)
+    if not match:
+        return GRID_TILE, "image/png", "empty"
+    source = match.group(1)
+    z, x, y = int(match.group(2)), int(match.group(3)), int(match.group(4))
+    dest = map_tile_file(source, z, x, y)
+    if dest is None:
+        return GRID_TILE, "image/png", "empty"
+    if retina and source == "osm":
+        sharp = map_tile_file(source, z, x, y, retina=True)
+        sharp_data = _read_cached_tile(sharp) if sharp else None
+        if sharp_data is not None:
+            return sharp_data, _image_type(sharp_data), "hit"
+        if sharp and not only_cache and not near:
+            data = _download_tile(source, z, x, y, retina=True)
+            if data:
+                try:
+                    _save_tile(sharp, data)
+                except OSError:
+                    return data, _image_type(data), "fetch"
+                return data, _image_type(data), "fetch"
+    cached = _read_cached_tile(dest)
+    if cached is not None:
+        return cached, _image_type(cached), "hit"
+    if near:
+        scaled = _cached_overview(source, z, x, y, 0.55)
+        if scaled:
+            return scaled, "image/png", "scale"
+        return GRID_TILE, "image/png", "empty"
+    if only_cache:
+        return GRID_TILE, "image/png", "empty"
+    key = (source, z, x, y)
+    now = time.time()
+    with _tile_fail_lock:
+        if now < _tile_fail_until.get(key, 0):
+            scaled = None if prefer_net else _cached_overview(source, z, x, y, 0.0)
+            if scaled:
+                return scaled, "image/png", "scale"
+            return GRID_TILE, "image/png", "empty"
+    with _tile_file_lock(key):
+        cached = _read_cached_tile(dest)
+        if cached is not None:
+            return cached, _image_type(cached), "hit"
+        data = _download_tile(source, z, x, y)
+        if data is None:
+            with _tile_fail_lock:
+                _tile_fail_until[key] = time.time() + 20
+            if not prefer_net:
+                scaled = _cached_overview(source, z, x, y, 0.0)
+                if scaled:
+                    return scaled, "image/png", "scale"
+            return GRID_TILE, "image/png", "empty"
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp = dest + ".part"
+            with open(tmp, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp, dest)
+        except OSError:
+            return data, _image_type(data), "fetch"
+        return data, _image_type(data), "fetch"
+
+
 class LocalServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
@@ -2821,15 +3175,29 @@ def make_handler(link, vehicle, tx, enc):
         def log_message(self, fmt, *args):
             return
 
-        def _send(self, code, ctype, body, extra=None):
+        def _send(self, code, ctype, body, extra=None, cache="no-store"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             for key, value in extra or ():
                 self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
+
+        def _map_tile(self, path, query):
+            params = parse_qs(query)
+            only = params.get("only", ["0"])[0] == "1"
+            near = params.get("near", ["0"])[0] == "1"
+            prefer_net = params.get("fetch", ["0"])[0] == "1"
+            retina = params.get("retina", ["0"])[0] == "1"
+            body, ctype, kind = map_tile_payload(
+                path, only_cache=only, prefer_net=prefer_net, near=near, retina=retina)
+            cache = "no-store" if kind in ("empty", "scale") else "public, max-age=2592000"
+            self._send(200, ctype, body, (("X-Map-Tile", kind),), cache)
 
         def _read_json(self, limit=8000):
             try:
@@ -2845,7 +3213,19 @@ def make_handler(link, vehicle, tx, enc):
                 return None
 
         def do_GET(self):
-            path = urlparse(self.path).path
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/maptile/"):
+                self._map_tile(path, parsed.query)
+                return
+            if path == "/track":
+                try:
+                    after = int(parse_qs(parsed.query).get("after", ["0"])[0])
+                except (TypeError, ValueError):
+                    after = 0
+                code, ctype, body = json_body(track_payload(vehicle, after))
+                self._send(code, ctype, body)
+                return
             if path == "/state":
                 code, ctype, body = json_body(snapshot(link, vehicle))
                 self._send(code, ctype, body)
@@ -2903,6 +3283,14 @@ def make_handler(link, vehicle, tx, enc):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/track/clear":
+                self._read_json(8000)
+                gen, seq = clear_track(vehicle)
+                code, ctype, body = json_body({
+                    "ok": True, "note": "rastro apagado", "gen": gen, "after": seq,
+                })
+                self._send(code, ctype, body)
+                return
             if path == "/mission/download":
                 self._read_json(8000)
                 ok, note, items = mission_download(vehicle)
