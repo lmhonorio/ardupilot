@@ -264,6 +264,7 @@ function paint() {
     if (missionPlanMode === "relative") paintRelativePreview();
     const dirty = document.getElementById("missiondirty");
     if (dirty && !missionBusy) dirty.textContent = missionDirty ? "alterações locais não enviadas" : "";
+    paintMissionReports();
   }
   paintTools();
   if (page === "scripts" && scriptWanted && state.seen && !scriptBusy) {
@@ -2882,6 +2883,37 @@ function summarizeTrack(plan) {
   missionTrackStats = { driven, mean: n ? sum / n : 0, max, compared: n > 0 };
 }
 
+function paintMissionReports() {
+  const box = document.getElementById("missionreports");
+  if (!box || !state) return;
+  const rows = Array.isArray(state.reports) ? state.reports : [];
+  const key = rows.map((row) => row && row.file).join("|");
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.replaceChildren();
+  const title = document.createElement("p");
+  title.className = "cmp-nums";
+  title.textContent = rows.length
+    ? "Relatórios"
+    : "Nenhum relatório ainda. Ao terminar a missão no AUTO, um é salvo aqui.";
+  box.appendChild(title);
+  rows.forEach((row) => {
+    if (!row || !row.file) return;
+    const line = document.createElement("p");
+    line.className = "cmp-nums";
+    const link = document.createElement("a");
+    link.href = "/mission/report/" + encodeURIComponent(row.file);
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = row.at || row.file;
+    line.appendChild(link);
+    const mean = Number.isFinite(row.mean_m) ? row.mean_m.toFixed(2) : "—";
+    const max = Number.isFinite(row.max_m) ? row.max_m.toFixed(2) : "—";
+    line.appendChild(document.createTextNode(" · erro médio " + mean + " m · máximo " + max + " m"));
+    box.appendChild(line);
+  });
+}
+
 function paintTrackStats(plan) {
   const el = document.getElementById("missioncomparenums");
   if (!el) return;
@@ -3367,6 +3399,7 @@ function renderMission() {
           </div>
           <p class="cmp-nums" id="missioncomparenums">Rastro vazio.</p>
         </div>
+        <div class="missionreports" id="missionreports"></div>
         <div class="scriptxfer" id="missionxfer" hidden>
           <div class="scriptxfer-label" id="missionxferlabel"></div>
           <div class="scriptxfer-track" aria-hidden="true"><div class="scriptxfer-fill" id="missionxferfill"></div></div>

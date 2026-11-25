@@ -653,6 +653,15 @@ button.missionact:disabled { opacity: 0.38; cursor: default; }
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+.missionreports {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.missionreports a {
+  color: inherit;
+  font-weight: 650;
+}
 .mission-mapwrap {
   position: relative;
   min-height: calc(100vh - 170px);

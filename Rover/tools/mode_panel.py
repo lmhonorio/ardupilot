@@ -17,7 +17,8 @@ O mapa pede as imagens por este processo (/maptile/...), que guarda uma cópia
 em Rover/tools/map_cache. Sem a imagem exata, amplia uma cópia mais grossa ou
 reduz uma mais detalhada já salva. Sem nenhuma cópia e sem rede, devolve uma grade.
 O rastro do GPS fica em memória (/track) para a missão comparar o percurso
-feito com o caminho previsto.
+feito com o caminho previsto. Ao terminar a missão no AUTO, um relatório HTML
+é gravado em Rover/tools/mission_reports.
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -1548,6 +1549,7 @@ def mission_download(vehicle):
     client.end_progress()
     note = "missão baixada: %d itens" % len(items)
     print("mission: " + note, flush=True)
+    remember_plan(vehicle, items)
     with vehicle.lock:
         push_message(vehicle, 6, note)
     return True, note, items
@@ -1577,6 +1579,7 @@ def mission_upload(vehicle, items):
     client.end_progress()
     note = "missão enviada e aceita (%d itens)" % len(items)
     print("mission: " + note, flush=True)
+    remember_plan(vehicle, items)
     with vehicle.lock:
         push_message(vehicle, 6, note)
     return True, note
@@ -1884,6 +1887,12 @@ class Vehicle:
         self.track_seq = 0
         self.track_gen = 0
         self.track_last = None
+        self.plan_items = []
+        self.run_active = False
+        self.run_from = 0
+        self.run_t0 = 0.0
+        self.report_pending = False
+        self.reports = load_report_index()
 
 
 def mode_name(number):
@@ -1959,6 +1968,386 @@ def clear_track(vehicle):
         vehicle.track_last = None
         vehicle.track_gen += 1
         return vehicle.track_gen, vehicle.track_seq
+
+
+REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mission_reports")
+REPORT_NAME = re.compile(r"^missao_\d{8}_\d{6}(?:_\d+)?\.html$")
+REPORT_INDEX = os.path.join(REPORT_DIR, "index.json")
+
+
+def remember_plan(vehicle, items):
+    """Keep the mission last sent to or read from the rover. Caller may hold no lock."""
+    rows = [it.to_dict() for it in items]
+    with vehicle.lock:
+        vehicle.plan_items = rows
+
+
+def note_mission_mode(vehicle, mode):
+    """Mark the GPS trail from the moment AUTO starts. Caller holds vehicle.lock."""
+    if mode == MODE_ID["AUTO"]:
+        vehicle.run_active = True
+        vehicle.run_from = vehicle.track_seq
+        vehicle.run_t0 = time.time()
+        vehicle.report_pending = False
+
+
+def note_mission_text(vehicle, text):
+    """Ask for a report when the rover says the mission is over. Caller holds vehicle.lock."""
+    low = (text or "").strip().lower()
+    if "mission complete" not in low and "missão completa" not in low and "missao completa" not in low:
+        return
+    if not vehicle.run_active:
+        return
+    vehicle.run_active = False
+    vehicle.report_pending = True
+
+
+def _plan_points(rows):
+    points = []
+    for i, row in enumerate(rows or []):
+        try:
+            lat = float(row.get("lat") or 0)
+            lon = float(row.get("lon") or 0)
+            command = int(row.get("command") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (lat or lon):
+            continue
+        if i != 0 and command not in mission.NAV_WITH_POSITION:
+            continue
+        points.append({
+            "seq": int(row.get("seq", i)),
+            "name": str(row.get("name") or "CMD_%d" % command),
+            "lat": lat,
+            "lon": lon,
+        })
+    return points
+
+
+def _local_meters(lat, lon, origin_lat, origin_lon):
+    mid = math.radians((lat + origin_lat) * 0.5)
+    dy = (lat - origin_lat) * 111320.0
+    dx = (lon - origin_lon) * 111320.0 * math.cos(mid)
+    return dx, dy
+
+
+def _dist_to_segment(lat, lon, a, b):
+    ax, ay = 0.0, 0.0
+    bx, by = _local_meters(b["lat"], b["lon"], a["lat"], a["lon"])
+    px, py = _local_meters(lat, lon, a["lat"], a["lon"])
+    span = bx * bx + by * by
+    t = 0.0 if span < 1e-8 else (px * bx + py * by) / span
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    dx = px - t * bx
+    dy = py - t * by
+    return math.hypot(dx, dy), t
+
+
+def mission_report_stats(plan_rows, track, radius):
+    """Compare the driven GPS trail with the planned path. Distances are metres."""
+    plan = _plan_points(plan_rows)
+    pts = []
+    for lat, lon in track or []:
+        if math.isfinite(lat) and math.isfinite(lon) and (lat or lon):
+            pts.append((float(lat), float(lon)))
+    driven = 0.0
+    for i in range(1, len(pts)):
+        driven += _track_meters(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1])
+    planned = 0.0
+    legs = []
+    for i in range(1, len(plan)):
+        dist = _track_meters(plan[i - 1]["lat"], plan[i - 1]["lon"], plan[i]["lat"], plan[i]["lon"])
+        planned += dist
+        legs.append({
+            "from": plan[i - 1]["seq"],
+            "to": plan[i]["seq"],
+            "to_name": plan[i]["name"],
+            "planned_m": dist,
+            "sum": 0.0,
+            "n": 0,
+            "max": 0.0,
+        })
+    errors = []
+    for lat, lon in pts:
+        best_i = None
+        best_d = None
+        for i in range(1, len(plan)):
+            dist, _t = _dist_to_segment(lat, lon, plan[i - 1], plan[i])
+            if best_d is None or dist < best_d:
+                best_d = dist
+                best_i = i - 1
+        if best_d is None:
+            continue
+        errors.append(best_d)
+        leg = legs[best_i]
+        leg["sum"] += best_d
+        leg["n"] += 1
+        if best_d > leg["max"]:
+            leg["max"] = best_d
+    reached = []
+    limit = max(0.5, float(radius or 2.0))
+    for point in plan:
+        if point["seq"] == 0:
+            continue
+        nearest = None
+        for lat, lon in pts:
+            dist = _track_meters(lat, lon, point["lat"], point["lon"])
+            if nearest is None or dist < nearest:
+                nearest = dist
+        reached.append({
+            "seq": point["seq"],
+            "name": point["name"],
+            "nearest_m": nearest,
+            "ok": nearest is not None and nearest <= limit,
+        })
+    for leg in legs:
+        leg["mean"] = (leg["sum"] / leg["n"]) if leg["n"] else None
+        del leg["sum"]
+    return {
+        "plan": plan,
+        "track": pts,
+        "planned_m": planned,
+        "driven_m": driven,
+        "mean_m": (sum(errors) / len(errors)) if errors else None,
+        "max_m": max(errors) if errors else None,
+        "samples": len(errors),
+        "legs": legs,
+        "reached": reached,
+        "radius_m": limit,
+    }
+
+
+def _esc(text):
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _fmt_m(value):
+    if value is None:
+        return "—"
+    return "%.2f m" % value
+
+
+def _report_svg(stats):
+    pts = [(p["lat"], p["lon"]) for p in stats["plan"]] + list(stats["track"])
+    if len(pts) < 2:
+        return "<p>Sem pontos suficientes para o desenho.</p>"
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    lon0 = sum(p[1] for p in pts) / len(pts)
+    xy = [_local_meters(lat, lon, lat0, lon0) for lat, lon in pts]
+    xs = [p[0] for p in xy]
+    ys = [p[1] for p in xy]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    span = max(maxx - minx, maxy - miny, 1.0)
+    width, height, pad = 640, 420, 28
+
+    def proj(lat, lon):
+        x, y = _local_meters(lat, lon, lat0, lon0)
+        px = pad + (x - minx) / span * (width - 2 * pad)
+        py = height - pad - (y - miny) / span * (height - 2 * pad)
+        return px, py
+
+    def poly(points, color, width_px):
+        if len(points) < 2:
+            return ""
+        body = " ".join("%.1f,%.1f" % proj(lat, lon) for lat, lon in points)
+        return '<polyline fill="none" stroke="%s" stroke-width="%s" points="%s"/>' % (color, width_px, body)
+
+    marks = []
+    for point in stats["plan"]:
+        x, y = proj(point["lat"], point["lon"])
+        marks.append('<circle cx="%.1f" cy="%.1f" r="4" fill="#073e73"/>' % (x, y))
+        marks.append('<text x="%.1f" y="%.1f" font-size="12" fill="#073e73">%s</text>' % (
+            x + 6, y - 6, _esc(point["seq"])))
+    return (
+        '<svg viewBox="0 0 %d %d" width="100%%" role="img" aria-label="Caminho previsto e percorrido">'
+        '<rect width="100%%" height="100%%" fill="#f7f4ee"/>'
+        '%s%s%s</svg>'
+    ) % (width, height, poly([(p["lat"], p["lon"]) for p in stats["plan"]], "#8fbf7a", 8),
+         poly(stats["track"], "#1f6feb", 3), "".join(marks))
+
+
+def mission_report_html(when, stats):
+    leg_rows = []
+    for leg in stats["legs"]:
+        leg_rows.append(
+            "<tr><td>%d → %d %s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td></tr>" % (
+                leg["from"], leg["to"], _esc(leg["to_name"]),
+                _fmt_m(leg["planned_m"]), _fmt_m(leg["mean"]), _fmt_m(leg["max"]), leg["n"],
+            )
+        )
+    reach_rows = []
+    for row in stats["reached"]:
+        reach_rows.append(
+            "<tr><td>%d %s</td><td>%s</td><td>%s</td></tr>" % (
+                row["seq"], _esc(row["name"]), _fmt_m(row["nearest_m"]),
+                "sim" if row["ok"] else "não",
+            )
+        )
+    plan_note = "" if stats["plan"] else (
+        "<p>O painel não tinha a missão do rover. Envie ou baixe a missão antes do AUTO "
+        "para comparar com o caminho previsto.</p>"
+    )
+    return """<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<title>Relatório de missão %s</title>
+<style>
+  body { margin: 24px; font: 16px "Segoe UI", sans-serif; color: #1c1814; background: #f7f4ee; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%%; margin: 12px 0 24px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd4c8; }
+  th { font-size: 13px; color: #5c564e; }
+  .nums { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 20px; }
+  .nums div { min-width: 140px; }
+  .nums strong { display: block; font-size: 20px; }
+</style>
+</head>
+<body>
+<h1>Relatório de missão</h1>
+<p>%s</p>
+%s
+<div class="nums">
+  <div>Previsto<strong>%s</strong></div>
+  <div>Percorrido<strong>%s</strong></div>
+  <div>Erro médio<strong>%s</strong></div>
+  <div>Erro máximo<strong>%s</strong></div>
+</div>
+%s
+<h2>Trechos</h2>
+<table>
+<tr><th>Trecho</th><th>Previsto</th><th>Erro médio</th><th>Erro máximo</th><th>Amostras</th></tr>
+%s
+</table>
+<h2>Pontos</h2>
+<p>Um ponto conta como alcançado se o rover passou a até %.1f m dele.</p>
+<table>
+<tr><th>Ponto</th><th>Passagem mais perto</th><th>Alcançado</th></tr>
+%s
+</table>
+</body>
+</html>
+""" % (
+        _esc(when), _esc(when), plan_note,
+        _fmt_m(stats["planned_m"]) if stats["plan"] else "—",
+        _fmt_m(stats["driven_m"]),
+        _fmt_m(stats["mean_m"]),
+        _fmt_m(stats["max_m"]),
+        _report_svg(stats),
+        "".join(leg_rows) or "<tr><td colspan=\"5\">Sem trechos previstos.</td></tr>",
+        stats["radius_m"],
+        "".join(reach_rows) or "<tr><td colspan=\"3\">Sem pontos previstos.</td></tr>",
+    )
+
+
+def _report_public(row):
+    return {
+        "file": row["file"],
+        "at": row["at"],
+        "mean_m": row["mean_m"],
+        "max_m": row["max_m"],
+        "planned_m": row["planned_m"],
+        "driven_m": row["driven_m"],
+    }
+
+
+def maybe_write_mission_report(vehicle):
+    """Write the comparison file after Mission Complete. Safe to call often."""
+    with vehicle.lock:
+        if not vehicle.report_pending:
+            return None
+        vehicle.report_pending = False
+        track = [(lat, lon) for seq, lat, lon in vehicle.track if seq >= vehicle.run_from]
+        plan = list(vehicle.plan_items)
+        started = vehicle.run_t0 or time.time()
+        try:
+            radius = float(vehicle.params.get("WP_RADIUS", 2.0))
+        except (TypeError, ValueError):
+            radius = 2.0
+    try:
+        stats = mission_report_stats(plan, track, radius)
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        name = "missao_%s.html" % stamp
+        extra = 2
+        while os.path.exists(os.path.join(REPORT_DIR, name)):
+            name = "missao_%s_%d.html" % (stamp, extra)
+            extra += 1
+        path = os.path.join(REPORT_DIR, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(mission_report_html(when, stats))
+        row = {
+            "file": name,
+            "at": when,
+            "mean_m": None if stats["mean_m"] is None else round(stats["mean_m"], 2),
+            "max_m": None if stats["max_m"] is None else round(stats["max_m"], 2),
+            "planned_m": round(stats["planned_m"], 1),
+            "driven_m": round(stats["driven_m"], 1),
+        }
+    except Exception as exc:
+        print("relatorio: %s" % exc, flush=True)
+        with vehicle.lock:
+            push_message(vehicle, 4, "Relatório da missão não foi salvo: %s" % exc)
+        return None
+    with vehicle.lock:
+        vehicle.reports.insert(0, row)
+        del vehicle.reports[20:]
+        saved = list(vehicle.reports)
+        note = "Relatório salvo: %s" % name
+        push_message(vehicle, 6, note)
+        vehicle.note = note
+    try:
+        save_report_index(saved)
+    except OSError as exc:
+        print("relatorio: indice %s" % exc, flush=True)
+    print("relatorio: " + name, flush=True)
+    return row
+
+
+def load_report_index():
+    try:
+        with open(REPORT_INDEX, encoding="utf-8") as handle:
+            rows = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if isinstance(row, dict) and REPORT_NAME.match(str(row.get("file") or "")):
+            out.append(row)
+        if len(out) >= 20:
+            break
+    return out
+
+
+def save_report_index(rows):
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    tmp = REPORT_INDEX + ".part"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(rows[:20], handle)
+    os.replace(tmp, REPORT_INDEX)
+
+
+def report_list(vehicle):
+    with vehicle.lock:
+        return [_report_public(row) for row in vehicle.reports]
+
+
+def report_file(name):
+    if not REPORT_NAME.match(name or ""):
+        return None
+    path = os.path.join(REPORT_DIR, name)
+    if not os.path.isfile(path):
+        return None
+    return path
 
 
 def add_value(vehicle, name, value):
@@ -2073,6 +2462,7 @@ def reader(link, vehicle, stop, tx, enc):
                         label = mode_name(msg["mode"]) or str(msg["mode"])
                         push_message(vehicle, 6, "Modo %s" % label)
                         vehicle.recorder.write("MODE", int(msg["mode"]), "", label)
+                        note_mission_mode(vehicle, msg["mode"])
                 continue
             if msgid == mon.MSG_STATUSTEXT:
                 # Not tied to the first heartbeat. Mission Planner lists every
@@ -2081,6 +2471,8 @@ def reader(link, vehicle, stop, tx, enc):
                     with vehicle.lock:
                         push_message(vehicle, sev, text)
                         vehicle.recorder.write("STATUSTEXT", int(sev), "", text)
+                        note_mission_text(vehicle, text)
+                    maybe_write_mission_report(vehicle)
                 continue
             with vehicle.lock:
                 if vehicle.sysid is not None and sysid_rx != vehicle.sysid:
@@ -2828,6 +3220,7 @@ def snapshot(link, vehicle):
         "reset_inputs": reset_inputs,
         "param_epoch": param_epoch,
         "recording": recording,
+        "reports": report_list(vehicle),
     }
 
 
@@ -3225,6 +3618,15 @@ def make_handler(link, vehicle, tx, enc):
                     after = 0
                 code, ctype, body = json_body(track_payload(vehicle, after))
                 self._send(code, ctype, body)
+                return
+            if path.startswith("/mission/report/"):
+                file_path = report_file(path[len("/mission/report/"):])
+                if file_path is None:
+                    self._send(404, "text/plain; charset=utf-8", "relatório não encontrado".encode("utf-8"))
+                    return
+                with open(file_path, "rb") as handle:
+                    body = handle.read()
+                self._send(200, "text/html; charset=utf-8", body)
                 return
             if path == "/state":
                 code, ctype, body = json_body(snapshot(link, vehicle))
