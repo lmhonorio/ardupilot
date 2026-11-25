@@ -1,10 +1,12 @@
 const PAGES = [
+  ["operacao", "Operação"],
+  ["modos", "Modos"],
+  ["editor-missao", "Missão"],
+  ["parametros", "Parâmetros"],
+  ["scripts", "Scripts"],
+  ["telemetria", "Telemetria"],
   ["logs", "Logs"],
   ["mensagens", "Mensagens"],
-  ["modos", "Modos"],
-  ["parametros", "Parâmetros"],
-  ["editor-missao", "Missão"],
-  ["scripts", "Scripts"],
   ["ensaios", "Ensaios"],
 ];
 
@@ -64,7 +66,7 @@ let telem = { t: 0, window: 20, series: {} };
 let telemAt = 0;
 let shown = {};
 let frameAt = 0;
-let page = "logs";
+let page = "operacao";
 let confirm = null;
 let scriptBusy = false;
 let scriptWanted = false;
@@ -140,9 +142,9 @@ function fmt(v, digits) {
 }
 
 function pageId() {
-  const id = (location.hash || "#logs").slice(1);
+  const id = (location.hash || "#operacao").slice(1);
   if (["direcao", "velocidade", "motores", "missao", "script"].includes(id)) return "parametros";
-  return PAGES.some(([k]) => k === id) ? id : "logs";
+  return PAGES.some(([k]) => k === id) ? id : "operacao";
 }
 
 function renderNav() {
@@ -172,14 +174,52 @@ function armButton() {
   btn.disabled = !seen;
   if (armed) {
     btn.textContent = "Desarmar";
-    btn.className = "cmd solid";
+    btn.className = "cmd armbar solid";
   } else if (pending) {
     btn.textContent = "Confirmar armação";
-    btn.className = "cmd solid";
+    btn.className = "cmd armbar solid";
   } else {
     btn.textContent = "Armar";
-    btn.className = "cmd";
+    btn.className = "cmd armbar";
   }
+}
+
+// HUD labels from Mission Planner (HUDT GPS0..GPS8): fix_type of GPS_RAW_INT.
+const GPS_FIX = [
+  { text: "sem GPS", mp: "No GPS", kind: "bad" },
+  { text: "sem fix", mp: "No Fix", kind: "bad" },
+  { text: "2D", mp: "2D Fix", kind: "warn" },
+  { text: "3D", mp: "3D Fix", kind: "ok" },
+  { text: "DGPS", mp: "3D dgps", kind: "ok" },
+  { text: "RTK float", mp: "rtk Float", kind: "warn" },
+  { text: "RTK fixed", mp: "rtk Fixed", kind: "fixed" },
+  { text: "estático", mp: "Static", kind: "fixed" },
+  { text: "PPP", mp: "PPP", kind: "fixed" },
+];
+
+function paintGps() {
+  const chip = document.getElementById("gpschip");
+  const satsEl = document.getElementById("gpssats");
+  const fixEl = document.getElementById("gpsfix");
+  if (!chip || !satsEl || !fixEl) return;
+  const g = state.gps || {};
+  const fix = Number(g.GPS_fix);
+  const known = !!state.seen && Number.isFinite(fix);
+  chip.classList.remove("bad", "warn", "ok", "fixed", "stale");
+  if (!known) {
+    satsEl.textContent = "—";
+    fixEl.textContent = "—";
+    chip.title = "GPS: sem dados";
+    return;
+  }
+  const info = GPS_FIX[Math.round(fix)] || { text: "fix " + Math.round(fix), mp: String(Math.round(fix)), kind: "" };
+  if (info.kind) chip.classList.add(info.kind);
+  if (!state.alive) chip.classList.add("stale");
+  const sats = Number(g.GPS_sats);
+  const satN = Number.isFinite(sats) && Math.round(sats) !== 255 ? Math.round(sats) : null;
+  satsEl.textContent = satN == null ? "—" : String(satN);
+  fixEl.textContent = info.text;
+  chip.title = "GPS: " + info.mp + (satN == null ? "" : " · " + satN + " sats");
 }
 
 function paint() {
@@ -189,6 +229,7 @@ function paint() {
     confirm = null;
   }
   const alive = !!state.alive;
+  paintGps();
   document.getElementById("link").textContent = state.link || "—";
   const mode = document.getElementById("mode");
   mode.textContent = state.mode || "—";
@@ -691,22 +732,45 @@ async function eraseSdLogs() {
   paint();
 }
 
-function renderLogs() {
+function renderOperacao() {
   view.innerHTML = `
-    <h1 class="page">Logs</h1>
-    <div class="arm">
-      <div>
-        <p>Comando</p>
-        <strong>Armar e desarmar</strong>
-      </div>
-      <button type="button" class="cmd" id="armbtn">Armar</button>
-    </div>
+    <h1 class="page">Operação</h1>
+    <p class="ops-note">Armar e desarmar ficam sempre na barra de estado. Use os atalhos para o fluxo do ensaio.</p>
     <div class="reads">
       <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
       <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
       <div><span>Bateria</span><strong data-read="BAT">—</strong></div>
     </div>
     <p class="last" id="lasttext"></p>
+    <nav class="shortcuts" aria-label="Atalhos">
+      <a href="#modos"><strong>Modos</strong><span>Trocar o modo de voo</span></a>
+      <a href="#editor-missao"><strong>Missão</strong><span>Ler, editar e escrever waypoints</span></a>
+      <a href="#telemetria"><strong>Telemetria</strong><span>Gráficos ao vivo</span></a>
+      <a href="#logs"><strong>Logs</strong><span>CSV e Dataflash do cartão</span></a>
+      <a href="#parametros"><strong>Parâmetros</strong><span>Ajustar e gravar na placa</span></a>
+      <a href="#ensaios"><strong>Ensaios</strong><span>Preparar conjuntos prontos</span></a>
+      <a href="#mensagens"><strong>Mensagens</strong><span>Avisos e falhas da placa</span></a>
+      <a href="#scripts"><strong>Scripts</strong><span>Lua no cartão</span></a>
+    </nav>`;
+}
+
+function renderTelemetria() {
+  view.innerHTML = `
+    <h1 class="page">Telemetria</h1>
+    <p class="ops-note">Gráficos ao vivo. Para gravar CSV ou baixar .BIN do cartão, vá a <a href="#logs">Logs</a>.</p>
+    <div class="reads">
+      <div><span>Velocidade</span><strong data-read="VFR_gspd">—</strong><em>m/s</em></div>
+      <div><span>Desvio</span><strong data-read="NAV_xtrack">—</strong><em>m</em></div>
+      <div><span>Bateria</span><strong data-read="BAT">—</strong></div>
+    </div>
+    <p class="last" id="lasttext"></p>
+    ${CHARTS.map((c, i) => `<section class="chart"><h2>${c.title} (${c.unit})</h2><div class="nums">${NUM_ROWS[i]}</div><div class="legend"></div><canvas data-chart="${i}"></canvas></section>`).join("")}`;
+}
+
+function renderLogs() {
+  view.innerHTML = `
+    <h1 class="page">Logs</h1>
+    <p class="ops-note">Gravação CSV neste computador e ficheiros Dataflash (.BIN) no cartão. Gráficos ao vivo estão em <a href="#telemetria">Telemetria</a>.</p>
     <section class="record">
       <div class="who">
         <p>CSV</p>
@@ -722,8 +786,14 @@ function renderLogs() {
         <p>Cartão</p>
         <strong>Dataflash da Pixhawk</strong>
       </div>
-      <button type="button" class="cmd sdlogact" id="sdlogrefresh" data-danger="1">Atualizar</button>
-      <button type="button" class="cmd sdlogact" id="sdlogerase" data-danger="1">Apagar todos</button>
+      <div class="toolgroup">
+        <p class="mission-kicker">Rotina</p>
+        <button type="button" class="cmd sdlogact" id="sdlogrefresh" data-danger="1">Atualizar</button>
+      </div>
+      <div class="toolgroup">
+        <p class="mission-kicker">Manutenção</p>
+        <button type="button" class="cmd sdlogact" id="sdlogerase" data-danger="1">Apagar todos</button>
+      </div>
       <p class="status" id="sdlogstatus">Desarme para listar, baixar ou apagar os .BIN do cartão.</p>
       <div class="scriptxfer" id="sdlogxfer" hidden>
         <div class="scriptxfer-label" id="sdlogxferlabel"></div>
@@ -733,8 +803,7 @@ function renderLogs() {
         <div class="scriptxfer-meta" id="sdlogxfermeta"></div>
       </div>
       <div id="sdloglist" class="sdloglist"></div>
-    </section>
-    ${CHARTS.map((c, i) => `<section class="chart"><h2>${c.title} (${c.unit})</h2><div class="nums">${NUM_ROWS[i]}</div><div class="legend"></div><canvas data-chart="${i}"></canvas></section>`).join("")}`;
+    </section>`;
   const name = document.getElementById("logname");
   name.addEventListener("keydown", (ev) => {
     if (ev.key !== "Enter") return;
@@ -845,12 +914,18 @@ function renderParametros() {
   view.innerHTML = `
     <h1 class="page">Parâmetros</h1>
     <div class="paramtools">
-      <button type="button" class="cmd tool" data-tool="store">Gravar na placa</button>
-      <button type="button" class="cmd tool" data-tool="refresh">Atualizar</button>
-      <button type="button" class="cmd tool" data-tool="reset" data-danger="1">Padrão de fábrica</button>
-      <button type="button" class="cmd tool" data-tool="load">Carregar arquivo</button>
-      <button type="button" class="cmd tool" data-tool="save">Salvar arquivo</button>
-      <button type="button" class="cmd tool" data-tool="reboot" data-danger="1">Reiniciar</button>
+      <div class="toolgroup">
+        <p class="mission-kicker">Rotina</p>
+        <button type="button" class="cmd tool" data-tool="store">Gravar na placa</button>
+        <button type="button" class="cmd tool" data-tool="refresh">Atualizar</button>
+        <button type="button" class="cmd tool" data-tool="load">Carregar arquivo</button>
+        <button type="button" class="cmd tool" data-tool="save">Salvar arquivo</button>
+      </div>
+      <div class="toolgroup">
+        <p class="mission-kicker">Manutenção</p>
+        <button type="button" class="cmd tool" data-tool="reset" data-danger="1">Padrão de fábrica</button>
+        <button type="button" class="cmd tool" data-tool="reboot" data-danger="1">Reiniciar</button>
+      </div>
       <input id="parmfile" type="file" accept=".parm,.param,.txt" hidden>
     </div>
     <p class="last">Carregar arquivo só coloca os valores na tela. Grave na placa para enviar o que mudou. Padrão de fábrica zera a memória e reinicia.</p>
@@ -1504,12 +1579,18 @@ async function formatSdCard() {
 function renderScripts() {
   view.innerHTML = `
     <h1 class="page">Scripts</h1>
-    <p class="last">Lista os .lua que estão no cartão da Pixhawk. Copiar baixa o arquivo para este computador. Excluir apaga do cartão. Adicionar envia um .lua novo ou substitui o de mesmo nome. A placa só passa a usar a lista nova depois de reiniciar. Limpar STRG_BAK apaga os backups de parâmetros na microSD sem mostrar a lista. Formatar SD apaga scripts, logs e terreno (parâmetros e missão ficam); desarme antes e reenvie os scripts depois.</p>
+    <p class="last">Lista os .lua no cartão. Copiar baixa para este computador; Excluir apaga do cartão; Adicionar envia ou substitui. A placa só usa a lista nova depois de reiniciar. Limpar STRG_BAK e Formatar SD estão em Manutenção — desarme antes.</p>
     <div class="paramtools">
-      <button type="button" class="cmd scriptact" id="scriptrefresh">Atualizar</button>
-      <button type="button" class="cmd scriptact" id="scriptclearbak">Limpar STRG_BAK</button>
-      <button type="button" class="cmd scriptact" id="scriptformat" data-danger="1">Formatar SD</button>
-      <button type="button" class="cmd scriptact" id="scriptreboot">Reiniciar a placa</button>
+      <div class="toolgroup">
+        <p class="mission-kicker">Rotina</p>
+        <button type="button" class="cmd scriptact" id="scriptrefresh">Atualizar</button>
+        <button type="button" class="cmd scriptact" id="scriptreboot">Reiniciar a placa</button>
+      </div>
+      <div class="toolgroup">
+        <p class="mission-kicker">Manutenção</p>
+        <button type="button" class="cmd scriptact" id="scriptclearbak">Limpar STRG_BAK</button>
+        <button type="button" class="cmd scriptact" id="scriptformat" data-danger="1">Formatar SD</button>
+      </div>
     </div>
     <p class="paramcount" id="scriptstatus"></p>
     <div class="scriptxfer" id="scriptxfer" hidden>
@@ -3513,14 +3594,15 @@ function renderProcesses() {
       <p class="sets">${p.sets}</p>
       <button type="button" class="cmd proc" data-proc="${p.id}">Preparar</button>
     </article>`).join("");
-  view.innerHTML = `<h1 class="page">Ensaios</h1><div class="cards">${cards}</div>`;
+  view.innerHTML = `
+    <h1 class="page">Ensaios</h1>
+    <p class="ops-note">Preparar aplica o conjunto na placa. Depois confira em <a href="#parametros">Parâmetros</a>, grave CSV em <a href="#logs">Logs</a> e acompanhe em <a href="#telemetria">Telemetria</a>.</p>
+    <div class="cards">${cards}</div>`;
 }
 
+document.getElementById("armbtn").addEventListener("click", onArm);
+
 view.addEventListener("click", (ev) => {
-  if (ev.target.closest("#armbtn")) {
-    onArm();
-    return;
-  }
   if (ev.target.closest("#logstart")) {
     const name = (document.getElementById("logname").value || "").trim();
     post("/log", { action: "start", name });
@@ -3815,7 +3897,9 @@ function route() {
   }
   renderNav();
   if (!catalog) { view.textContent = "Carregando."; return; }
-  if (page === "logs") renderLogs();
+  if (page === "operacao") renderOperacao();
+  else if (page === "telemetria") renderTelemetria();
+  else if (page === "logs") renderLogs();
   else if (page === "mensagens") renderMessages();
   else if (page === "modos") renderModes();
   else if (page === "parametros") renderParametros();
@@ -3833,7 +3917,7 @@ async function pollState() {
 }
 
 async function pollTelem() {
-  if (page !== "logs") return;
+  if (page !== "telemetria") return;
   try { telem = await (await fetch("/telemetry")).json(); }
   catch (e) { return; }
   telemAt = performance.now();
@@ -3842,8 +3926,10 @@ async function pollTelem() {
 function liveFrame(now) {
   const dt = frameAt ? Math.min(0.05, (now - frameAt) / 1000) : 0.016;
   frameAt = now;
-  if (page === "logs" && document.querySelector("canvas[data-chart]")) {
+  if (page === "operacao" || page === "telemetria") {
     paintReadouts(dt);
+  }
+  if (page === "telemetria" && document.querySelector("canvas[data-chart]")) {
     paintNumbers(dt);
     for (const canvas of document.querySelectorAll("canvas[data-chart]")) {
       if (canvas.closest(".off")) continue;
@@ -3861,7 +3947,7 @@ Promise.all([
 ]).then(([data, docs]) => {
   catalog = data;
   paramDocs = docs || {};
-  if (!location.hash) location.replace("#logs");
+  if (!location.hash) location.replace("#operacao");
   route();
   pollState();
   setInterval(pollState, 250);

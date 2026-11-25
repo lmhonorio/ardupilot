@@ -2,12 +2,14 @@
 """Interface local do rover. O navegador nao fala MAVLink: este processo
 escuta a UDP, chama o HereLink e serve a pagina na rede local.
 
-A pagina que abre e a de logs, com armar e desarmar. As outras trocam modo,
-parametro ou preparam um ensaio (SCR_USER1). Nenhum ensaio arma sozinho.
-O CSV so abre quando a pagina pede e grava o mesmo conteudo do log do esc_monitor:
-telemetria, mensagens, parametros e mudancas de modo e de armamento.
-A aba Scripts lista, copia, envia e exclui os .lua de /APM/scripts e
-/APM/scripts/modules pelo MAVFtp, como o Mission Planner em Config, MAVFtp.
+A pagina que abre e a de Operação (atalhos e leituras). Armar e desarmar ficam
+na barra de estado em todas as abas. As outras trocam modo, parametro ou
+preparam um ensaio (SCR_USER1). Nenhum ensaio arma sozinho.
+O CSV so abre quando a pagina Logs pede e grava o mesmo conteudo do log do
+esc_monitor: telemetria, mensagens, parametros e mudancas de modo e de armamento.
+A aba Telemetria mostra os graficos ao vivo. A aba Scripts lista, copia, envia
+e exclui os .lua de /APM/scripts e /APM/scripts/modules pelo MAVFtp, como o
+Mission Planner em Config, MAVFtp.
 Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela
 e formata o cartão SD (MAV_CMD_STORAGE_FORMAT), como o sd_format.py.
 A aba Logs baixa e apaga os dataflash do cartão (LOG_REQUEST_* / LOG_ERASE).
@@ -146,6 +148,8 @@ SERIES = {
 }
 READOUT = ("VFR_gspd", "NAV_xtrack", "BAT_V", "BAT_I")
 GPS_FIELDS = ("GPI_lat", "GPI_lon", "GPI_hdg", "GPI_vn", "GPI_ve")
+# GPS_RAW_INT: tipo de fix e satélites, o mesmo par que o Mission Planner desenha no HUD.
+GPS_STATUS_FIELDS = ("GPS_fix", "GPS_sats")
 
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -3192,6 +3196,9 @@ def snapshot(link, vehicle):
         params = dict(vehicle.params)
         latest = {name: vehicle.latest[name] for name in READOUT if name in vehicle.latest}
         gps = {name: vehicle.latest[name] for name in GPS_FIELDS if name in vehicle.latest}
+        for name in GPS_STATUS_FIELDS:
+            if name in vehicle.latest:
+                gps[name] = vehicle.latest[name]
         blocked = []
         reset_inputs = vehicle.reset_inputs
         vehicle.reset_inputs = False
