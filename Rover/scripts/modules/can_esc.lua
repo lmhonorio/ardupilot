@@ -92,17 +92,10 @@ local diag = C.diag
 local PARAM_SPEC = C.PARAM_SPEC
 local read_gains = nil
 
--- Load order: shared state (creates ESC_*), speed loop, then the optional parts
+-- Shared state (creates ESC_*) and the speed loop. rover.lua loads the
+-- optional can_wheeltune and can_report after this, one module per script run.
 require("can_speed")
 read_gains = C.read_gains
-local tune_ok, tune_err = pcall(require, "can_wheeltune")
-if not tune_ok then
-  gcs:send_text(MAV_SEVERITY.WARNING, "ESC: wheel tune not loaded: " .. string.sub(tostring(tune_err), 1, 30))
-end
-local report_ok, report_err = pcall(require, "can_report")
-if not report_ok then
-  gcs:send_text(MAV_SEVERITY.WARNING, "ESC: reports not loaded: " .. string.sub(tostring(report_err), 1, 30))
-end
 
 local D = {}
 

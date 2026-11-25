@@ -27,7 +27,7 @@ end
 
 -- Module of rover.lua: these were globals of the stand-alone script. As locals
 -- they cannot collide with the other modules sharing the script environment.
-local bind_param, bind_add_param, get_time, init_params_tables, reset_axes_done
+local bind_param, get_time, init_params_tables, reset_axes_done
 local get_all_params, restore_all_params, save_all_params, setup_filters
 local save_gcs_pid_mask, restore_gcs_pid_mask, setup_gcs_pid_mask, have_pilot_input
 local get_current_axis, get_slew_rate, advance_axis, adjust_gain, write_log
@@ -40,9 +40,8 @@ local quicktune_started, axis
 -- global definitions
 local MAV_SEVERITY = {EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTICE=5, INFO=6, DEBUG=7}
 
-local PARAM_TABLE_KEY = 15
-local PARAM_TABLE_PREFIX = "RTUN_"
-local PARAM_TABLE_SIZE = 13
+-- RTUN_ parameters live in quicktune_params.lua (loaded at boot)
+local QP = require("quicktune_params")
 
 -- bind a parameter to a variable
 function bind_param(name)
@@ -51,132 +50,19 @@ function bind_param(name)
    return p
 end
 
--- add a parameter and bind it to a variable
-function bind_add_param(name, idx, default_value)
-   assert(param:add_param(PARAM_TABLE_KEY, idx, name, default_value), string.format("RTun: could not add param %s", name))
-   return bind_param(PARAM_TABLE_PREFIX .. name)
-end
-
--- setup quicktune specific parameters
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, PARAM_TABLE_SIZE), "RTun: could not add param table")
-
---[[
-  // @Param: RTUN_ENABLE
-  // @DisplayName: Rover Quicktune enable
-  // @Description: Enable quicktune system
-  // @Values: 0:Disabled,1:Enabled
-  // @User: Standard
---]]
-local RTUN_ENABLE = bind_add_param('ENABLE', 1, 1)
-
---[[
-  // @Param: RTUN_AXES
-  // @DisplayName: Rover Quicktune axes
-  // @Description: axes to tune
-  // @Bitmask: 0:Steering,1:Speed
-  // @User: Standard
---]]
-local RTUN_AXES = bind_add_param('AXES', 2, 3)
-
---[[
-  // @Param: RTUN_STR_FFRATIO
-  // @DisplayName: Rover Quicktune Steering Rate FeedForward ratio
-  // @Description: Ratio between measured response and FF gain. Raise this to get a higher FF gain
-  // @Range: 0 1.0
-  // @User: Standard
---]]
-local RTUN_STR_FFRATIO = bind_add_param('STR_FFRATIO', 3, 0.9)
-
---[[
-  // @Param: RTUN_STR_P_RATIO
-  // @DisplayName: Rover Quicktune Steering FF to P ratio
-  // @Description: Ratio between steering FF and P gains. Raise this to get a higher P gain, 0 to leave P unchanged
-  // @Range: 0 2.0
-  // @User: Standard
---]]
-local RTUN_STR_P_RATIO = bind_add_param('STR_P_RATIO', 4, 0.5)
-
---[[
-  // @Param: RTUN_STR_I_RATIO
-  // @DisplayName: Rover Quicktune Steering FF to I ratio
-  // @Description: Ratio between steering FF and I gains. Raise this to get a higher I gain, 0 to leave I unchanged
-  // @Range: 0 2.0
-  // @User: Standard
---]]
-local RTUN_STR_I_RATIO = bind_add_param('STR_I_RATIO', 5, 0.5)
-
---[[
-  // @Param: RTUN_SPD_FFRATIO
-  // @DisplayName: Rover Quicktune Speed FeedForward (equivalent) ratio
-  // @Description: Ratio between measured response and CRUISE_THROTTLE value. Raise this to get a higher CRUISE_THROTTLE value
-  // @Range: 0 1.0
-  // @User: Standard
---]]
-local RTUN_SPD_FFRATIO = bind_add_param('SPD_FFRATIO', 6, 1.0)
-
---[[
-  // @Param: RTUN_SPD_P_RATIO
-  // @DisplayName: Rover Quicktune Speed FF to P ratio
-  // @Description: Ratio between speed FF and P gain. Raise this to get a higher P gain, 0 to leave P unchanged
-  // @Range: 0 2.0
-  // @User: Standard
---]]
-local RTUN_SPD_P_RATIO = bind_add_param('SPD_P_RATIO', 7, 1.0)
-
---[[
-  // @Param: RTUN_SPD_I_RATIO
-  // @DisplayName: Rover Quicktune Speed FF to I ratio
-  // @Description: Ratio between speed FF and I gain. Raise this to get a higher I gain, 0 to leave I unchanged
-  // @Range: 0 2.0
-  // @User: Standard
---]]
-local RTUN_SPD_I_RATIO = bind_add_param('SPD_I_RATIO', 8, 1.0)
-
---[[
-  // @Param: RTUN_AUTO_FILTER
-  // @DisplayName: Rover Quicktune auto filter enable
-  // @Description: When enabled the PID filter settings are automatically set based on INS_GYRO_FILTER
-  // @Values: 0:Disabled,1:Enabled
-  // @User: Standard
---]]
-local RTUN_AUTO_FILTER = bind_add_param('AUTO_FILTER', 9, 1)
-
---[[
-  // @Param: RTUN_AUTO_SAVE
-  // @DisplayName: Rover Quicktune auto save
-  // @Description: Number of seconds after completion of tune to auto-save. This is useful when using a 2 position switch for quicktune
-  // @Units: s
-  // @User: Standard
---]]
-local RTUN_AUTO_SAVE = bind_add_param('AUTO_SAVE', 10, 5)
-
---[[
-  // @Param: RTUN_RC_FUNC
-  // @DisplayName: Rover Quicktune RC function
-  // @Description: RCn_OPTION number to use to control tuning stop/start/save
-  // @Values: 300:Scripting1, 301:Scripting2, 302:Scripting3, 303:Scripting4, 304:Scripting5, 305:Scripting6, 306:Scripting7, 307:Scripting8
-  // @User: Standard
---]]
-local RTUN_RC_FUNC = bind_add_param('RC_FUNC', 11, 300)
-
---[[
-  // @Param: RTUN_SPEED_MIN
-  // @DisplayName: Rover Quicktune minimum speed for tuning
-  // @Description: The mimimum speed in m/s required for tuning to start
-  // @Units: m/s
-  // @Range: 0.1 0.5
-  // @User: Standard
---]]
-local SPEED_FF_SPEED_MIN = bind_add_param('SPEED_MIN', 12, 0.5)
-
---[[
-  // @Param: RTUN_MSG
-  // @DisplayName: Rover Quicktune messages
-  // @Description: 0 shows only the overall progress (Tune NN%) plus saved / cancelled. 1 shows every message: stages, live values, stalls with hints, and each gain change.
-  // @Values: 0:Progress only,1:Full
-  // @User: Standard
---]]
-local RTUN_MSG = bind_add_param('MSG', 13, 0)
+local RTUN_ENABLE = QP.ENABLE
+local RTUN_AXES = QP.AXES
+local RTUN_STR_FFRATIO = QP.STR_FFRATIO
+local RTUN_STR_P_RATIO = QP.STR_P_RATIO
+local RTUN_STR_I_RATIO = QP.STR_I_RATIO
+local RTUN_SPD_FFRATIO = QP.SPD_FFRATIO
+local RTUN_SPD_P_RATIO = QP.SPD_P_RATIO
+local RTUN_SPD_I_RATIO = QP.SPD_I_RATIO
+local RTUN_AUTO_FILTER = QP.AUTO_FILTER
+local RTUN_AUTO_SAVE = QP.AUTO_SAVE
+local RTUN_RC_FUNC = QP.RC_FUNC
+local SPEED_FF_SPEED_MIN = QP.SPEED_MIN
+local RTUN_MSG = QP.MSG
 
 -- other vehicle parameters used by this script
 local INS_GYRO_FILTER  = bind_param("INS_GYRO_FILTER")
@@ -839,6 +725,12 @@ function QT.step()
     return 1000
   end
   return 1000 / (quicktune_active and UPDATE_RATE_HZ or IDLE_RATE_HZ)
+end
+
+-- True when nothing is pending: no changed gain waiting to be saved or
+-- restored. rover.lua unloads the module only then.
+function QT.idle()
+  return not need_restore
 end
 
 -- The stand-alone script ran its first cycle at load

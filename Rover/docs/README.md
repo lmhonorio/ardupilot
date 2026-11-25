@@ -13,7 +13,9 @@ Os scripts estão em `Rover/scripts/` (estrutura abaixo). A lista oficial de cad
 
 ## Estrutura dos scripts
 
-Só existe um script na pasta principal: `rover.lua`. Ele carrega os módulos de `modules/` e roda as três tarefas (mixer, QuickTune e driver CAN) num agendador único. No cartão SD fica igual: `APM/scripts/rover.lua` e `APM/scripts/modules/*.lua`.
+Só existe um script na pasta principal: `rover.lua`. Ele carrega os módulos de `modules/`, um por execução do script, e roda as tarefas (mixer, QuickTune e driver CAN) num agendador único.
+
+**Carga sob demanda (memória):** o heap do scripting (`SCR_HEAP_SIZE` = 520000, com só ~52 kB de RAM livre na placa) não comporta tudo junto. Por isso `quicktune.lua` só carrega com `SCR_USER1 = 1` (ou a chave `RTUN_RC_FUNC`) e `can_wheeltune.lua` só com `SCR_USER1 = 4/5`; cada um sai quando o seletor muda e não há tune em andamento. Os parâmetros `RTUN_` ficam em `quicktune_params.lua`, carregado no boot. Ao carregar o tune de roda aparece `Rover: wheel tune loaded`; o QuickTune mostra `Rover QuickTune loaded`. No cartão SD fica igual: `APM/scripts/rover.lua` e `APM/scripts/modules/*.lua`.
 
 | Módulo | Função |
 | --- | --- |
@@ -23,11 +25,12 @@ Só existe um script na pasta principal: `rover.lua`. Ele carrega os módulos de
 | `can_esc.lua` | Driver **CAN** do C620: E/S do barramento, saúde, pré-arm, `ESC_STAT` |
 | `can_state.lua` | Estado e parâmetros `ESC_` do driver CAN |
 | `can_speed.lua` | PI de velocidade de cada roda (rampa, pré-filtro, frenagem, stall boost) |
-| `can_wheeltune.lua` | Autotune de roda por degrau, frente e ré (`SCR_USER1 = 4/5`) |
+| `can_wheeltune.lua` | Autotune de roda por degrau, frente e ré (`SCR_USER1 = 4/5`), carregado sob demanda |
 | `can_report.lua` | Log `DJIC`, telemetria de ESC e valores ao vivo para a GCS |
 | `yaw_align.lua` | Alinhamento de proa no waypoint e sequência de verificação |
 | `yaw_tune.lua` | Autotune de yaw por relé (`SCR_USER1 = 2`) |
-| `quicktune.lua` | QuickTune do ArduPilot (`SCR_USER1 = 1`) |
+| `quicktune.lua` | QuickTune do ArduPilot (`SCR_USER1 = 1`), carregado sob demanda |
+| `quicktune_params.lua` | Parâmetros `RTUN_` (sempre carregado) |
 | `circle-tune.lua` | Relé de curva em Circle (`SCR_USER1 = 3`) |
 | `gain_banks.lua` | Bancos de ganho PWM/CAN (`CANT_`) |
 | `autotune.lua`, `pid.lua`, `functions.lua` | Relé, PID e funções comuns |
@@ -63,7 +66,7 @@ Cada tabela Lua tem uma chave fixa. Não reutilizar a chave com outro prefixo.
 | Prefixo | Chave | Módulo |
 | --- | --- | --- |
 | `BATT_SOC` | 14 | `system-start.lua` |
-| `RTUN_` | 15 | `quicktune.lua` |
+| `RTUN_` | 15 | `quicktune_params.lua` |
 | `YAWT_` | 16 | `yaw_align.lua` (`GAIN_MULT`, `TIMEOUT`) e `yaw_tune.lua` (o resto) |
 | `THRO_` | 17 | `mixer.lua` |
 | `CTUN_` | 18 | `modules/circle-tune.lua` |

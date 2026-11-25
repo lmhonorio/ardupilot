@@ -413,7 +413,7 @@ end
 local function new_env()
   local env = {}
   for k, v in pairs(_G) do
-    if k ~= "arg" and k ~= "os" and k ~= "collectgarbage" and k ~= "dofile"
+    if k ~= "arg" and k ~= "os" and k ~= "collectgarbage" and k ~= "dofile" and k ~= "debug" and k ~= "mem_kb"
         and k ~= "loadfile" and k ~= "require" and k ~= "package" then
       env[k] = v
     end
@@ -425,6 +425,17 @@ local function new_env()
   env._LOADED = {}
   env.package = { path = "./?.lua", loaded = env._LOADED }
   env.require = function(name)
+    -- ArduPilot (lua/src/loadlib.c ll_require) takes the environment from the
+    -- FIRST upvalue of the function the scheduler is running, not from the
+    -- caller. Reproduce that, so a script whose running function does not
+    -- have _ENV first fails here as it does on the board.
+    local cur = CURRENT_FN
+    if cur ~= nil and debug ~= nil then
+      local uname, uval = debug.getupvalue(cur, 1)
+      if type(uval) ~= "table" then
+        error("attempt to index a " .. type(uval) .. " value (ArduPilot require: first upvalue of the running function is '" .. tostring(uname) .. "')", 2)
+      end
+    end
     if env._LOADED[name] ~= nil then
       return env._LOADED[name]
     end
@@ -441,6 +452,7 @@ local function new_env()
   return env
 end
 
+CURRENT_FN = nil
 local tasks = {}
 for _, file in ipairs(TOP) do
   local env = new_env()
@@ -449,6 +461,7 @@ for _, file in ipairs(TOP) do
 end
 
 local function run_task(t)
+  CURRENT_FN = t.fn
   local ok, fn, delay
   if t.first then
     t.first = false
@@ -503,6 +516,7 @@ at(45000, function()
   V.mode = MODE.HOLD
   V.thr_out, V.str_out = 0, 0
   if SCENARIO == "can" then PV.SCR_USER1 = 4 end
+  if SCENARIO == "can5" then PV.SCR_USER1 = 5 end
 end)
 -- yaw relay tune in HOLD
 at(80000, function() PV.SCR_USER1 = 0 end)

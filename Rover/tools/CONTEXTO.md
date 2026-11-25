@@ -34,14 +34,14 @@ Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da
 
 | Arquivo | Papel |
 |---|---|
-| `Rover/scripts/rover.lua` (r2611a) | **Único script.** Carrega os módulos e roda mixer, QuickTune e driver CAN num agendador; isola a falha de cada tarefa; recusa iniciar se os scripts antigos estiverem no SD |
+| `Rover/scripts/rover.lua` (r2611c) | **Único script.** Carrega um módulo por execução e roda mixer, QuickTune e driver CAN num agendador; isola a falha de cada tarefa; recusa iniciar se os scripts antigos estiverem no SD. `quicktune.lua` (SCR_USER1=1) e `can_wheeltune.lua` (4/5) carregam sob demanda e saem depois: tudo junto estoura o heap (`not enough mem`). O `require` do ArduPilot pega o ambiente do 1º upvalue da função em execução: `load_next` e `update` começam com `local _ = require` |
 | `modules/rover_common.lua` | Constantes, utilitários e a tabela `R` compartilhada (`R.pwm`, `R.can`, `R.mixer`) |
 | `modules/mixer.lua` | Modos, alocação L/R, `THRO_`, `MIXER_`, Circle tune |
 | `modules/out_pwm.lua` | Saída PWM (MAIN 1..4), kick de yaw, `THRO_MIN_LUA` |
 | `modules/can_esc.lua` + `can_state`, `can_speed`, `can_wheeltune`, `can_report` | Driver C620 (v2611o): barramento e saúde; estado/`ESC_`; PI de rpm por roda; WheelTune por degrau; log/telemetria |
 | `modules/yaw_align.lua` / `yaw_tune.lua` | Alinhamento de proa no waypoint / relé de yaw |
 | `modules/gain_banks.lua` | Bancos `CANT_` |
-| `modules/quicktune.lua` | QuickTune do ArduPilot (ajusta `ATC_*`) |
+| `modules/quicktune.lua` + `quicktune_params.lua` | QuickTune do ArduPilot (ajusta `ATC_*`); os parâmetros `RTUN_` ficam no `quicktune_params` (boot) |
 | `modules/` (resto) | `pid.lua`, `autotune.lua` (relé), `circle-tune.lua`, `functions.lua` |
 | `Rover/tools/test/lua_sim.lua` | Simulador da API do ArduPilot (4 rodas, CAN e PWM) que grava um traço para comparar versões dos scripts. Precisa de um Lua 5.3 |
 | `Rover/tools/esc_monitor.py` | Monitor no PC: gráfico, console e CSV, via HereLink |

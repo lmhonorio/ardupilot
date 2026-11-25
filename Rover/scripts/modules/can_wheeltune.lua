@@ -22,6 +22,13 @@ local diag = C.diag
 local PARAM_SPEC = C.PARAM_SPEC
 local read_gains, profile_wheel, wheel_pi, wheel_ti, prefilter = C.read_gains, C.profile_wheel, C.wheel_pi, C.wheel_ti, C.prefilter
 
+-- Everything this module adds to the shared M table, so unload() can take it
+-- back out and the memory is freed (rover.lua loads it only for SCR_USER1 = 4/5)
+local M_before = {}
+for key in pairs(M) do
+  M_before[key] = true
+end
+
 function M.fmt4(tag, t)
   return string.format("%s %.4f %.4f %.4f %.4f", tag, t[1] or 0, t[2] or 0, t[3] or 0, t[4] or 0)
 end
@@ -753,4 +760,26 @@ function M.wheel_tune(dt, k, armed, enabled)
   return cur
 end
 
-return true
+local M_added = {}
+for key in pairs(M) do
+  if not M_before[key] then
+    M_added[#M_added + 1] = key
+  end
+end
+M_before = nil
+
+--[[
+Unload: only while no tune runs (C.tune.state "idle"). The speed loop then
+runs without M.wheel_tune, as when this file is not installed.
+--]]
+local WT = {}
+function WT.idle()
+  return C.tune.state == "idle"
+end
+function WT.unload()
+  for i = 1, #M_added do
+    M[M_added[i]] = nil
+  end
+end
+
+return WT
