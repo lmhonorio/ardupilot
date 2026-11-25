@@ -62,7 +62,7 @@ end
 
 local INITIAL = {
   SCR_USER1 = 0, SCR_USER2 = 0, SCR_USER3 = 0, SCR_USER4 = 0, SCR_USER5 = 2,
-  SCR_VM_I_COUNT = 100000,
+  SCR_VM_I_COUNT = 100000, SCR_DEBUG_OPTS = 0, SCR_HEAP_SIZE = 520000,
   RC1_TRIM = 1500, RC3_TRIM = 1500, RC3_REVERSED = 0, RC1_DZ = 30, RC3_DZ = 30,
   RCMAP_ROLL = 1, RCMAP_THROTTLE = 3,
   SERVO1_FUNCTION = 74, SERVO2_FUNCTION = 73, SERVO3_FUNCTION = 73, SERVO4_FUNCTION = 74,
@@ -481,6 +481,10 @@ local function run_task(t)
   end
   t.fn = fn
   t.due = T + math.max(1, math.floor(delay or 1))
+  -- ArduPilot's runtime line while SCR_DEBUG_OPTS bit 1 is set (memory not modelled)
+  if ((PV.SCR_DEBUG_OPTS or 0) & 2) ~= 0 then
+    trace("GCS 7 Lua: Time: 0 Mem: 0 + 0")
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -511,19 +515,26 @@ at(12000, function()
 end)
 at(15000, function() V.nav_idx = 2 end)
 at(19000, function() V.nav_idx = 3 end)
--- wheel step tune on the ground (CAN only)
-at(45000, function()
+-- wheel step tune (CAN only): chosen while disarmed, as on the rover (the
+-- tune module loads only while disarmed), then armed in HOLD
+at(44000, function()
+  V.armed = false
   V.mode = MODE.HOLD
   V.thr_out, V.str_out = 0, 0
   if SCENARIO == "can" then PV.SCR_USER1 = 4 end
   if SCENARIO == "can5" then PV.SCR_USER1 = 5 end
 end)
+at(45000, function() V.armed = true end)
 -- yaw relay tune in HOLD
 at(80000, function() PV.SCR_USER1 = 0 end)
 at(81000, function() PV.SCR_USER1 = 2 end)
--- QuickTune in Circle
-at(200000, function()
+-- QuickTune in Circle: selected while disarmed, then armed
+at(198000, function()
+  V.armed = false
   PV.SCR_USER1 = 1
+end)
+at(200000, function()
+  V.armed = true
   V.mode = MODE.CIRCLE
 end)
 -- Circle relay tune

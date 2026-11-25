@@ -15,7 +15,11 @@ Os scripts estão em `Rover/scripts/` (estrutura abaixo). A lista oficial de cad
 
 Só existe um script na pasta principal: `rover.lua`. Ele carrega os módulos de `modules/`, um por execução do script, e roda as tarefas (mixer, QuickTune e driver CAN) num agendador único.
 
-**Carga sob demanda (memória):** o heap do scripting (`SCR_HEAP_SIZE` = 520000, com só ~52 kB de RAM livre na placa) não comporta tudo junto. Por isso `quicktune.lua` só carrega com `SCR_USER1 = 1` (ou a chave `RTUN_RC_FUNC`) e `can_wheeltune.lua` só com `SCR_USER1 = 4/5`; cada um sai quando o seletor muda e não há tune em andamento. Os parâmetros `RTUN_` ficam em `quicktune_params.lua`, carregado no boot. Ao carregar o tune de roda aparece `Rover: wheel tune loaded`; o QuickTune mostra `Rover QuickTune loaded`. No cartão SD fica igual: `APM/scripts/rover.lua` e `APM/scripts/modules/*.lua`.
+**Carga sob demanda (memória):** o heap do scripting (`SCR_HEAP_SIZE` = 520000, com só ~52 kB de RAM livre na placa) não comporta tudo junto. Por isso `quicktune.lua` só carrega com `SCR_USER1 = 1` (ou a chave `RTUN_RC_FUNC`) e `can_wheeltune.lua` só com `SCR_USER1 = 4/5`; cada um sai quando o seletor muda e não há tune em andamento. Os parâmetros `RTUN_` ficam em `quicktune_params.lua`, carregado no boot. Ao carregar o tune de roda aparece `Rover: wheel tune loaded`; o QuickTune mostra `Rover QuickTune loaded`. **Só carregam com o rover desarmado** (os dois começam ao armar); armado aparece `Rover: disarm to load the tune selected in SCR_USER1`.
+
+No cartão SD fica igual: `APM/scripts/rover.lua` e `APM/scripts/modules/*.lua`.
+
+**Relatório de boot:** ao terminar de carregar, o `rover.lua` manda `Rover Lua: N OK, N falha, N ausente`, a lista dos módulos de cada grupo, os módulos sob demanda e `Memoria: heap 508 kB`. Logo depois sai a linha do ArduPilot `Lua: Time: <µs> Mem: <total> + <run>`; a memória Lua em uso é `total − run`. Para gerar essa linha o script liga o bit 1 do `SCR_DEBUG_OPTS` por uma única execução e volta o valor original. A mesma linha sai quando um tune carrega ou descarrega. O `esc_monitor.py` converte em porcentagem: `MEM    Lua 194 kB de 508 kB (38%)` (coluna `LUA_MEM_PCT` no CSV). Medido na placa: ~38% sem tune, ~45% com o QuickTune carregado.
 
 | Módulo | Função |
 | --- | --- |

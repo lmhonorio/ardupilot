@@ -34,7 +34,7 @@ Atualizado em 24/11/2026. Último commit visto: `fb36bc455a` (missão no mapa da
 
 | Arquivo | Papel |
 |---|---|
-| `Rover/scripts/rover.lua` (r2611c) | **Único script.** Carrega um módulo por execução e roda mixer, QuickTune e driver CAN num agendador; isola a falha de cada tarefa; recusa iniciar se os scripts antigos estiverem no SD. `quicktune.lua` (SCR_USER1=1) e `can_wheeltune.lua` (4/5) carregam sob demanda e saem depois: tudo junto estoura o heap (`not enough mem`). O `require` do ArduPilot pega o ambiente do 1º upvalue da função em execução: `load_next` e `update` começam com `local _ = require` |
+| `Rover/scripts/rover.lua` (r2611f) | **Único script.** Carrega um módulo por execução e roda mixer, QuickTune e driver CAN num agendador; isola a falha de cada tarefa; recusa iniciar se os scripts antigos estiverem no SD. `quicktune.lua` (SCR_USER1=1) e `can_wheeltune.lua` (4/5) carregam sob demanda e saem depois: tudo junto estoura o heap (`not enough mem`). O `require` do ArduPilot pega o ambiente do 1º upvalue da função em execução: `load_next` e `update` começam com `local _ = require`. No boot manda o relatório de módulos (OK/falha/ausente) e pede ao ArduPilot uma linha `Lua: Time … Mem: total + run` (bit 1 do `SCR_DEBUG_OPTS` por uma execução); o `esc_monitor.py` mostra a % do `SCR_HEAP_SIZE`. Medido: ~38% sem tune, ~45% com QuickTune. Tunes só carregam desarmado |
 | `modules/rover_common.lua` | Constantes, utilitários e a tabela `R` compartilhada (`R.pwm`, `R.can`, `R.mixer`) |
 | `modules/mixer.lua` | Modos, alocação L/R, `THRO_`, `MIXER_`, Circle tune |
 | `modules/out_pwm.lua` | Saída PWM (MAIN 1..4), kick de yaw, `THRO_MIN_LUA` |

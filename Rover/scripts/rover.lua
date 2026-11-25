@@ -36,7 +36,7 @@ would drive the same motors. If one is found, nothing starts and arming is refus
 --]]
 
 local MAV_SEVERITY = { EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7 }
-local VERSION = "r2611c"
+local VERSION = "r2611f"
 
 local OLD_SCRIPTS = { "esc_can.lua", "rover-controlallocation.lua", "rover-quicktune.lua" }
 local SCRIPT_DIRS = { "APM/scripts/", "scripts/" }
@@ -75,11 +75,26 @@ local function short_error(err)
   return string.match(text, "([%w_%-]+%.lua:%d+:.*)$") or text
 end
 
--- A GCS line holds 50 characters: send a long text over several lines
+-- A GCS line holds 50 characters: send a long text over several lines,
+-- breaking at spaces (at most 6 lines)
 local function send_long(severity, text)
   local LINE = 48
-  for i = 1, math.min(#text, 4 * LINE), LINE do
-    gcs:send_text(severity, string.sub(text, i, i + LINE - 1))
+  local lines = 0
+  while #text > 0 and lines < 6 do
+    local chunk = text
+    if #text > LINE then
+      local cut = LINE
+      for i = LINE, 20, -1 do
+        if string.sub(text, i, i) == " " then
+          cut = i
+          break
+        end
+      end
+      chunk = string.sub(text, 1, cut)
+    end
+    gcs:send_text(severity, (string.gsub(chunk, "%s+$", "")))
+    text = string.sub(text, #chunk + 1)
+    lines = lines + 1
   end
 end
 
@@ -104,6 +119,46 @@ local LOAD_STEP_MS = 20
 
 local loaded = {}
 local can_off = false
+-- Boot report: module names by result. Dropped after the boot summary;
+-- later (on-demand) loads report themselves.
+local report = { ok = {}, failed = {}, missing = {} }
+
+--[[
+Lua memory. A script cannot read it (no collectgarbage), but ArduPilot sends
+"Lua: Time: <us> Mem: <total> + <run>" after a run while SCR_DEBUG_OPTS bit 1
+is set; <total> - <run> is the memory in use when the run started.
+mem_report() sets the bit for one run only and restores the saved value at
+the start of the next run, so exactly one such line goes out. It is asked one
+run after a load or unload, so the start of the measured run already holds
+the new module set after a full collection.
+esc_monitor.py turns it into a percentage of SCR_HEAP_SIZE.
+--]]
+local DEBUG_RUNTIME_MSG = 2
+local debug_opts = Parameter()
+local debug_bound = debug_opts:init('SCR_DEBUG_OPTS')
+local debug_restore = nil
+-- Ask on the next run, so the reported memory includes what this run loaded
+local mem_pending = false
+
+local function mem_report()
+  if not debug_bound or debug_restore ~= nil then
+    return
+  end
+  local v = math.floor(debug_opts:get() or 0)
+  if (v & DEBUG_RUNTIME_MSG) ~= 0 then
+    return -- already reported after every run
+  end
+  debug_restore = v
+  debug_opts:set(v | DEBUG_RUNTIME_MSG)
+end
+
+-- Start of every run: undo the one-run report request
+local function mem_report_done()
+  if debug_restore ~= nil then
+    debug_opts:set(debug_restore)
+    debug_restore = nil
+  end
+end
 
 -- Returns true when the module is loaded
 local function load_one(name, kind)
@@ -113,6 +168,9 @@ local function load_one(name, kind)
   local ok, result = pcall(require, name)
   if ok then
     loaded[name] = result
+    if report ~= nil then
+      report.ok[#report.ok + 1] = name
+    end
     return true
   end
   local text = tostring(result)
@@ -123,13 +181,38 @@ local function load_one(name, kind)
   if missing and kind ~= "core" then
     -- Removed on purpose: that path or option is simply off
     gcs:send_text(MAV_SEVERITY.INFO, string.format("Rover: %s not installed", name))
+    if report ~= nil then
+      report.missing[#report.missing + 1] = name
+    end
     return false
   end
   -- The reason is at the end ("...:\n\t<reason>" for a load error)
   local reason = string.match(text, "\t([^\t]*)$") or short_error(text)
   gcs:send_text(MAV_SEVERITY.CRITICAL, string.format("Rover: %s failed:", name))
   send_long(MAV_SEVERITY.CRITICAL, short_error(reason))
+  if report ~= nil then
+    report.failed[#report.failed + 1] = name
+  end
   return false
+end
+
+-- Boot summary: modules loaded, failed and not installed, then one memory line
+local function send_report()
+  local sev = (#report.failed > 0) and MAV_SEVERITY.CRITICAL or MAV_SEVERITY.INFO
+  gcs:send_text(sev, string.format("Rover Lua: %d OK, %d falha, %d ausente",
+    #report.ok, #report.failed, #report.missing))
+  send_long(MAV_SEVERITY.INFO, "OK: " .. table.concat(report.ok, " "))
+  if #report.failed > 0 then
+    send_long(MAV_SEVERITY.CRITICAL, "FALHA: " .. table.concat(report.failed, " "))
+  end
+  if #report.missing > 0 then
+    send_long(MAV_SEVERITY.INFO, "Ausente: " .. table.concat(report.missing, " "))
+  end
+  gcs:send_text(MAV_SEVERITY.INFO, "Sob demanda: quicktune (USER1=1), wheeltune (4/5)")
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("Memoria: heap %.0f kB; uso na linha Lua: Mem",
+    (param:get('SCR_HEAP_SIZE') or 0) / 1024))
+  report = nil
+  mem_pending = true
 end
 
 -- Drop a module so the next collection frees it
@@ -170,6 +253,7 @@ local selector_bound = false
 local manage_due = 0
 local wt_failed = false
 local qt_failed = false
+local load_warn_ms = -5000
 
 local function quicktune_wanted(sel)
   local qp = loaded["quicktune_params"]
@@ -201,11 +285,15 @@ local function manage(now)
     remove_task("quicktune")
     unload("quicktune")
     qt = nil
+    gcs:send_text(MAV_SEVERITY.INFO, "Rover: quicktune unloaded")
+    mem_pending = true
   end
   if wt ~= nil and not wheeltune_wanted(sel) and wt.idle() then
     wt.unload()
     unload("can_wheeltune")
     wt = nil
+    gcs:send_text(MAV_SEVERITY.INFO, "Rover: wheel tune unloaded")
+    mem_pending = true
   end
   -- A failed load is not retried until the selector leaves that tune
   if not quicktune_wanted(sel) then
@@ -214,9 +302,26 @@ local function manage(now)
   if not wheeltune_wanted(sel) then
     wt_failed = false
   end
+  -- Compiling a tune takes over a second (quicktune: 1.4 s on the board) and
+  -- the 5 ms CAN loop waits for it: load only while disarmed. Both tunes
+  -- start on arming, so this costs nothing in normal use.
+  local want_load = (qt == nil and not qt_failed and quicktune_wanted(sel)) or
+    (wt == nil and not wt_failed and wheeltune_wanted(sel))
+  -- Not in a run that reports memory: the line would include the compile
+  if want_load and debug_restore ~= nil then
+    return
+  end
+  if want_load and arming:is_armed() then
+    if now - load_warn_ms >= 5000 then
+      load_warn_ms = now
+      gcs:send_text(MAV_SEVERITY.WARNING, "Rover: disarm to load the tune selected in SCR_USER1")
+    end
+    return
+  end
   if qt == nil and not qt_failed and quicktune_wanted(sel) then
     if load_one("quicktune", "core") then
       add_task("quicktune", loaded["quicktune"], now, nil)
+      mem_pending = true
     else
       qt_failed = true
     end
@@ -225,6 +330,7 @@ local function manage(now)
   if wt == nil and not wt_failed and wheeltune_wanted(sel) then
     if load_one("can_wheeltune", "canopt") then
       gcs:send_text(MAV_SEVERITY.INFO, "Rover: wheel tune loaded")
+      mem_pending = true
     else
       wt_failed = true
     end
@@ -265,6 +371,11 @@ end
 local function update()
   -- First upvalue must be _ENV: manage() may require() a module in this run
   local _ = require
+  mem_report_done()
+  if mem_pending then
+    mem_pending = false
+    mem_report()
+  end
   local now = R.now_ms()
   if now >= manage_due then
     manage_due = now + MANAGE_MS
@@ -310,7 +421,10 @@ local function start_tasks()
   add_task("can", R.can, start_ms, nil)
   gcs:send_text(MAV_SEVERITY.INFO, string.format("Rover %s: PWM %s, CAN %s", VERSION,
     R.pwm and "yes" or "no", R.can and "yes" or "no"))
-  return update()
+  send_report()
+  -- Next run, not this one: update() starts by clearing the memory request,
+  -- and ArduPilot sends the memory line after this run ends
+  return update, 1
 end
 
 -- One module per run, then the scheduler takes over

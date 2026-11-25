@@ -44,6 +44,7 @@ Exemplos:
   python esc_monitor.py --conn udp:0.0.0.0:14551     # porta encaminhada pelo Mission Planner
 """
 
+import re
 import argparse
 import collections
 import csv
@@ -76,6 +77,8 @@ MSG_COMMAND_ACK = 77
 MSG_PID_TUNING = 194
 MSG_NAMED_VALUE_FLOAT = 251
 MSG_STATUSTEXT = 253
+# "Lua: Time: <us> Mem: <total> + <run>" (SCR_DEBUG_OPTS bit 1)
+LUA_MEM_RE = re.compile(r"^Lua: Time: (\d+) Mem: (-?\d+) \+ (-?\d+)")
 MSG_FILE_TRANSFER_PROTOCOL = 110
 
 # msgid: (crc_extra, full base payload length)
@@ -585,6 +588,21 @@ def reader(link, store, csv_writer, csv_file, stop, args, parm_path):
                 store.add_event(msg["severity"], msg["text"])
                 rows.append([wall, t_s, "", "STATUSTEXT", msg["severity"], msg["text"]])
                 print("[%s] %-6s %s" % (wall[11:], sev, msg["text"]))
+                # ArduPilot's scripting run line (rover.lua asks for one at boot and
+                # when a tune loads/unloads): memory in use as % of SCR_HEAP_SIZE
+                m = LUA_MEM_RE.match(msg["text"])
+                if m:
+                    total, run = int(m.group(2)), int(m.group(3))
+                    used = total - run
+                    heap = params.values.get("SCR_HEAP_SIZE")
+                    if heap:
+                        pct = 100.0 * used / heap
+                        print("[%s] MEM    Lua %.0f kB de %.0f kB (%.0f%%)" % (wall[11:], used / 1024.0,
+                                                                         heap / 1024.0, pct))
+                        rows.append([wall, t_s, "", "LUA_MEM_PCT", "%.1f" % pct, ""])
+                    else:
+                        print("[%s] MEM    Lua %.0f kB (SCR_HEAP_SIZE ainda nao lido)" % (wall[11:], used / 1024.0))
+                    rows.append([wall, t_s, "", "LUA_MEM_B", used, ""])
             elif msgid == MSG_PARAM_VALUE:
                 name, value = msg["name"], msg["value"]
                 params.last_rx = now
