@@ -155,3 +155,7 @@ autotest_result_*_junit.xml
 Rover/tools/Logs/
 Rover/tools/esc_log_*
 Rover/tools/__pycache__/
+# Mapas baixados pela interface para uso sem internet
+Rover/tools/map_cache/
+# Relatórios gravados ao terminar uma missão
+Rover/tools/mission_reports/

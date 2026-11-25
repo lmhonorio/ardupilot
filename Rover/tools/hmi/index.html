@@ -5,12 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GRIN</title>
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<style>
+  #missionleaflet.leaflet-container { background: #e7efe0; }
+  #missionleaflet.leaflet-container img.leaflet-tile { mix-blend-mode: normal; }
+</style>
+<script src="/vendor/leaflet/leaflet.js"></script>
 </head>
 <body>
 <header>
   <img class="logo argo" src="/argo.png" alt="Argo Energia">
   <nav id="nav" aria-label="Páginas"></nav>
-  <img class="logo grin" src="/grin.png" alt="GRIN">
+  <div class="headtools">
+    <div class="gpschip" id="gpschip" title="GPS">
+      <strong id="gpssats">—</strong>
+      <span>sats</span>
+      <em id="gpsfix">—</em>
+    </div>
+    <button type="button" id="theme">Escuro</button>
+    <img class="logo grin" src="/grin.png" alt="GRIN">
+  </div>
 </header>
 <section class="status" aria-label="Estado do rover">
   <div>
@@ -26,10 +40,13 @@
     <strong id="armed">—</strong>
     <em id="problem"></em>
   </div>
+  <div class="status-arm">
+    <span>Comando</span>
+    <button type="button" class="cmd armbar" id="armbtn">Armar</button>
+  </div>
 </section>
 <p id="note" class="note"></p>
 <main id="view"></main>
-<button type="button" id="theme">Escuro</button>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -2,15 +2,25 @@
 """Interface local do rover. O navegador nao fala MAVLink: este processo
 escuta a UDP, chama o HereLink e serve a pagina na rede local.
 
-A pagina que abre e a de logs, com armar e desarmar. As outras trocam modo,
-parametro ou preparam um ensaio (SCR_USER1). Nenhum ensaio arma sozinho.
-O CSV so abre quando a pagina pede e grava o mesmo conteudo do log do esc_monitor:
-telemetria, mensagens, parametros e mudancas de modo e de armamento.
-A aba Scripts lista, copia, envia e exclui os .lua de /APM/scripts e
-/APM/scripts/modules pelo MAVFtp, como o Mission Planner em Config, MAVFtp.
+A pagina que abre e a de Operação (atalhos e leituras). Armar e desarmar ficam
+na barra de estado em todas as abas. As outras trocam modo, parametro ou
+preparam um ensaio (SCR_USER1). Nenhum ensaio arma sozinho.
+O CSV so abre quando a pagina Logs pede e grava o mesmo conteudo do log do
+esc_monitor: telemetria, mensagens, parametros e mudancas de modo e de armamento.
+A aba Telemetria mostra os graficos ao vivo. A aba Scripts lista, copia, envia
+e exclui os .lua de /APM/scripts e /APM/scripts/modules pelo MAVFtp, como o
+Mission Planner em Config, MAVFtp.
 Também limpa /APM/STRG_BAK (backups de storage) sem listar os arquivos na tela
 e formata o cartão SD (MAV_CMD_STORAGE_FORMAT), como o sd_format.py.
 A aba Logs baixa e apaga os dataflash do cartão (LOG_REQUEST_* / LOG_ERASE).
+A aba Missão baixa, edita rumos/ré e envia a missão do rover (mesmo protocolo
+do mission_editor.py), sem abrir outra porta UDP.
+O mapa pede as imagens por este processo (/maptile/...), que guarda uma cópia
+em Rover/tools/map_cache. Sem a imagem exata, amplia uma cópia mais grossa ou
+reduz uma mais detalhada já salva. Sem nenhuma cópia e sem rede, devolve uma grade.
+O rastro do GPS fica em memória (/track) para a missão comparar o percurso
+feito com o caminho previsto. Ao terminar a missão no AUTO, um relatório HTML
+é gravado em Rover/tools/mission_reports.
 
   py -3 mode_panel.py
   py -3 mode_panel.py --conn udp:0.0.0.0:14551
@@ -24,6 +34,7 @@ import base64
 import collections
 import csv
 import datetime
+import io
 import json
 import math
 import os
@@ -34,9 +45,16 @@ import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+import urllib.request
+from urllib.parse import parse_qs, urlparse
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 import esc_monitor as mon
+import mission_core as mission
 
 MSG_HEARTBEAT = 0
 MSG_PARAM_REQUEST_READ = 20
@@ -67,6 +85,7 @@ CRC_EXTRA = {
     MSG_LOG_ERASE: 237,
     MSG_LOG_REQUEST_END: 203,
 }
+mission.register_mission_messages(CRC_EXTRA)
 
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_COMPONENT_ARM_DISARM = 400
@@ -128,6 +147,9 @@ SERIES = {
     "BAT_I",
 }
 READOUT = ("VFR_gspd", "NAV_xtrack", "BAT_V", "BAT_I")
+GPS_FIELDS = ("GPI_lat", "GPI_lon", "GPI_hdg", "GPI_vn", "GPI_ve")
+# GPS_RAW_INT: tipo de fix e satélites, o mesmo par que o Mission Planner desenha no HUD.
+GPS_STATUS_FIELDS = ("GPS_fix", "GPS_sats")
 
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -1277,6 +1299,296 @@ def format_bytes_py(n):
     return "%.1f MB" % (n / 1048576.0)
 
 
+class MissionError(Exception):
+    pass
+
+
+class MissionTransfer:
+    """Download/upload MISSION_* on the shared MAVLink link (FtpClient pattern)."""
+
+    def __init__(self, link, tx, enc):
+        self.link = link
+        self.tx = tx
+        self.enc = enc
+        self.cv = threading.Condition()
+        self.inbox = collections.deque()
+        self.op_lock = threading.Lock()
+        self._sysid = 1
+        self._compid = 1
+        self.progress_lock = threading.Lock()
+        self.progress = {
+            "active": False,
+            "action": "",
+            "name": "",
+            "folder": "",
+            "phase": "",
+            "done": 0,
+            "total": 0,
+            "index": 0,
+            "count": 0,
+            "t0": 0.0,
+        }
+
+    def push(self, msgid, payload):
+        with self.cv:
+            self.inbox.append((msgid, payload))
+            self.cv.notify()
+
+    def begin_progress(self, action, total=0, phase=""):
+        with self.progress_lock:
+            self.progress = {
+                "active": True,
+                "action": action,
+                "name": "missão",
+                "folder": "",
+                "phase": phase or "",
+                "done": 0,
+                "total": int(total) if total else 0,
+                "index": 1,
+                "count": 1,
+                "t0": time.monotonic(),
+            }
+
+    def update_progress(self, done=None, total=None, phase=None):
+        with self.progress_lock:
+            if not self.progress.get("active"):
+                return
+            if done is not None:
+                self.progress["done"] = int(done)
+            if total is not None:
+                self.progress["total"] = int(total)
+            if phase is not None:
+                self.progress["phase"] = phase
+
+    def end_progress(self):
+        with self.progress_lock:
+            self.progress["active"] = False
+            self.progress["phase"] = ""
+
+    def progress_snapshot(self):
+        with self.progress_lock:
+            snap = dict(self.progress)
+        if snap.get("active") and snap.get("t0"):
+            elapsed = max(0.0, time.monotonic() - snap["t0"])
+            snap["elapsed"] = round(elapsed, 1)
+            done = snap.get("done") or 0
+            total = snap.get("total") or 0
+            if done > 0 and total > done and elapsed >= 0.4:
+                rate = done / elapsed
+                snap["eta"] = round((total - done) / rate, 1) if rate > 0 else None
+            else:
+                snap["eta"] = None
+        else:
+            snap["elapsed"] = 0
+            snap["eta"] = None
+        snap.pop("t0", None)
+        return snap
+
+    def _clear(self):
+        with self.cv:
+            self.inbox.clear()
+
+    def _send(self, frame):
+        with self.tx:
+            self.link.send(frame)
+
+    def _wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        with self.cv:
+            while True:
+                if self.inbox:
+                    return self.inbox.popleft()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.cv.wait(remaining)
+
+    def _begin(self, vehicle):
+        with vehicle.lock:
+            if vehicle.sysid is None:
+                raise MissionError("sem rover")
+            if vehicle.jobs or vehicle.load is not None:
+                raise MissionError("espere o pedido atual terminar")
+            self._sysid = vehicle.sysid
+            self._compid = vehicle.compid or 1
+        ftp = getattr(vehicle, "ftp", None)
+        if ftp and ftp.progress_snapshot().get("active"):
+            raise MissionError("espere o FTP terminar")
+        logs = getattr(vehicle, "logs", None)
+        if logs and logs.progress_snapshot().get("active"):
+            raise MissionError("espere o download de logs terminar")
+
+    def download(self):
+        self.begin_progress("download", total=0, phase="pedir lista")
+        self._clear()
+        count = None
+        end = time.monotonic() + 20
+        last_req = 0.0
+        while count is None:
+            if time.monotonic() > end:
+                raise MissionError("sem resposta ao pedido da missão")
+            if time.monotonic() - last_req > 1.5:
+                last_req = time.monotonic()
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_REQUEST_LIST,
+                    struct.pack("<BB", self._sysid, self._compid)))
+            got = self._wait(0.2)
+            if got is None:
+                continue
+            msgid, payload = got
+            if msgid == mission.MSG_MISSION_COUNT:
+                count = struct.unpack("<H", payload[:2])[0]
+        if count > mission.MISSION_MAX_ITEMS:
+            raise MissionError("missão grande demais (%d itens)" % count)
+        self.update_progress(done=0, total=count, phase="baixando")
+        items = []
+        for seq in range(count):
+            got_item = None
+            tries = 0
+            last_req = 0.0
+            while got_item is None:
+                if time.monotonic() - last_req > 1.0:
+                    if tries >= 8:
+                        raise MissionError("item %d não chegou" % seq)
+                    tries += 1
+                    last_req = time.monotonic()
+                    self._send(self.enc.pack(
+                        mission.MSG_MISSION_REQUEST_INT,
+                        struct.pack("<HBB", seq, self._sysid, self._compid)))
+                got = self._wait(0.25)
+                if got is None:
+                    continue
+                msgid, payload = got
+                if msgid == mission.MSG_MISSION_ITEM_INT:
+                    it = mission.Item.from_payload(payload)
+                    if it.seq == seq:
+                        got_item = it
+            items.append(got_item)
+            self.update_progress(done=seq + 1, total=count, phase="baixando")
+        self._send(self.enc.pack(
+            mission.MSG_MISSION_ACK,
+            struct.pack("<BBB", self._sysid, self._compid, 0)))
+        self.update_progress(done=count, total=count, phase="pronto")
+        return items
+
+    def upload(self, items):
+        for i, it in enumerate(items):
+            it.seq = i
+        n = len(items)
+        if n < 1:
+            raise MissionError("missão vazia")
+        if n > mission.MISSION_MAX_ITEMS:
+            raise MissionError("missão grande demais (%d itens)" % n)
+        self.begin_progress("upload", total=n, phase="enviar contagem")
+        self._clear()
+        last_count = 0.0
+        last_activity = time.monotonic()
+        last_seq = -1
+        sent = set()
+        start = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if not sent and now - last_count > 1.5:
+                if now - start > 15:
+                    raise MissionError("o rover não pediu os itens")
+                last_count = now
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_COUNT,
+                    struct.pack("<HBB", n, self._sysid, self._compid)))
+            if now - last_activity > 10:
+                raise MissionError("envio parado no item %d" % (max(sent) + 1 if sent else 0))
+            if last_seq == n - 1 and now - last_activity > 1.5 and now - last_count > 1.5:
+                last_count = now
+                self._send(self.enc.pack(
+                    mission.MSG_MISSION_ITEM_INT,
+                    items[last_seq].payload(self._sysid, self._compid)))
+            got = self._wait(0.2)
+            if got is None:
+                continue
+            msgid, payload = got
+            if msgid in (mission.MSG_MISSION_REQUEST_INT, mission.MSG_MISSION_REQUEST):
+                seq = struct.unpack("<H", payload[:2])[0]
+                if seq < n and not (seq == last_seq and time.monotonic() - last_activity < 0.7):
+                    self._send(self.enc.pack(
+                        mission.MSG_MISSION_ITEM_INT,
+                        items[seq].payload(self._sysid, self._compid)))
+                    sent.add(seq)
+                    last_seq = seq
+                    last_activity = time.monotonic()
+                    self.update_progress(done=len(sent), total=n, phase="enviando")
+            elif msgid == mission.MSG_MISSION_ACK and sent:
+                result = payload[2]
+                if result == 0 and (n - 1) in sent:
+                    self.update_progress(done=n, total=n, phase="pronto")
+                    return
+                if result in (0, 13):
+                    continue
+                raise MissionError("rover recusou a missão: %s" %
+                                  mission.ACK_RESULT.get(result, result))
+
+
+def mission_progress(vehicle):
+    client = getattr(vehicle, "mission", None)
+    if client is None:
+        return {"active": False}
+    return client.progress_snapshot()
+
+
+def mission_download(vehicle):
+    client = vehicle.mission
+    with client.op_lock:
+        try:
+            client._begin(vehicle)
+            items = client.download()
+        except MissionError as exc:
+            client.end_progress()
+            note = str(exc)
+            print("mission: " + note, flush=True)
+            return False, note, None
+        except Exception as exc:
+            client.end_progress()
+            note = "falha ao baixar: %s" % exc
+            print("mission: " + note, flush=True)
+            return False, note, None
+    client.end_progress()
+    note = "missão baixada: %d itens" % len(items)
+    print("mission: " + note, flush=True)
+    remember_plan(vehicle, items)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return True, note, items
+
+
+def mission_upload(vehicle, items):
+    with vehicle.lock:
+        if vehicle.armed:
+            note = "desarme antes de enviar a missão"
+            push_message(vehicle, 4, note)
+            return False, note
+    client = vehicle.mission
+    with client.op_lock:
+        try:
+            client._begin(vehicle)
+            client.upload(items)
+        except MissionError as exc:
+            client.end_progress()
+            note = str(exc)
+            print("mission: " + note, flush=True)
+            return False, note
+        except Exception as exc:
+            client.end_progress()
+            note = "falha ao enviar: %s" % exc
+            print("mission: " + note, flush=True)
+            return False, note
+    client.end_progress()
+    note = "missão enviada e aceita (%d itens)" % len(items)
+    print("mission: " + note, flush=True)
+    remember_plan(vehicle, items)
+    with vehicle.lock:
+        push_message(vehicle, 6, note)
+    return True, note
+
+
 def script_paths(folder, name):
     directory = SCRIPT_DIRS.get(folder)
     if directory is None or not LUA_NAME.match(name or ""):
@@ -1531,6 +1843,9 @@ class Link:
             return data
         except self.socket.timeout:
             return b""
+        except ConnectionResetError:
+            # Windows UDP: ICMP "port unreachable" after a send to a closed peer.
+            return b""
 
     def send(self, data):
         try:
@@ -1572,6 +1887,16 @@ class Vehicle:
         self.latest = {}
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=500))
         self.list_sent = False
+        self.track = collections.deque(maxlen=20000)  # (seq, lat, lon)
+        self.track_seq = 0
+        self.track_gen = 0
+        self.track_last = None
+        self.plan_items = []
+        self.run_active = False
+        self.run_from = 0
+        self.run_t0 = 0.0
+        self.report_pending = False
+        self.reports = load_report_index()
 
 
 def mode_name(number):
@@ -1593,6 +1918,440 @@ def push_message(vehicle, sev, text):
         "sev": int(sev),
         "text": text,
     })
+
+
+def _track_meters(lat1, lon1, lat2, lon2):
+    mid = math.radians((lat1 + lat2) * 0.5)
+    dy = (lat2 - lat1) * 111320.0
+    dx = (lon2 - lon1) * 111320.0 * math.cos(mid)
+    return math.hypot(dx, dy)
+
+
+def append_track(vehicle, lat, lon):
+    """Keep a thinned GPS trail for the mission comparison. Drops points closer than 0.25 m."""
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        return
+    if abs(lat) < 1e-5 and abs(lon) < 1e-5:
+        return
+    if abs(lat) > 90.0 or abs(lon) > 180.0:
+        return
+    with vehicle.lock:
+        last = vehicle.track_last
+        if last is not None and _track_meters(last[0], last[1], lat, lon) < 0.25:
+            return
+        vehicle.track_seq += 1
+        vehicle.track.append((vehicle.track_seq, round(lat, 7), round(lon, 7)))
+        vehicle.track_last = (lat, lon)
+
+
+def track_payload(vehicle, after):
+    with vehicle.lock:
+        items = list(vehicle.track)
+        gen = vehicle.track_gen
+        seq = vehicle.track_seq
+    if not items:
+        return {"gen": gen, "reset": True, "after": seq, "points": []}
+    oldest = items[0][0]
+    if after <= 0 or after + 1 < oldest:
+        chosen = items
+        reset = True
+    else:
+        chosen = [item for item in items if item[0] > after]
+        reset = False
+    return {
+        "gen": gen,
+        "reset": reset,
+        "after": items[-1][0],
+        "points": [[item[0], item[1], item[2]] for item in chosen],
+    }
+
+
+def clear_track(vehicle):
+    with vehicle.lock:
+        vehicle.track.clear()
+        vehicle.track_last = None
+        vehicle.track_gen += 1
+        return vehicle.track_gen, vehicle.track_seq
+
+
+REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mission_reports")
+REPORT_NAME = re.compile(r"^missao_\d{8}_\d{6}(?:_\d+)?\.html$")
+REPORT_INDEX = os.path.join(REPORT_DIR, "index.json")
+
+
+def remember_plan(vehicle, items):
+    """Keep the mission last sent to or read from the rover. Caller may hold no lock."""
+    rows = [it.to_dict() for it in items]
+    with vehicle.lock:
+        vehicle.plan_items = rows
+
+
+def note_mission_mode(vehicle, mode):
+    """Mark the GPS trail from the moment AUTO starts. Caller holds vehicle.lock."""
+    if mode == MODE_ID["AUTO"]:
+        vehicle.run_active = True
+        vehicle.run_from = vehicle.track_seq
+        vehicle.run_t0 = time.time()
+        vehicle.report_pending = False
+
+
+def note_mission_text(vehicle, text):
+    """Ask for a report when the rover says the mission is over. Caller holds vehicle.lock."""
+    low = (text or "").strip().lower()
+    if "mission complete" not in low and "missão completa" not in low and "missao completa" not in low:
+        return
+    if not vehicle.run_active:
+        return
+    vehicle.run_active = False
+    vehicle.report_pending = True
+
+
+def _plan_points(rows):
+    points = []
+    for i, row in enumerate(rows or []):
+        try:
+            lat = float(row.get("lat") or 0)
+            lon = float(row.get("lon") or 0)
+            command = int(row.get("command") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (lat or lon):
+            continue
+        if i != 0 and command not in mission.NAV_WITH_POSITION:
+            continue
+        points.append({
+            "seq": int(row.get("seq", i)),
+            "name": str(row.get("name") or "CMD_%d" % command),
+            "lat": lat,
+            "lon": lon,
+        })
+    return points
+
+
+def _local_meters(lat, lon, origin_lat, origin_lon):
+    mid = math.radians((lat + origin_lat) * 0.5)
+    dy = (lat - origin_lat) * 111320.0
+    dx = (lon - origin_lon) * 111320.0 * math.cos(mid)
+    return dx, dy
+
+
+def _dist_to_segment(lat, lon, a, b):
+    ax, ay = 0.0, 0.0
+    bx, by = _local_meters(b["lat"], b["lon"], a["lat"], a["lon"])
+    px, py = _local_meters(lat, lon, a["lat"], a["lon"])
+    span = bx * bx + by * by
+    t = 0.0 if span < 1e-8 else (px * bx + py * by) / span
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    dx = px - t * bx
+    dy = py - t * by
+    return math.hypot(dx, dy), t
+
+
+def mission_report_stats(plan_rows, track, radius):
+    """Compare the driven GPS trail with the planned path. Distances are metres."""
+    plan = _plan_points(plan_rows)
+    pts = []
+    for lat, lon in track or []:
+        if math.isfinite(lat) and math.isfinite(lon) and (lat or lon):
+            pts.append((float(lat), float(lon)))
+    driven = 0.0
+    for i in range(1, len(pts)):
+        driven += _track_meters(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1])
+    planned = 0.0
+    legs = []
+    for i in range(1, len(plan)):
+        dist = _track_meters(plan[i - 1]["lat"], plan[i - 1]["lon"], plan[i]["lat"], plan[i]["lon"])
+        planned += dist
+        legs.append({
+            "from": plan[i - 1]["seq"],
+            "to": plan[i]["seq"],
+            "to_name": plan[i]["name"],
+            "planned_m": dist,
+            "sum": 0.0,
+            "n": 0,
+            "max": 0.0,
+        })
+    errors = []
+    for lat, lon in pts:
+        best_i = None
+        best_d = None
+        for i in range(1, len(plan)):
+            dist, _t = _dist_to_segment(lat, lon, plan[i - 1], plan[i])
+            if best_d is None or dist < best_d:
+                best_d = dist
+                best_i = i - 1
+        if best_d is None:
+            continue
+        errors.append(best_d)
+        leg = legs[best_i]
+        leg["sum"] += best_d
+        leg["n"] += 1
+        if best_d > leg["max"]:
+            leg["max"] = best_d
+    reached = []
+    limit = max(0.5, float(radius or 2.0))
+    for point in plan:
+        if point["seq"] == 0:
+            continue
+        nearest = None
+        for lat, lon in pts:
+            dist = _track_meters(lat, lon, point["lat"], point["lon"])
+            if nearest is None or dist < nearest:
+                nearest = dist
+        reached.append({
+            "seq": point["seq"],
+            "name": point["name"],
+            "nearest_m": nearest,
+            "ok": nearest is not None and nearest <= limit,
+        })
+    for leg in legs:
+        leg["mean"] = (leg["sum"] / leg["n"]) if leg["n"] else None
+        del leg["sum"]
+    return {
+        "plan": plan,
+        "track": pts,
+        "planned_m": planned,
+        "driven_m": driven,
+        "mean_m": (sum(errors) / len(errors)) if errors else None,
+        "max_m": max(errors) if errors else None,
+        "samples": len(errors),
+        "legs": legs,
+        "reached": reached,
+        "radius_m": limit,
+    }
+
+
+def _esc(text):
+    return (str(text)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _fmt_m(value):
+    if value is None:
+        return "—"
+    return "%.2f m" % value
+
+
+def _report_svg(stats):
+    pts = [(p["lat"], p["lon"]) for p in stats["plan"]] + list(stats["track"])
+    if len(pts) < 2:
+        return "<p>Sem pontos suficientes para o desenho.</p>"
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    lon0 = sum(p[1] for p in pts) / len(pts)
+    xy = [_local_meters(lat, lon, lat0, lon0) for lat, lon in pts]
+    xs = [p[0] for p in xy]
+    ys = [p[1] for p in xy]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    span = max(maxx - minx, maxy - miny, 1.0)
+    width, height, pad = 640, 420, 28
+
+    def proj(lat, lon):
+        x, y = _local_meters(lat, lon, lat0, lon0)
+        px = pad + (x - minx) / span * (width - 2 * pad)
+        py = height - pad - (y - miny) / span * (height - 2 * pad)
+        return px, py
+
+    def poly(points, color, width_px):
+        if len(points) < 2:
+            return ""
+        body = " ".join("%.1f,%.1f" % proj(lat, lon) for lat, lon in points)
+        return '<polyline fill="none" stroke="%s" stroke-width="%s" points="%s"/>' % (color, width_px, body)
+
+    marks = []
+    for point in stats["plan"]:
+        x, y = proj(point["lat"], point["lon"])
+        marks.append('<circle cx="%.1f" cy="%.1f" r="4" fill="#073e73"/>' % (x, y))
+        marks.append('<text x="%.1f" y="%.1f" font-size="12" fill="#073e73">%s</text>' % (
+            x + 6, y - 6, _esc(point["seq"])))
+    return (
+        '<svg viewBox="0 0 %d %d" width="100%%" role="img" aria-label="Caminho previsto e percorrido">'
+        '<rect width="100%%" height="100%%" fill="#f7f4ee"/>'
+        '%s%s%s</svg>'
+    ) % (width, height, poly([(p["lat"], p["lon"]) for p in stats["plan"]], "#8fbf7a", 8),
+         poly(stats["track"], "#1f6feb", 3), "".join(marks))
+
+
+def mission_report_html(when, stats):
+    leg_rows = []
+    for leg in stats["legs"]:
+        leg_rows.append(
+            "<tr><td>%d → %d %s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td></tr>" % (
+                leg["from"], leg["to"], _esc(leg["to_name"]),
+                _fmt_m(leg["planned_m"]), _fmt_m(leg["mean"]), _fmt_m(leg["max"]), leg["n"],
+            )
+        )
+    reach_rows = []
+    for row in stats["reached"]:
+        reach_rows.append(
+            "<tr><td>%d %s</td><td>%s</td><td>%s</td></tr>" % (
+                row["seq"], _esc(row["name"]), _fmt_m(row["nearest_m"]),
+                "sim" if row["ok"] else "não",
+            )
+        )
+    plan_note = "" if stats["plan"] else (
+        "<p>O painel não tinha a missão do rover. Envie ou baixe a missão antes do AUTO "
+        "para comparar com o caminho previsto.</p>"
+    )
+    return """<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<title>Relatório de missão %s</title>
+<style>
+  body { margin: 24px; font: 16px "Segoe UI", sans-serif; color: #1c1814; background: #f7f4ee; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%%; margin: 12px 0 24px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd4c8; }
+  th { font-size: 13px; color: #5c564e; }
+  .nums { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 20px; }
+  .nums div { min-width: 140px; }
+  .nums strong { display: block; font-size: 20px; }
+</style>
+</head>
+<body>
+<h1>Relatório de missão</h1>
+<p>%s</p>
+%s
+<div class="nums">
+  <div>Previsto<strong>%s</strong></div>
+  <div>Percorrido<strong>%s</strong></div>
+  <div>Erro médio<strong>%s</strong></div>
+  <div>Erro máximo<strong>%s</strong></div>
+</div>
+%s
+<h2>Trechos</h2>
+<table>
+<tr><th>Trecho</th><th>Previsto</th><th>Erro médio</th><th>Erro máximo</th><th>Amostras</th></tr>
+%s
+</table>
+<h2>Pontos</h2>
+<p>Um ponto conta como alcançado se o rover passou a até %.1f m dele.</p>
+<table>
+<tr><th>Ponto</th><th>Passagem mais perto</th><th>Alcançado</th></tr>
+%s
+</table>
+</body>
+</html>
+""" % (
+        _esc(when), _esc(when), plan_note,
+        _fmt_m(stats["planned_m"]) if stats["plan"] else "—",
+        _fmt_m(stats["driven_m"]),
+        _fmt_m(stats["mean_m"]),
+        _fmt_m(stats["max_m"]),
+        _report_svg(stats),
+        "".join(leg_rows) or "<tr><td colspan=\"5\">Sem trechos previstos.</td></tr>",
+        stats["radius_m"],
+        "".join(reach_rows) or "<tr><td colspan=\"3\">Sem pontos previstos.</td></tr>",
+    )
+
+
+def _report_public(row):
+    return {
+        "file": row["file"],
+        "at": row["at"],
+        "mean_m": row["mean_m"],
+        "max_m": row["max_m"],
+        "planned_m": row["planned_m"],
+        "driven_m": row["driven_m"],
+    }
+
+
+def maybe_write_mission_report(vehicle):
+    """Write the comparison file after Mission Complete. Safe to call often."""
+    with vehicle.lock:
+        if not vehicle.report_pending:
+            return None
+        vehicle.report_pending = False
+        track = [(lat, lon) for seq, lat, lon in vehicle.track if seq >= vehicle.run_from]
+        plan = list(vehicle.plan_items)
+        started = vehicle.run_t0 or time.time()
+        try:
+            radius = float(vehicle.params.get("WP_RADIUS", 2.0))
+        except (TypeError, ValueError):
+            radius = 2.0
+    try:
+        stats = mission_report_stats(plan, track, radius)
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        name = "missao_%s.html" % stamp
+        extra = 2
+        while os.path.exists(os.path.join(REPORT_DIR, name)):
+            name = "missao_%s_%d.html" % (stamp, extra)
+            extra += 1
+        path = os.path.join(REPORT_DIR, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(mission_report_html(when, stats))
+        row = {
+            "file": name,
+            "at": when,
+            "mean_m": None if stats["mean_m"] is None else round(stats["mean_m"], 2),
+            "max_m": None if stats["max_m"] is None else round(stats["max_m"], 2),
+            "planned_m": round(stats["planned_m"], 1),
+            "driven_m": round(stats["driven_m"], 1),
+        }
+    except Exception as exc:
+        print("relatorio: %s" % exc, flush=True)
+        with vehicle.lock:
+            push_message(vehicle, 4, "Relatório da missão não foi salvo: %s" % exc)
+        return None
+    with vehicle.lock:
+        vehicle.reports.insert(0, row)
+        del vehicle.reports[20:]
+        saved = list(vehicle.reports)
+        note = "Relatório salvo: %s" % name
+        push_message(vehicle, 6, note)
+        vehicle.note = note
+    try:
+        save_report_index(saved)
+    except OSError as exc:
+        print("relatorio: indice %s" % exc, flush=True)
+    print("relatorio: " + name, flush=True)
+    return row
+
+
+def load_report_index():
+    try:
+        with open(REPORT_INDEX, encoding="utf-8") as handle:
+            rows = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if isinstance(row, dict) and REPORT_NAME.match(str(row.get("file") or "")):
+            out.append(row)
+        if len(out) >= 20:
+            break
+    return out
+
+
+def save_report_index(rows):
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    tmp = REPORT_INDEX + ".part"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(rows[:20], handle)
+    os.replace(tmp, REPORT_INDEX)
+
+
+def report_list(vehicle):
+    with vehicle.lock:
+        return [_report_public(row) for row in vehicle.reports]
+
+
+def report_file(name):
+    if not REPORT_NAME.match(name or ""):
+        return None
+    path = os.path.join(REPORT_DIR, name)
+    if not os.path.isfile(path):
+        return None
+    return path
 
 
 def add_value(vehicle, name, value):
@@ -1670,6 +2429,11 @@ def reader(link, vehicle, stop, tx, enc):
             if msgid == MSG_LOG_DATA:
                 vehicle.logs.push_data(parse_log_data(payload))
                 continue
+            if msgid in (mission.MSG_MISSION_COUNT, mission.MSG_MISSION_ITEM_INT,
+                         mission.MSG_MISSION_REQUEST, mission.MSG_MISSION_REQUEST_INT,
+                         mission.MSG_MISSION_ACK):
+                vehicle.mission.push(msgid, payload)
+                continue
             if msgid != mon.MSG_HEARTBEAT:
                 key = (msgid, payload)
                 seen = recent.get(key)
@@ -1702,6 +2466,7 @@ def reader(link, vehicle, stop, tx, enc):
                         label = mode_name(msg["mode"]) or str(msg["mode"])
                         push_message(vehicle, 6, "Modo %s" % label)
                         vehicle.recorder.write("MODE", int(msg["mode"]), "", label)
+                        note_mission_mode(vehicle, msg["mode"])
                 continue
             if msgid == mon.MSG_STATUSTEXT:
                 # Not tied to the first heartbeat. Mission Planner lists every
@@ -1710,6 +2475,8 @@ def reader(link, vehicle, stop, tx, enc):
                     with vehicle.lock:
                         push_message(vehicle, sev, text)
                         vehicle.recorder.write("STATUSTEXT", int(sev), "", text)
+                        note_mission_text(vehicle, text)
+                    maybe_write_mission_report(vehicle)
                 continue
             with vehicle.lock:
                 if vehicle.sysid is not None and sysid_rx != vehicle.sysid:
@@ -1739,9 +2506,16 @@ def reader(link, vehicle, stop, tx, enc):
                     vehicle.recorder.write(msg["name"], msg["value"], msg.get("boot_ms", ""))
             elif "values" in msg:
                 boot = msg.get("boot_ms", "")
+                lat = lon = None
                 for name, value in msg["values"]:
                     add_value(vehicle, name, value)
                     vehicle.recorder.write(name, value, boot)
+                    if name == "GPI_lat":
+                        lat = value
+                    elif name == "GPI_lon":
+                        lon = value
+                if lat is not None and lon is not None:
+                    append_track(vehicle, lat, lon)
 
 
 def take_statustext(vehicle, payload):
@@ -2421,6 +3195,10 @@ def snapshot(link, vehicle):
         messages = list(vehicle.messages)
         params = dict(vehicle.params)
         latest = {name: vehicle.latest[name] for name in READOUT if name in vehicle.latest}
+        gps = {name: vehicle.latest[name] for name in GPS_FIELDS if name in vehicle.latest}
+        for name in GPS_STATUS_FIELDS:
+            if name in vehicle.latest:
+                gps[name] = vehicle.latest[name]
         blocked = []
         reset_inputs = vehicle.reset_inputs
         vehicle.reset_inputs = False
@@ -2444,10 +3222,12 @@ def snapshot(link, vehicle):
         "messages": messages,
         "params": params,
         "latest": latest,
+        "gps": gps,
         "blocked_modes": blocked,
         "reset_inputs": reset_inputs,
         "param_epoch": param_epoch,
         "recording": recording,
+        "reports": report_list(vehicle),
     }
 
 
@@ -2482,12 +3262,290 @@ def catalog():
             "text": proc["text"],
             "sets": sets_line(proc),
         } for proc in PROCESSES],
+        "mission_commands": mission.command_catalog(),
     }
 
 
 def json_body(payload, code=200):
     body = json.dumps(payload).encode("utf-8")
     return code, "application/json", body
+
+
+# Ruas (OpenStreetMap, até o zoom 19, com cópia @2x) e satélite (Esri, até 22).
+# Acima disso a página amplia a imagem guardada.
+MAP_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map_cache")
+MAP_NATIVE_ZOOM = 19
+MAP_ZOOM_CAP = {"osm": 19, "sat": 22}
+TILE_URLS = {
+    "osm": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "sat": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+}
+TILE_UA = "GRIN-rover-hmi/1.0 (local ground station; map tile cache)"
+_tile_slots = threading.Semaphore(4)
+_tile_lock_guard = threading.Lock()
+_tile_locks = {}
+_tile_fail_lock = threading.Lock()
+_tile_fail_until = {}
+
+
+def _png_chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def _blank_png():
+    # 1x1 transparente. O navegador recebe 200 e não registra falha de rede.
+    raw = b"\x00\x00\x00\x00\x00"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+BLANK_TILE = _blank_png()
+
+
+def _grid_tile():
+    """256px pale grid, so a missing tile is never a white hole."""
+    if Image is None:
+        return BLANK_TILE
+    im = Image.new("RGB", (256, 256), (231, 239, 224))
+    pix = im.load()
+    line = (186, 198, 188)
+    edge = (120, 140, 150)
+    for i in range(0, 256, 32):
+        for t in range(256):
+            pix[i, t] = line
+            pix[t, i] = line
+    for t in range(256):
+        pix[0, t] = edge
+        pix[t, 0] = edge
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+GRID_TILE = _grid_tile()
+_RESAMPLE = None
+_RESAMPLE_FAST = None
+if Image is not None:
+    _pool = getattr(Image, "Resampling", Image)
+    _RESAMPLE = getattr(_pool, "BILINEAR", Image.BILINEAR)
+    _RESAMPLE_FAST = getattr(_pool, "NEAREST", Image.NEAREST)
+
+
+def _image_type(data):
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
+def _tile_file_lock(key):
+    with _tile_lock_guard:
+        lock = _tile_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _tile_locks[key] = lock
+        return lock
+
+
+def map_tile_file(source, z, x, y, retina=False):
+    cap = MAP_ZOOM_CAP.get(source)
+    if cap is None or z < 0 or z > cap:
+        return None
+    n = 1 << z
+    if x < 0 or y < 0 or x >= n or y >= n:
+        return None
+    name = "%d@2.img" % y if retina else "%d.img" % y
+    return os.path.join(MAP_CACHE_DIR, source, str(z), str(x), name)
+
+
+def _read_cached_tile(path):
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    if _image_type(data) is None:
+        return None
+    return data
+
+
+def _upscale_from_cache(source, z, x, y):
+    """Build this tile from a coarser one already on disk. None if nothing is saved."""
+    if Image is None or z <= 0:
+        return None
+    for shift in range(1, 7):
+        parent_z = z - shift
+        if parent_z < 0:
+            break
+        parent_x = x >> shift
+        parent_y = y >> shift
+        path = map_tile_file(source, parent_z, parent_x, parent_y)
+        if not path:
+            continue
+        data = _read_cached_tile(path)
+        if not data:
+            continue
+        try:
+            image = Image.open(io.BytesIO(data)).convert("RGBA")
+        except Exception:
+            continue
+        span = 1 << shift
+        width, height = image.size
+        cell_w = width / float(span)
+        cell_h = height / float(span)
+        ox = x - (parent_x << shift)
+        oy = y - (parent_y << shift)
+        box = (ox * cell_w, oy * cell_h, (ox + 1) * cell_w, (oy + 1) * cell_h)
+        sample = _RESAMPLE_FAST if shift > 2 else _RESAMPLE
+        crop = image.crop(box).resize((256, 256), sample)
+        out = io.BytesIO()
+        crop.save(out, format="PNG")
+        return out.getvalue()
+    return None
+
+
+def _downsample_from_cache(source, z, x, y, min_coverage=0.0):
+    """Monta este tile com as cópias mais detalhadas já salvas. None se a cobertura não chega."""
+    cap = MAP_ZOOM_CAP.get(source, MAP_NATIVE_ZOOM)
+    if Image is None or z >= cap:
+        return None
+    for shift in range(1, 5):
+        child_z = z + shift
+        if child_z > cap:
+            break
+        span = 1 << shift
+        cell = 256 // span
+        total = span * span
+        canvas = None
+        found = 0
+        sample = _RESAMPLE if shift <= 2 else _RESAMPLE_FAST
+        for dy in range(span):
+            for dx in range(span):
+                path = map_tile_file(source, child_z, (x << shift) + dx, (y << shift) + dy)
+                if not path:
+                    continue
+                data = _read_cached_tile(path)
+                if not data:
+                    continue
+                try:
+                    image = Image.open(io.BytesIO(data)).convert("RGBA")
+                except Exception:
+                    continue
+                if canvas is None:
+                    canvas = Image.new("RGBA", (256, 256), (231, 239, 224, 255))
+                canvas.paste(image.resize((cell, cell), sample), (dx * cell, dy * cell))
+                found += 1
+        if not found or found / float(total) < min_coverage:
+            continue
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+    return None
+
+
+def _download_tile(source, z, x, y, retina=False):
+    url = TILE_URLS[source].format(z=z, x=x, y=y)
+    if retina and source == "osm" and url.endswith(".png"):
+        url = url[:-4] + "@2x.png"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": TILE_UA,
+        "Accept": "image/png,image/jpeg;q=0.9,*/*;q=0.1",
+    })
+    try:
+        with _tile_slots:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = resp.read(2_000_000)
+    except Exception:
+        return None
+    if _image_type(data) is None:
+        return None
+    return data
+
+
+def _cached_overview(source, z, x, y, min_coverage):
+    scaled = _upscale_from_cache(source, z, x, y)
+    if scaled:
+        return scaled
+    return _downsample_from_cache(source, z, x, y, min_coverage)
+
+
+def _save_tile(dest, data):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+    os.replace(tmp, dest)
+
+
+def map_tile_payload(path, only_cache=False, prefer_net=False, near=False, retina=False):
+    """Devolve (bytes, content-type, hit|fetch|scale|empty). empty é uma grade, nunca erro."""
+    match = re.fullmatch(r"/maptile/(osm|sat)/(\d+)/(\d+)/(\d+)\.png", path)
+    if not match:
+        return GRID_TILE, "image/png", "empty"
+    source = match.group(1)
+    z, x, y = int(match.group(2)), int(match.group(3)), int(match.group(4))
+    dest = map_tile_file(source, z, x, y)
+    if dest is None:
+        return GRID_TILE, "image/png", "empty"
+    if retina and source == "osm":
+        sharp = map_tile_file(source, z, x, y, retina=True)
+        sharp_data = _read_cached_tile(sharp) if sharp else None
+        if sharp_data is not None:
+            return sharp_data, _image_type(sharp_data), "hit"
+        if sharp and not only_cache and not near:
+            data = _download_tile(source, z, x, y, retina=True)
+            if data:
+                try:
+                    _save_tile(sharp, data)
+                except OSError:
+                    return data, _image_type(data), "fetch"
+                return data, _image_type(data), "fetch"
+    cached = _read_cached_tile(dest)
+    if cached is not None:
+        return cached, _image_type(cached), "hit"
+    if near:
+        scaled = _cached_overview(source, z, x, y, 0.55)
+        if scaled:
+            return scaled, "image/png", "scale"
+        return GRID_TILE, "image/png", "empty"
+    if only_cache:
+        return GRID_TILE, "image/png", "empty"
+    key = (source, z, x, y)
+    now = time.time()
+    with _tile_fail_lock:
+        if now < _tile_fail_until.get(key, 0):
+            scaled = None if prefer_net else _cached_overview(source, z, x, y, 0.0)
+            if scaled:
+                return scaled, "image/png", "scale"
+            return GRID_TILE, "image/png", "empty"
+    with _tile_file_lock(key):
+        cached = _read_cached_tile(dest)
+        if cached is not None:
+            return cached, _image_type(cached), "hit"
+        data = _download_tile(source, z, x, y)
+        if data is None:
+            with _tile_fail_lock:
+                _tile_fail_until[key] = time.time() + 20
+            if not prefer_net:
+                scaled = _cached_overview(source, z, x, y, 0.0)
+                if scaled:
+                    return scaled, "image/png", "scale"
+            return GRID_TILE, "image/png", "empty"
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp = dest + ".part"
+            with open(tmp, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp, dest)
+        except OSError:
+            return data, _image_type(data), "fetch"
+        return data, _image_type(data), "fetch"
 
 
 class LocalServer(ThreadingHTTPServer):
@@ -2517,15 +3575,29 @@ def make_handler(link, vehicle, tx, enc):
         def log_message(self, fmt, *args):
             return
 
-        def _send(self, code, ctype, body, extra=None):
+        def _send(self, code, ctype, body, extra=None, cache="no-store"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             for key, value in extra or ():
                 self.send_header(key, value)
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
+
+        def _map_tile(self, path, query):
+            params = parse_qs(query)
+            only = params.get("only", ["0"])[0] == "1"
+            near = params.get("near", ["0"])[0] == "1"
+            prefer_net = params.get("fetch", ["0"])[0] == "1"
+            retina = params.get("retina", ["0"])[0] == "1"
+            body, ctype, kind = map_tile_payload(
+                path, only_cache=only, prefer_net=prefer_net, near=near, retina=retina)
+            cache = "no-store" if kind in ("empty", "scale") else "public, max-age=2592000"
+            self._send(200, ctype, body, (("X-Map-Tile", kind),), cache)
 
         def _read_json(self, limit=8000):
             try:
@@ -2541,7 +3613,28 @@ def make_handler(link, vehicle, tx, enc):
                 return None
 
         def do_GET(self):
-            path = urlparse(self.path).path
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/maptile/"):
+                self._map_tile(path, parsed.query)
+                return
+            if path == "/track":
+                try:
+                    after = int(parse_qs(parsed.query).get("after", ["0"])[0])
+                except (TypeError, ValueError):
+                    after = 0
+                code, ctype, body = json_body(track_payload(vehicle, after))
+                self._send(code, ctype, body)
+                return
+            if path.startswith("/mission/report/"):
+                file_path = report_file(path[len("/mission/report/"):])
+                if file_path is None:
+                    self._send(404, "text/plain; charset=utf-8", "relatório não encontrado".encode("utf-8"))
+                    return
+                with open(file_path, "rb") as handle:
+                    body = handle.read()
+                self._send(200, "text/html; charset=utf-8", body)
+                return
             if path == "/state":
                 code, ctype, body = json_body(snapshot(link, vehicle))
                 self._send(code, ctype, body)
@@ -2570,6 +3663,10 @@ def make_handler(link, vehicle, tx, enc):
                 code, ctype, body = json_body(sdlog_progress(vehicle))
                 self._send(code, ctype, body)
                 return
+            if path == "/mission/progress":
+                code, ctype, body = json_body(mission_progress(vehicle))
+                self._send(code, ctype, body)
+                return
             if path == "/params.parm":
                 with vehicle.lock:
                     body = parm_text(vehicle.params)
@@ -2595,6 +3692,201 @@ def make_handler(link, vehicle, tx, enc):
 
         def do_POST(self):
             path = urlparse(self.path).path
+            if path == "/track/clear":
+                self._read_json(8000)
+                gen, seq = clear_track(vehicle)
+                code, ctype, body = json_body({
+                    "ok": True, "note": "rastro apagado", "gen": gen, "after": seq,
+                })
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/download":
+                self._read_json(8000)
+                ok, note, items = mission_download(vehicle)
+                payload = {"ok": ok, "note": note}
+                if ok and items is not None:
+                    payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/new":
+                data = self._read_json(8000)
+                lat = lon = 0.0
+                if isinstance(data, dict):
+                    try:
+                        lat = float(data.get("lat") or 0)
+                        lon = float(data.get("lon") or 0)
+                    except (TypeError, ValueError):
+                        lat = lon = 0.0
+                with vehicle.lock:
+                    if (not lat and not lon) and "GPI_lat" in vehicle.latest and "GPI_lon" in vehicle.latest:
+                        lat = float(vehicle.latest["GPI_lat"])
+                        lon = float(vehicle.latest["GPI_lon"])
+                items = mission.empty_mission(lat, lon)
+                payload = {"ok": True, "note": "missão nova (home em %.6f, %.6f)" % (lat, lon)}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/analyse":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": ""}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/upload":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                ok, note = mission_upload(vehicle, items)
+                code, ctype, body = json_body({"ok": ok, "note": note}, 200 if ok else 409)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/import":
+                data = self._read_json(400000)
+                text = data.get("text") if isinstance(data, dict) else None
+                if not isinstance(text, str):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.parse_waypoints_text(text)
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": "arquivo importado: %d itens" % len(items)}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/export":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                text = mission.format_waypoints_text(items)
+                self._send(200, "text/plain; charset=utf-8", text.encode("utf-8"), (
+                    ("Content-Disposition", 'attachment; filename="mission.waypoints"'),
+                ))
+                return
+            if path == "/mission/rebuild":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                    seq = int(data.get("seq"))
+                    want = bool(data.get("reverse"))
+                    items, keep, flipped = mission.apply_reverse_toggle(items, seq, want)
+                except (TypeError, ValueError) as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                note = "trecho até o WP %d agora %s" % (keep, "de RÉ" if want else "de frente")
+                if flipped is not None:
+                    note += "; alinhamento do WP anterior virou %.0f graus" % flipped
+                payload = {"ok": True, "note": note, "selected": keep}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/heading":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                    seq = int(data.get("seq"))
+                    if seq <= 0 or seq >= len(items) or items[seq].command != mission.CMD_WAYPOINT:
+                        raise ValueError("só WAYPOINT tem rumo do próximo trecho")
+                    brg = mission.leg_bearing(items, seq)
+                    if brg is None:
+                        raise ValueError("não há waypoint depois deste")
+                    items[seq].z = round(mission.front_heading(items, seq, brg), 1)
+                except (TypeError, ValueError) as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                payload = {"ok": True, "note": "rumo do próximo trecho: %.0f graus" % items[seq].z,
+                           "selected": seq}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/fix":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                n = 0
+                info = mission.analyse(items)
+                for i, it in enumerate(items):
+                    if i and it.command == mission.CMD_WAYPOINT and not mission.is_pass(it.z) and (
+                            it.z > 360 or it.z < -1 or info[i][2]):
+                        it.z = -1.0
+                        n += 1
+                note = ("%d waypoints com Alt de altitude ou conflito viraram 'passa direto'" % n
+                        if n else "nenhum waypoint suspeito para corrigir")
+                payload = {"ok": True, "note": note}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
+            if path == "/mission/all-next":
+                data = self._read_json(400000)
+                if not isinstance(data, dict):
+                    self._send(400, "application/json", b'{"ok":false,"note":"pedido invalido"}')
+                    return
+                try:
+                    items = mission.items_from_dicts(data.get("items"))
+                except ValueError as exc:
+                    code, ctype, body = json_body({"ok": False, "note": str(exc)}, 400)
+                    self._send(code, ctype, body)
+                    return
+                n = 0
+                for i, it in enumerate(items):
+                    if i and it.command == mission.CMD_WAYPOINT and not mission.is_pass(it.z):
+                        brg = mission.leg_bearing(items, i)
+                        if brg is not None:
+                            it.z = round(mission.front_heading(items, i, brg), 1)
+                            n += 1
+                note = "%d alinhamentos agora apontam para o próximo trecho" % n
+                payload = {"ok": True, "note": note}
+                payload.update(mission.items_payload(items))
+                code, ctype, body = json_body(payload)
+                self._send(code, ctype, body)
+                return
             if path == "/storage/clear-bak":
                 self._read_json(8000)
                 ok, note = storage_bak_clear(vehicle)
@@ -2789,6 +4081,7 @@ def main(argv=None):
     enc = Encoder()
     vehicle.ftp = FtpClient(link, tx, enc)
     vehicle.logs = LogClient(link, tx, enc)
+    vehicle.mission = MissionTransfer(link, tx, enc)
     if args.csv:
         filename = log_filename(args.csv)
         if filename is None:
