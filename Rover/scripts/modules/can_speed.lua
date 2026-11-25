@@ -234,7 +234,9 @@ function M.check_slip(k, now, enabled)
     local fb = esc[i + 1]
     local sd = side[side_of(i)]
     local diff = math.abs(fb.wheel_rpm - sd.rpm_mean)
-    if enabled and k.slip > 0 and diff > k.slip then
+    -- Only ESCs that exist: an empty slot (ESC 5..8 on this rover) reads 0 rpm
+    -- and looked like a slipping wheel whenever its side passed ESC_SLIP
+    if fb.detected and enabled and k.slip > 0 and diff > k.slip then
       slip_since[i + 1] = slip_since[i + 1] or now
       if now - slip_since[i + 1] >= K.SLIP_MS then
         any = true
