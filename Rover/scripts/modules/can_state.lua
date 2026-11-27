@@ -66,6 +66,10 @@ local K = {
   -- Symmetrical optimum, h = 7. High plateau falls back to this below 60 rpm.
   TUNE_H = 7,
   TUNE_HI_RPM = 120,
+  -- ESC_HOLD acts while the mean of the two side targets is below this (wheel rpm)
+  HOLD_CMD_RPM = 2,
+  -- Largest extra current per wheel from ESC_TFF, ampere
+  TFF_MAX_A = 3,
   STAT_CAN = 1,
   STAT_SAT = 2,
   STAT_TUNE_RUN = 4,
@@ -112,8 +116,24 @@ local PARAM_SPEC = {
   { 24, "CMD_SEQ", 0 },
   { 25, "STAT", 0 },
   { 26, "LOC_I", 0.5 },
-  { 27, "FR1", 0 },
-  { 28, "FR2", 0 },
+  --[[
+    // @Param: ESC_TFF
+    // @DisplayName: Turn current feed-forward
+    // @Description: Extra current per wheel rpm of the side-to-side target difference, added at once when the mixer asks for a turn (left side gets +, right side -, or the reverse). A skid-steer needs several amperes to drag the wheels sideways; without this the wheel PI reached only about a third of the requested difference, 1.7 s late. 0 = off. Slot of the unused ESC_FR1.
+    // @Units: A/rpm
+    // @Range: 0 1
+    // @User: Advanced
+  --]]
+  { 27, "TFF", 0 },
+  --[[
+    // @Param: ESC_HOLD
+    // @DisplayName: Translation hold
+    // @Description: With no forward/back command (pivot, alignment, stop) every wheel gets this current per rpm of the measured mean speed of the two sides, against it, so the rover turns in place instead of walking backwards. Rotation is not affected. 0 = off. Slot of the unused ESC_FR2.
+    // @Units: A/rpm
+    // @Range: 0 2
+    // @User: Advanced
+  --]]
+  { 28, "HOLD", 0 },
   { 29, "FR3", 0 },
   { 30, "FR4", 0 },
   { 31, "P1", 0 },
@@ -347,6 +367,8 @@ local M = {
     gcs_hz = 0,
     pref = 0,
     stall = 0,
+    tff = 0,
+    hold = 0,
   },
   scratch = {
     sum = { 0, 0 },
@@ -354,6 +376,7 @@ local M = {
     lag = {},
     fast = {},
     raw = { 0, 0, 0, 0, 0, 0, 0, 0 },
+    hold_a = 0,
     goals = { 0, 0 },
     -- Wheel index (0-based) of the slowest / fastest wheel of each side
     lag_i = { 0, 0 },

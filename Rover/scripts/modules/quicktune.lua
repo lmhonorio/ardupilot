@@ -113,7 +113,11 @@ end
 -- first half and speed the second (or all of it when only one axis is tuned).
 -- Called every 5 s while a stage runs, also when it is not advancing, so the
 -- operator sees the tune is alive even with the same number.
+-- The line carries the seconds since the start: Mission Planner's HUD shows
+-- only the last message, and the same text twice looked like nothing was sent.
 UI.total_shown = -1
+UI.total_t = 0
+UI.start_t = 0
 function UI.total(axis, pct)
   if RTUN_MSG:get() >= 1 then
     return
@@ -125,7 +129,18 @@ function UI.total(axis, pct)
   end
   total = math.floor(total)
   UI.total_shown = total
-  gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%%", total))
+  UI.total_t = get_time()
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%% %.0fs", total, UI.total_t - UI.start_t))
+end
+
+-- Every 5 s also while paused (stick) or between the two stages
+-- (repeats the last total shown: between stages UI.last_pct is still the old stage's)
+function UI.tick()
+  if RTUN_MSG:get() >= 1 or get_time() - UI.total_t < 5 then
+    return
+  end
+  UI.total_t = get_time()
+  gcs:send_text(MAV_SEVERITY.INFO, string.format("Tune %d%% %.0fs", math.max(UI.total_shown, 0), UI.total_t - UI.start_t))
 end
 
 function UI.name(axis)
@@ -345,7 +360,8 @@ function advance_axis(axis)
   -- check for tune completion
   if prev_axis ~= nil and get_current_axis() == nil then
     if RTUN_MSG:get() < 1 then
-      UI.total_shown = -1
+      UI.total_shown = 100
+      UI.total_t = get_time()
       UI.always(MAV_SEVERITY.NOTICE, "Tune 100%%; salva em %.0fs, NAO desarme", RTUN_AUTO_SAVE:get())
     end
     UI.say(MAV_SEVERITY.NOTICE, "Tune CONCLUIDO: as 2 etapas terminaram")
@@ -631,6 +647,11 @@ function update()
     return
   end
 
+  -- progress every 5 s, also while paused, between stages and before the save
+  if quicktune_started then
+    UI.tick()
+  end
+
   -- return if we have just changed stages to give time for oscillations to subside
   if get_time() - last_axis_change < AXIS_CHANGE_DELAY then
     return
@@ -666,6 +687,8 @@ function update()
       quicktune_started = true
       local m = vehicle:get_mode()
       UI.total_shown = -1
+      UI.start_t = get_time()
+      UI.total_t = UI.start_t
       UI.always(MAV_SEVERITY.NOTICE, "Tune INICIO no %s: 2 etapas de ~10-30s", m == 9 and "Circle" or ("modo " .. m))
       UI.say(MAV_SEVERITY.NOTICE, "  sticks no centro; desarmar cancela tudo")
     end

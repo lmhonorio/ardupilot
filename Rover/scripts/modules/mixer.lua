@@ -277,7 +277,40 @@ local function autoMode()
   -- The throttle sign is preserved so MAV_CMD_DO_SET_REVERSE can be handled natively by ArduRover.
   local throttle = apThrottle(vehicle:get_control_output(THROTTLE_CONTROL_OUTPUT_CHANNEL))
   local steering = tonumber(vehicle:get_control_output(CONTROL_OUTPUT_YAW)) or 0
-  apply(throttle, steering)
+  apply(throttle * MX.approach_scale(), steering)
+end
+
+--[[
+Approach slowdown. ArduRover plans to pass a waypoint at speed toward the
+next one; it does not know the mixer stops there to align the heading (Alt
+not -1). Arriving at 0.5 m/s the rover slid 6-8 cm after the wheels stopped.
+Over the last APPROACH_M before such a waypoint the throttle is scaled down
+with the distance left, to APPROACH_MIN at the point. Pass-through waypoints
+(Alt = -1) are left alone.
+--]]
+S.APPROACH_M = 0.5
+S.APPROACH_MIN = 0.25
+S.approach_idx = nil
+S.approach_align = false
+function MX.approach_scale()
+  local idx = mission:get_current_nav_index()
+  if idx == nil then
+    return 1
+  end
+  -- The mission item is read once per waypoint, not every cycle
+  if idx ~= S.approach_idx then
+    S.approach_idx = idx
+    local item = mission:get_item(idx)
+    S.approach_align = item ~= nil and item:command() == 16 and item:z() ~= -1
+  end
+  if not S.approach_align then
+    return 1
+  end
+  local dist = vehicle:get_wp_distance_m()
+  if dist == nil or dist >= S.APPROACH_M then
+    return 1
+  end
+  return S.APPROACH_MIN + (1 - S.APPROACH_MIN) * math.max(dist, 0) / S.APPROACH_M
 end
 
 --[[

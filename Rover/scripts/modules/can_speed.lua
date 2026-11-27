@@ -218,7 +218,9 @@ local function read_gains(now)
   cached.gcs_hz = constrain(g("GCS_HZ"), 0, 20)
   cached.pref = constrain(g("PREF"), 0, 2)
   cached.stall = constrain(g("STALL"), 0, 200)
-  cached.tc = g("TC") >= 0.5
+  cached.tff = constrain(g("TFF"), 0, 1)
+  cached.hold = constrain(g("HOLD"), 0, 2)
+  cached.tc =g("TC") >= 0.5
   cached.tc_rpm = constrain(g("TC_RPM"), 2, 100)
   -- Override the effective cache only; preserve the individual saved settings.
   -- Keep logging/zero-rpm hold bits of ESC_OPT and all hard current/safety limits.
@@ -437,6 +439,14 @@ function M.run_control()
       side[s].target_rpm = goals[s]
     end
     M.traction(k, now, goals, count, lag, fast, lag_i, fast_i)
+    -- Translation hold (ESC_HOLD): with no forward/back command (pivot,
+    -- alignment, stop) the mean speed of the two sides must stay at 0. Every
+    -- wheel gets current against the measured mean, so a pivot whose weaker
+    -- side lags does not walk the rover backwards. Rotation is untouched.
+    scratch.hold_a = 0
+    if k.hold > 0 and math.abs(goals[1] + goals[2]) * 0.5 < K.HOLD_CMD_RPM then
+      scratch.hold_a = -k.hold * 0.5 * (side[1].rpm_mean + side[2].rpm_mean)
+    end
     for i = 0, K.MAX_FB - 1 do
       local fb = esc[i + 1]
       if fb.detected then
@@ -479,6 +489,20 @@ function M.run_control()
           local ref = fb.ref_rpm
           ref = prefilter(fb, ref, dt, wheel_ti(i, k) * k.pref)
           fb.current_a = wheel_pi(i, ref, dt, k)
+          -- Turn feed-forward (ESC_TFF): this side's share of the left/right
+          -- target difference as current, at once, instead of waiting for the
+          -- integrator to build the current that drags the wheels sideways
+          if k.tff > 0 then
+            -- Capped at K.TFF_MAX_A: meant for the small corrections of AUTO.
+            -- A full joystick turn (+/-ESC_RPM) put 0.2 * 160 = 32 A on top and
+            -- made the manual yaw violent.
+            local turn = 0.5 * (goals[s] - goals[3 - s])
+            local extra = constrain(k.tff * turn, -K.TFF_MAX_A, K.TFF_MAX_A)
+            fb.current_a = constrain(fb.current_a + extra, -k.max_current, k.max_current)
+          end
+          if scratch.hold_a ~= 0 then
+            fb.current_a = constrain(fb.current_a + scratch.hold_a, -k.max_current, k.max_current)
+          end
         end
         if fb.saturated then
           sd.saturated = true

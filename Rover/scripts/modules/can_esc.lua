@@ -31,7 +31,9 @@
 --              Keep at 0 for stick/mission command with no artificial ramp.
 -- ESC_BRKCUR   braking current limit, % of ESC_CUR
 -- ESC_LOC_*    unused. The old side correction was replaced by the per-wheel PI.
--- ESC_FR1..4   unused. Kept so an existing parameter table does not shift.
+-- ESC_TFF      turn feed-forward, A per wheel rpm of the left/right target
+--              difference (0 = off); slot of the old ESC_FR1
+-- ESC_FR2..4   unused. Kept so an existing parameter table does not shift.
 -- ESC_SLIP     wheel-to-side rpm difference reported as slip (0 = off)
 -- ESC_LMASK    bitmask of the ESCs (1..4) on the left side; the others are right
 --              (ESC_LMASK=9 → ESC1+ESC4 left, ESC2+ESC3 right)
